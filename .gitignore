@@ -1,0 +1,25 @@
+.DS_Store
+*.swp
+*.swo
+
+# Node / web frontend (when we get there)
+node_modules/
+dist/
+build/
+.vite/
+.next/
+
+# Rust / Tauri
+target/
+**/target/
+Cargo.lock.user
+
+# Local environment / IDE
+.env
+.env.local
+.idea/
+.vscode/settings.json
+
+# Local journal data, in case the user ever points the journal root inside the repo for testing
+test-journals/
+.test-data/
