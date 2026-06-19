@@ -177,14 +177,37 @@ Adapted from the [Prodigy RPG Components spec](https://prodigygame.atlassian.net
 
 ### Buttons
 
-- **Bottom-only drop shadow:** `0 4px 0 0 rgba(36, 20, 44, 0.5)` — the RPG signature move. Makes buttons feel physical, like a game piece. In light theme, use a maroon-tinted variant.
-- **Press collapses the shadow:** on `:active`, button translates down by the shadow offset. Visual effect of the cap being pressed flat.
-- **Three sizes:**
-  - Small (height 36px) — toolbar / inline actions
-  - Medium (height 48px, default) — most UI buttons
-  - Large (height 56px) — primary CTAs, hero buttons
+#### Sizes
+
+- **Small** — height 36px — toolbar / inline actions
+- **Medium** — height 48px (default) — most UI buttons
+- **Large** — height 56px — primary CTAs, hero buttons
+
+(The RPG game itself ships 48 / 60 / 68px buttons. We scale ours down by 12px for desktop reading distance and information density — a deliberate departure documented for future reference.)
+
+#### Drop shadow
+
+- `0 4px 0 0 rgba(36, 20, 44, 0.5)` — the RPG signature move. Makes buttons feel physical, like a game piece. In light theme, use a maroon-tinted variant.
+- On `:active`, the button translates down by the shadow offset. The element's visual height stays constant.
+- The RPG game's actual press-collapse is 2px; we use 4px for stronger tactile feedback at desktop scale.
+- **Disabled buttons have no shadow.** They render in the "stone" disabled treatment (see Variants) with the shadow removed entirely — visually pre-pressed.
+
+#### Variants
+
+Gemstone naming, ported directly from the game's `EStandardButtonType` enum:
+
+| Variant | Use | Text color |
+|---|---|---|
+| `--btn-emerald` | Confirm, save, primary positive action | White (`#FFFFFF`) |
+| `--btn-sapphire` | Primary navigation, general primary | White (`#FFFFFF`) |
+| `--btn-ruby` | **Cancel, destructive, close.** Bind Esc / Backspace to Ruby buttons (the game does this via `AccessibleClose`). | White (`#FFFFFF`) |
+| `--btn-marble` | Secondary / default neutral | Near-black (`#363636`) |
+| `--btn-stone` | **Disabled treatment for ALL variants.** Single shared disabled state, not per-color. No shadow. | Greyed |
+
+#### Labels and layout
+
 - **Sentence case labels**, strong verbs (`Save`, `Choose`, `Add note` — not `Save Changes`).
-- **Primary action goes on the right** in modal footers; dismiss on the left. RPG convention. Opposite of macOS native, but we're aligning with Prodigy.
+- **Primary action goes on the right** in modal footers; dismiss on the left. RPG convention. Opposite of macOS native, but on-brand.
 - **16px gap** between adjacent buttons.
 
 ### Spacing
@@ -218,6 +241,15 @@ Adapted from the [Prodigy RPG Components spec](https://prodigygame.atlassian.net
 - Two sizes: compact (32px height) and standard (40px height).
 - Active tab uses `--accent-primary`; inactive uses `--text-secondary`.
 - Underline indicator below the active tab, 2px, in `--accent-primary`.
+
+### Section banners
+
+Horizontal 3-slice banners across the top of panels and dialogs — a recurring RPG motif (`ui-panels/title-bar-{left,middle,right}.png`, `ui-shared/banners/banner-red-*.png`). Worth a reusable pattern in Captain's Log for week dividers, section headers in the journal window, and dialog title strips.
+
+- 3-slice composition: left cap + stretchable middle + right cap
+- Sits flush with the panel/card edge above
+- Title text in Paytone, centered or left-aligned
+- In CSS, simplest implementation is a rounded-top container with a colored top band; for higher fidelity, an SVG with explicit slice insets
 
 ### Progress indicators
 

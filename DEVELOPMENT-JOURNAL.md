@@ -139,3 +139,37 @@ Everything else (checkboxes, radios, scroll, notifications, colour, spacing) was
 - Spin up the Tauri app shell
 - Implement theme infrastructure (CSS variables for both themes + the Paytone/ABeeZee imports)
 - Build a Hello-World button with the signature bottom-drop-shadow pattern as proof of concept
+
+---
+
+## 2026-06-19 (later) — Game code investigation per Cale's suggestion
+
+Cale (Prodigy lead UX) suggested digging into the actual game code to see how UI atlases are referenced and used. Subagent investigated the RPG game source. Tech stack confirmed: **TypeScript + PixiJS + Webpack**.
+
+### Validated existing decisions
+
+- Paytone + ABeeZee fonts (confirmed in `src/ui/legacy/LegacyTextStyles.ts` and `MathStandardButtonEnums.ts`)
+- Gemstone variant naming (`emerald`, `sapphire`, `ruby`, `marble`)
+- Three button sizes
+- 4px grid (button padding, icon sizes 20/32)
+- Lucide-friendly functional icon set (game's `EStandardIcons` enum maps 1:1)
+
+### Two atlas systems coexist in the game
+
+- **Legacy** `ui-buttons` atlas — 3-slice horizontal strips (`*-left`, `*-middle`, `*-right`)
+- **New** `ui-library` atlas — single PNG per button with Pixi `sliceData` metadata (true 9-slice)
+
+The new `ui-library` system is what we target visually. Worth asking Cale next week which the UX team considers canonical for new work.
+
+### New findings, all integrated into STYLE-GUIDE.md
+
+- **Stone is the canonical disabled treatment.** Single shared state across all gem variants — not a tinted variant. No shadow. Visually pre-pressed.
+- **Ruby is for cancel/destructive only.** Esc/Backspace bind to Ruby buttons via `AccessibleClose`.
+- **Marble uses dark text (`#363636`); all other gem buttons use white.** Documented per-variant.
+- **Section banners are a recurring 3-slice motif.** Added as a reusable pattern (`title-bar-*`, `banner-red-*`).
+- **Button sizes:** game ships 48/60/68; we keep 36/48/56 as a deliberate desktop adjustment. Documented in the Buttons section.
+- **Shadow offset:** game uses 2px (active frame is 2px shorter than default); we keep 4px for stronger tactile feedback at desktop scale. Documented.
+
+### Open question for Cale (Monday)
+
+The game has both legacy 3-slice button strips AND new 9-slice single-PNG buttons in active use. Is the UX team treating `ui-library` (the new 9-slice approach) as the canonical look going forward, or are both still being maintained as parallel systems?
