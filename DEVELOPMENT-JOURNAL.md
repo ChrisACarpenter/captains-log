@@ -170,6 +170,6 @@ The new `ui-library` system is what we target visually. Worth asking Cale next w
 - **Button sizes:** game ships 48/60/68; we keep 36/48/56 as a deliberate desktop adjustment. Documented in the Buttons section.
 - **Shadow offset:** game uses 2px (active frame is 2px shorter than default); we keep 4px for stronger tactile feedback at desktop scale. Documented.
 
-### Open question for Cale (Monday)
+### Resolved: ui-library is the canonical source
 
-The game has both legacy 3-slice button strips AND new 9-slice single-PNG buttons in active use. Is the UX team treating `ui-library` (the new 9-slice approach) as the canonical look going forward, or are both still being maintained as parallel systems?
+Confirmed with Cale: **`ui-library`** (the new 9-slice approach with Pixi `sliceData` metadata) is the canonical UI system going forward. The legacy `ui-buttons` 3-slice strips are being phased out. Captain's Log targets the `ui-library` visual language for any future asset references.
