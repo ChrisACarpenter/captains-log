@@ -173,3 +173,18 @@ The new `ui-library` system is what we target visually. Worth asking Cale next w
 ### Resolved: ui-library is the canonical source
 
 Confirmed with Cale: **`ui-library`** (the new 9-slice approach with Pixi `sliceData` metadata) is the canonical UI system going forward. The legacy `ui-buttons` 3-slice strips are being phased out. Captain's Log targets the `ui-library` visual language for any future asset references.
+
+---
+
+## 2026-06-19 (later still) — STYLE-GUIDE restructure
+
+Reorganized `STYLE-GUIDE.md` so the RPG game style is clearly the primary visual language and the Prodigy corporate brand is clearly demarcated as reference-only.
+
+New structure:
+
+1. **How to use this guide** — preamble explaining the split
+2. **Shared foundations** — colors, theming, label chips, brand voice (apply across both styles)
+3. **Primary — Prodigy RPG game language** — typography, iconography, component patterns, microcopy (what we build with)
+4. **Reference — Prodigy corporate brand** — marketing-site aesthetic, with explicit "when to use" criteria and a delta table
+
+The split makes it obvious which patterns to reach for when building the app, and gives us a documented fallback for partner-facing popups or marketing-style moments without polluting the primary spec.

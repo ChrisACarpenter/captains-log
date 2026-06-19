@@ -1,8 +1,18 @@
 # Captain's Log — Style Guide
 
-Brand colors, typography, iconography, and component patterns for the app. Sourced primarily from the Prodigy RPG game's design system, with adjustments for an adult productivity context.
+## How to use this guide
+
+Captain's Log primarily uses the **Prodigy RPG game's visual language** — chunky drop-shadow buttons, Paytone One + ABeeZee fonts, gemstone-named button variants. This is what we build with for all main app UI.
+
+The **Prodigy Corporate Brand** (the marketing-site aesthetic) is documented at the end as a fallback for occasional use — partner-facing popups, marketing-style splash screens, anywhere the RPG style might feel too playful for the context. **Don't use it for the main app UI**, but it's here in case we need it.
+
+Both styles share the same color palette and the same brand voice. They differ in typography, button treatment, iconography, and overall density.
 
 ---
+
+# Shared foundations
+
+These apply across the entire app, regardless of whether a screen is in the primary RPG style or the corporate reference style.
 
 ## Colors
 
@@ -30,8 +40,6 @@ Used sparingly to add visual variety to non-primary UI moments (label chips, inf
 - **Cream** `#f7e7db` — light neutral
 - **Tan** `#c8ac92` — mid neutral
 - **Near-Black** `#2b2a28` — dark neutral
-
----
 
 ## Theming
 
@@ -77,7 +85,25 @@ Cycle order: Pink → Yellow → Sky → Lavender → Green → Dark Teal → (r
 
 Chip text color picked for contrast against the chosen accent.
 
+## Brand voice
+
+From the Prodigy brand. Applies app-wide regardless of which style is in play:
+
+- Progressive, imaginative, zealous, galvanizing
+- Sage-Outlaw persona — driven by knowledge, willing to challenge defaults
+- Conversational yet professional
+- Pronouns (we, our, you), contractions, concise / friendly / benefit-driven
+- Direct, not blunt; educational, not verbose
+
+Apply to: button labels, error messages, empty states, onboarding copy, settings descriptions, notification copy.
+
 ---
+
+# Primary style — Prodigy RPG game language
+
+**This is what you build with.** All main Captain's Log UI uses these patterns.
+
+The RPG style is sourced from the Prodigy game's design system — confirmed via the `ui-library` atlas (the canonical UI source, per Cale). Visual characteristics: chunky physical-feeling buttons, heavy display typography, gemstone-named color variants, 4px grid, sentence-case microcopy.
 
 ## Typography
 
@@ -119,8 +145,6 @@ Via Google Fonts CSS import in `index.html` or a global stylesheet:
 
 For offline-capable Tauri builds, we may self-host these later — both fonts have OFL licenses that permit redistribution.
 
----
-
 ## Iconography
 
 Two icon systems work together: a comprehensive functional library and selected decorative pieces from the RPG game assets.
@@ -133,6 +157,8 @@ For all UI controls (settings, search, save, close, calendar, etc.), use **[Luci
 - 1,300+ icons covering every functional need
 - Clean line-icon style that pairs with the RPG aesthetic without being a pixel-art clone
 - SVG-based — scales and themes via CSS
+
+The game's `EStandardIcons` set (Left, Right, Up, Down, Check, Close, Info, Spin, Shop, Build, Gift, Lock, Music, Play, Plus, Sparkle, Delete) maps cleanly to Lucide — Lucide is the right call.
 
 #### Sizes
 
@@ -155,7 +181,7 @@ Standard web sizes (not the game's pixel grid):
 
 ### Brand & decorative icons — RPG game assets
 
-For branded moments (app icon, empty states, splash, achievements), pull from the RPG game source at `/Users/chris.carpenter/PROJECTS/Prodigy/Games/RPG/prodigy-game`. Confirmed-safe assets:
+For branded moments (app icon, empty states, splash, achievements), pull from the RPG game source at `/Users/chris.carpenter/PROJECTS/Prodigy/Games/RPG/prodigy-game`. Canonical asset source: the `ui-library` atlas (per Cale). Confirmed-safe assets to draw from:
 
 | Asset | Path | Use |
 |---|---|---|
@@ -169,11 +195,9 @@ For branded moments (app icon, empty states, splash, achievements), pull from th
 
 When we use these, copy them into `app/assets/branded/` rather than hot-linking — keeps the app portable.
 
----
-
 ## Component patterns
 
-Adapted from the [Prodigy RPG Components spec](https://prodigygame.atlassian.net/wiki/spaces/GD/pages/548569098/Components). The mechanical patterns we adopt:
+Adapted from the [Prodigy RPG Components spec](https://prodigygame.atlassian.net/wiki/spaces/GD/pages/548569098/Components), and refined via direct inspection of the game source (`src/ui/MathStandardButtonEnums.ts`, `src/ui/StandardButton.ts`).
 
 ### Buttons
 
@@ -286,23 +310,9 @@ Always pair the meter with a numeric value or label (beside, below, or on top of
 - Motion / animation timings
 - Modals (beyond basic confirmation)
 
----
+## Microcopy rules
 
-## Brand voice (for UI copy)
-
-From the Prodigy brand:
-
-- Progressive, imaginative, zealous, galvanizing
-- Sage-Outlaw persona — driven by knowledge, willing to challenge defaults
-- Conversational yet professional
-- Pronouns (we, our, you), contractions, concise / friendly / benefit-driven
-- Direct, not blunt; educational, not verbose
-
-Apply this to: button labels, error messages, empty states, onboarding copy, settings descriptions, notification copy.
-
-### Microcopy rules
-
-From the Prodigy Writing for Kids guidelines (Confluence GD space), adapted for an adult professional context:
+From the Prodigy RPG game's Writing for Kids guidelines (Confluence GD space), adapted for an adult professional context:
 
 - **Consistent action verbs.** One verb per action across the app — don't mix "Save" and "Submit" for the same operation.
 - **No internal jargon.** Don't put "Tauri," "IPC," "MCP" in user-facing copy. Plain language always.
@@ -312,9 +322,52 @@ From the Prodigy Writing for Kids guidelines (Confluence GD space), adapted for 
 
 ---
 
+# Reference — Prodigy corporate brand
+
+The marketing-site aesthetic. **Not for main app UI.** Documented here for the rare moments we might need it.
+
+## When to use
+
+- Partner-facing popups (e.g., a parent or teacher landing on a Captain's Log export)
+- Marketing-style modals or splash screens (a polished launch screen, perhaps)
+- Anywhere the RPG style might feel too playful for the audience
+
+If none of these apply, use the primary RPG style.
+
+## Visual characteristics
+
+Pulled from analysis of [prodigygame.com/main-en/teachers](https://www.prodigygame.com/main-en/teachers) and the Prodigy Deck Template:
+
+- **Generous whitespace**, clear typographic hierarchy
+- **Solid filled buttons** (no chunky drop shadow — flat modern style)
+- **Modern illustrated SVG icons** (filled, simple, modern line-weight)
+- **Large headlines** followed by descriptive subtext
+- **Font family:** not extractable from the marketing site (Webflow CDN hides the CSS). Use system fonts as fallback until identified.
+
+## What stays consistent with the primary style
+
+- Colors (same Prodigy Orange, Maroon, accents, neutrals)
+- Brand voice (Sage-Outlaw — applies to both styles)
+- Sentence case
+- WCAG AA contrast requirements
+- 4px grid (for spacing)
+
+## What's different from the primary style
+
+| Aspect | Primary (RPG) | Reference (Corporate) |
+|---|---|---|
+| Button style | Chunky `0 4px 0 0` drop shadow, gemstone variants | Flat solid filled |
+| Display font | Paytone One | TBD (system fallback) |
+| Body font | ABeeZee | TBD (system fallback) |
+| Iconography | Lucide line icons + RPG assets | Filled illustrated SVGs |
+| Density | Compact, game-piece feel | Generous whitespace, marketing feel |
+
+---
+
 ## Open items
 
 - Spacing scale finalization (do we need `--space-5` for 20px, or stick to the powers-of-2 cadence?)
 - Motion / animation spec (timing functions, durations, easing curves)
 - Full component spec library (Phase 2 work, as we build screens)
 - Self-hosted font files for offline builds (currently Google Fonts CDN)
+- Corporate font identification (if we ever need the reference style)
