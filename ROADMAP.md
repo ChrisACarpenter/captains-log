@@ -81,7 +81,7 @@ The reason this app exists.
 
 ## Deferred / TBD
 
-- [ ] **Typography and component standards** — colors are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md), but font family and spacing/component standards are still TBD. Address before Phase 2 polish.
+- [ ] **Spacing, motion, and component library finalization** — colors, typography (Paytone One + ABeeZee), iconography (Lucide + selected RPG assets), and core component patterns are all locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
 - [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.
 - [ ] **Plugin / extension API** — let other tools read/write Captain's Log data.
 - [ ] **iOS/Android companion app** — flagged but probably not worth doing soon.

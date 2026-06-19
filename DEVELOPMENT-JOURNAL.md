@@ -82,3 +82,60 @@ Started the planning conversation. Captured the problem statement, feature wishl
 - Pick a Tauri project structure (single window vs multi-window setup)
 - Spin up the actual Tauri app shell inside `CaptainsLog/app/`
 - Get a "Hello, Captain's Log" window appearing in dark mode using the new color tokens
+
+---
+
+## 2026-06-19 — Brand styling deep dive
+
+Major brand/style work today. Pivoted from "match Prodigy's corporate marketing brand" to "match the Prodigy RPG game's visual language." More distinctive, more fun, better fit for a homebrew internal tool.
+
+### Sources mined
+
+- **Components spec** (Confluence GD/548569098) — buttons, dialogs, inputs, toasts, tabs, tooltips, pagination, progress meters
+- **Typography spec** (Confluence GD/548831244) — Paytone One + ABeeZee, type scale, color rules
+- **Iconography spec** (Confluence GD/659065735) — UI vs sprite icons, sizes, two-color rule
+- **RPG game source** at `Prodigy/Games/RPG/prodigy-game` — anchor, book, compass, stamps, wizard hats for branded moments
+- **UI Library page** (Confluence GD/3930357789) — deeper dive in progress via subagent at time of writing
+
+All Confluence specs are from 2019 with deactivated authors, but the systems shipped in game and the patterns are sound. We treat them as aesthetic direction, not pixel-perfect specs.
+
+### Decisions made
+
+- **Fonts: Paytone One (display) + ABeeZee (body).** Both free Google Fonts. Single biggest brand signal — instantly Prodigy.
+- **Functional icons: Lucide.** 1,300+ clean line icons via `@lucide/svelte`. Pairs with the RPG aesthetic without being pixel-art.
+- **Brand/decorative icons: selected RPG assets.** Anchor, book, compass, stamps, wizard hats. Copy into `app/assets/branded/` when we use them.
+- **All-caps prohibition dropped.** The RPG rule (no caps anywhere) was for early readers. Adults are fine with capitals where hierarchy benefits.
+- **Bottom-only drop shadow (`0 4px 0 0`) is the signature button move.** Most distinctive RPG visual language piece — port directly. On press, the shadow collapses (button translates down by the offset).
+- **Primary action on right** in dialogs (RPG convention, opposite of macOS native, but on-brand).
+- **4px spacing grid** with token scale.
+
+### STYLE-GUIDE.md updated
+
+Major rewrite. Typography, Iconography, and Component Patterns sections all filled in. Open items list shrunk to spacing finalization, motion spec, and full component library.
+
+### Still open
+
+- Spacing scale finalization
+- Motion / animation spec (timings, easing)
+- Full component spec library (Phase 2 work as we build screens)
+- Self-hosted font files for offline builds
+
+### UI Library deep dive — findings
+
+Subagent scanned the UI Library Confluence page (GD/3930357789) and all 30 descendants. Verdict: 2019 ghost-town with a 2025 sticky note on the door. Most pages are empty drafts; every substantive author is deactivated.
+
+Three patterns worth adopting (added to STYLE-GUIDE.md):
+
+- **Stepper vs Meter distinction** — 3–5 discrete named steps → stepper; continuous or longer sequences → meter
+- **Meter color semantics** — green = done, yellow = accumulation/levels, red = depletion/warnings
+- **Microcopy rules** from the Writing for Kids spec — consistent verbs, no internal jargon, short headings, sentence case
+
+Everything else (checkboxes, radios, scroll, notifications, colour, spacing) was either empty, trivially obvious, or game-asset-specific.
+
+**The RPG Confluence component library is not a source of truth going forward.** Treat what we've harvested over the last two days as the final pull. New patterns go directly into STYLE-GUIDE.md.
+
+### Next session
+
+- Spin up the Tauri app shell
+- Implement theme infrastructure (CSS variables for both themes + the Paytone/ABeeZee imports)
+- Build a Hello-World button with the signature bottom-drop-shadow pattern as proof of concept

@@ -52,4 +52,4 @@ This is a Prodigy internal product. UI copy follows Prodigy's brand voice:
 
 > Progressive, imaginative, zealous, galvanizing. Sage-Outlaw persona. Conversational yet professional. Pronouns (we, our, you), contractions, concise and friendly. Direct but not blunt, educational but not verbose.
 
-Colors are defined in [STYLE-GUIDE.md](STYLE-GUIDE.md). Dark mode is the default. Typography and component standards are still being pulled together — see ROADMAP "Deferred / TBD."
+Brand colors, typography, iconography, and component patterns are all defined in [STYLE-GUIDE.md](STYLE-GUIDE.md). Dark mode is the default. The app borrows its visual language from the Prodigy RPG game's design system (Paytone One + ABeeZee fonts, the signature 4px bottom drop shadow, etc.) rather than the corporate marketing brand.
