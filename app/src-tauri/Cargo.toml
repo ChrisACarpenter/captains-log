@@ -25,6 +25,7 @@ tokio = { version = "1.52.3", features = ["fs", "rt", "macros"] }
 async-trait = "0.1.89"
 thiserror = "2.0.18"
 chrono = { version = "0.4.45", features = ["serde"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

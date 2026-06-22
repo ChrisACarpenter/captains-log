@@ -14,10 +14,26 @@
       {
         "label": "main",
         "title": "Captain's Log",
+        "url": "/",
         "width": 1200,
         "height": 800,
         "minWidth": 800,
         "minHeight": 500
+      },
+      {
+        "label": "capture",
+        "title": "Captain's Log — Quick Capture",
+        "url": "/capture",
+        "width": 460,
+        "height": 460,
+        "minWidth": 380,
+        "minHeight": 360,
+        "resizable": true,
+        "decorations": true,
+        "visible": false,
+        "focus": true,
+        "center": true,
+        "alwaysOnTop": false
       }
     ],
     "security": {
