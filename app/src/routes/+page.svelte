@@ -88,7 +88,7 @@
       <input
         class="labels-input"
         type="text"
-        placeholder="Labels (comma-separated, # optional)"
+        placeholder="e.g. release, journal-app"
         bind:value={labelsInput}
       />
 
@@ -184,7 +184,7 @@
   .hint {
     font-size: var(--text-caption);
     line-height: var(--text-caption-lh);
-    color: var(--text-muted);
+    color: var(--text-secondary);
   }
 
   .status {
