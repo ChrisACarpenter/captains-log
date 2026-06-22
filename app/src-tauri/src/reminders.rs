@@ -18,7 +18,7 @@
 
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Datelike, Duration, Local, TimeZone, Timelike, Weekday};
+use chrono::{DateTime, Datelike, Duration, Local, Timelike, Weekday};
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
@@ -146,6 +146,7 @@ pub fn spawn_reminder_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local
