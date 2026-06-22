@@ -188,3 +188,50 @@ New structure:
 4. **Reference — Prodigy corporate brand** — marketing-site aesthetic, with explicit "when to use" criteria and a delta table
 
 The split makes it obvious which patterns to reach for when building the app, and gives us a documented fallback for partner-facing popups or marketing-style moments without polluting the primary spec.
+
+---
+
+## 2026-06-22 — Phase 1 kickoff: Tauri scaffold + Svelte frontend
+
+Started Phase 1. Environment was almost ready (Node 25, Homebrew, Xcode CLT all present) but **Rust wasn't installed** — installed via rustup, stable toolchain (rustc 1.96.0).
+
+### Scaffold
+
+Used `create-tauri-app@latest` to bootstrap inside `CaptainsLog/app/`:
+
+```
+npx -y create-tauri-app@latest app --manager npm --template svelte-ts --identifier com.prodigygame.captainslog
+```
+
+Template choice: **svelte-ts**, which gave us SvelteKit 2 + Svelte 5 + TypeScript + Vite + `adapter-static` for SPA output. Kept SvelteKit (vs raw Svelte) — its file-based routing is a clean fit for multi-window scenarios (main journal at `/`, quick capture at `/capture`, first-run at `/setup`).
+
+### npm registry override
+
+Chris's `~/.npmrc` defaults to Prodigy's AWS CodeArtifact registry (with an expired auth token). Public packages — Tauri, Svelte, Lucide — all live on the public registry. Added `app/.npmrc` to pin this project to `https://registry.npmjs.org/`. Project-level config wins over user-level. Committed.
+
+### Renames and customization
+
+Scaffold defaulted everything to `app`. Renamed to match the project:
+
+- `src-tauri/Cargo.toml` → `name = "captainslog"`, lib name `captainslog_lib`, real description and author
+- `src-tauri/src/main.rs` → calls `captainslog_lib::run()`
+- `src-tauri/src/lib.rs` → removed the placeholder `greet` command, added a module-layout comment for future code
+- `src-tauri/tauri.conf.json` → `productName: "Captain's Log"`, window title, dimensions (1200×800, min 800×500), main window labeled `"main"`
+- `package.json` → `name: "captainslog"`, description
+- `app/README.md` → replaced the scaffold's generic template with a dev guide (stack, layout, setup, troubleshooting)
+
+### Verified
+
+- `cargo check` — passes (29.5s first-time download/compile)
+- `npm run check` — passes (134 files, 0 errors, 0 warnings)
+
+### Not yet running
+
+Haven't done `npm run tauri dev` yet — first launch would open an empty Hello-World window. Saving that until after theme infrastructure lands so the first thing we see has actual Captain's Log styling.
+
+### Next
+
+- Theme infrastructure (CSS variables for dark + light, Google Fonts for Paytone + ABeeZee)
+- Storage layer in Rust (StorageBackend trait + LocalFilesystem)
+- First Tauri command (create_note)
+- Quick capture popup window
