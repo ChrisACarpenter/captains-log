@@ -1,41 +1,60 @@
 # Captain's Log — Roadmap
 
-## Current phase: 0 — Planning & Scaffolding
+## Current phase: 2 — Polish (in progress)
 
-Capturing decisions, drafting design docs, locking the architecture before any code.
+Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — first-run + settings backend, the reminder scheduler, and the dedicated capture popup window are all shipped. Remaining: journal browser (read past notes), label autocomplete, settings panel, theme toggle.
 
 ---
 
-## Phase 1 — MVP: "Can I capture a Note?"
+## Phase 0 — Planning & Scaffolding ✅
 
-The smallest useful thing. Confirms the data model and core capture flow work.
+- [x] Project folder + docs (README, ROADMAP, DESIGN, DEVELOPMENT-JOURNAL, STYLE-GUIDE, docs/*)
+- [x] Tech stack locked (Tauri 2.0 + Svelte 5 + TypeScript + SvelteKit static adapter)
+- [x] Brand styling pulled from RPG game (Paytone One + ABeeZee fonts, Lucide icons, 4px grid, signature drop-shadow button)
+- [x] Git initialized; private repo at github.com/ChrisACarpenter/captains-log
 
-- [ ] Tauri app shell that runs on macOS
-- [ ] Menu bar icon
-- [ ] Quick-capture popup (one click from menu bar → one click to submit)
-- [ ] Writes Notes into the current week's markdown file at `journals/YYYY/YYYY-Www.md`
-- [ ] Creates the weekly file (with empty Summary scaffold) if it doesn't exist
-- [ ] Basic Labels field with manual entry (no autocomplete yet)
-- [ ] Body text supports inline `#hashtags` as labels (basic parsing, no autocomplete yet)
-- [ ] All labels write to `journals/.metadata/labels.json`
-- [ ] First-run setup: name, journal location
-- [ ] Theme infrastructure (CSS variables for dark + light; dark hardcoded for v1)
+## Phase 1 — MVP: "Can I capture a Note?" ✅
 
-**Success:** I can quick-capture five Notes across a few days, and the markdown files look right.
+- [x] Tauri app shell that runs on macOS
+- [x] Menu bar icon (Lucide book template image, macOS-native dark/light adaptive)
+- [x] Quick-capture popup (one click from menu bar → one click to submit) *(dedicated popup window landed in Phase 2)*
+- [x] Writes Notes into the current week's markdown file at `journals/YYYY/YYYY-Www.md`
+- [x] Creates the weekly file (with empty Summary scaffold) if it doesn't exist
+- [x] Basic Labels field with manual entry (no autocomplete yet)
+- [x] Body text supports inline `#hashtags` as labels (basic parsing, no autocomplete yet)
+- [x] All labels write to `journals/.metadata/labels.json`
+- [x] First-run setup: name, journal location *(shipped in Phase 2 Option B)*
+- [x] Theme infrastructure (CSS variables for dark + light; dark hardcoded for v1)
+
+**Success criterion met:** captured multiple notes across an afternoon; markdown files contain frontmatter, Weekly Summary scaffold, Weekly Notes section, timestamped notes with labels and inline `#hashtags`.
 
 ## Phase 2 — Polish: "Can I actually use this daily?"
+
+### Done
+
+- [x] Dedicated quick-capture popup window (label `capture`, 460×460, hidden by default, opens via tray)
+- [x] Dock icon in addition to menu bar — both shipped (clicking either reaches the app)
+- [x] First-run wizard (4 steps: welcome → name → location → reminder)
+- [x] Two-tier settings — app-level (`~/Library/Application Support/.../app-settings.json`) + journal-level (`<root>/.metadata/settings.json`)
+- [x] Folder picker via `tauri-plugin-dialog`
+- [x] Optional weekly reminder notification (real macOS notifications via `tauri-plugin-notification`)
+- [x] In-process scheduler restart on settings save (no double-restart needed)
+- [x] RPG petbook icon as the app icon (Dock, Finder, Cmd+Tab)
+- [x] RPG scroll icon as the reminder notification icon
+
+### Remaining
 
 - [ ] Full journal window with year/week tree sidebar
 - [ ] Open and edit past Notes
 - [ ] Markdown editor with rich text rendering (CodeMirror 6 or similar)
-- [ ] Label autocomplete (JIRA-style, fed by `labels.json`)
+- [ ] Label autocomplete (JIRA-style dropdown, fed by `labels.json`)
 - [ ] Inline `#` autocomplete in body text
 - [ ] Weekly Summary UI (the 4-field Lattice template)
-- [ ] Dock icon (in addition to menu bar) — clicking opens the journal window
-- [ ] macOS system spell-check enabled
-- [ ] Settings popup: journal location, reminder on/off + time, name
-- [ ] Optional weekly reminder notification
+- [ ] Settings panel — `/settings` route to edit name, journal location, reminder *after* first-run (uses scheduler-restart-on-save we already shipped)
 - [ ] Light/dark theme toggle in Settings
+- [ ] macOS system spell-check on inputs (mostly the editor)
+- [ ] `labels.json` schema normalized to camelCase (currently `first_used`/`last_used` — predates the camelCase sweep)
+- [ ] Hot-swap `LocalFilesystem` when journal_root changes (currently still asks for restart on root change; reminder config already hot-swaps)
 
 **Success:** Captain's Log has replaced any other journaling system I was using.
 
@@ -81,7 +100,8 @@ The reason this app exists.
 
 ## Deferred / TBD
 
-- [ ] **Spacing, motion, and component library finalization** — colors, typography (Paytone One + ABeeZee), iconography (Lucide + selected RPG assets), and core component patterns are all locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
+- [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
+- [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
 - [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.
 - [ ] **Plugin / extension API** — let other tools read/write Captain's Log data.
 - [ ] **iOS/Android companion app** — flagged but probably not worth doing soon.
