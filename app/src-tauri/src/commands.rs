@@ -1,21 +1,31 @@
 //! Tauri commands exposed to the frontend.
 //!
-//! For Phase 1 we expose:
+//! Currently:
 //!   - [`create_note`] — append a Note to the current week's file
-//!   - [`read_week`] — return the raw markdown of a given (year, week), if any
+//!   - [`read_week`] — return the raw markdown of a given (year, week)
+//!   - [`get_settings`] — snapshot of app + journal settings; signals first-run
+//!   - [`complete_first_run`] — writes both settings files; restarts if root changed
 //!
 //! State: the `LocalFilesystem` storage backend is registered as managed
-//! Tauri state in `lib::run()`. Phase 1 hardcodes its root to
-//! `~/Documents/CaptainsLog/`. First-run setup (Phase 1 stretch / Phase 2)
-//! will read the chosen location from `.metadata/settings.json`.
+//! Tauri state in `lib::run()`. Its root is determined at startup from
+//! `app-settings.json` (or the default if first run).
+
+use std::path::PathBuf;
 
 use chrono::Local;
-use serde::Deserialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager, State};
 
 use crate::labels::record_note_labels;
 use crate::notes::{append_note, iso_year_week, Note};
+use crate::settings::{
+    default_journal_root, AppSettings, JournalSettings, ReminderSettings, CURRENT_VERSION,
+};
 use crate::storage::{LocalFilesystem, StorageBackend};
+
+// ---------------------------------------------------------------------------
+// create_note / read_week
+// ---------------------------------------------------------------------------
 
 /// Input payload for [`create_note`]. The frontend sends these fields as a
 /// single object argument.
@@ -29,10 +39,6 @@ pub struct CreateNoteInput {
 }
 
 /// Append a Note to the current ISO week's file.
-///
-/// The "current week" is computed from the server-side clock (the Tauri
-/// backend), not the frontend, so the timestamp is consistent regardless
-/// of any frontend clock skew.
 #[tauri::command]
 pub async fn create_note(
     storage: State<'_, LocalFilesystem>,
@@ -64,8 +70,6 @@ pub async fn create_note(
         .await
         .map_err(|e| e.to_string())?;
 
-    // Best-effort: update the label index. If this fails, we don't want to
-    // surface an error to the user — the Note itself has already been saved.
     if let Err(e) = record_note_labels(&*storage, &note, now.date_naive()).await {
         eprintln!("warning: label index update failed: {e}");
     }
@@ -73,8 +77,7 @@ pub async fn create_note(
     Ok(())
 }
 
-/// Read the raw markdown of a weekly file. Returns `None` if the file does
-/// not exist yet.
+/// Read the raw markdown of a weekly file. Returns `None` if absent.
 #[tauri::command]
 pub async fn read_week(
     storage: State<'_, LocalFilesystem>,
@@ -85,4 +88,102 @@ pub async fn read_week(
         .read_week(year, week)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/// What the frontend sees when querying settings state.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsBundle {
+    /// `true` when app-settings.json doesn't exist yet — the wizard should render.
+    pub first_run: bool,
+    /// The currently-active journal root (default on first run; configured otherwise).
+    pub journal_root: PathBuf,
+    /// The recommended default location for the first-run picker.
+    pub default_journal_root: PathBuf,
+    /// The user's display name, if set.
+    pub user_name: Option<String>,
+    /// Reminder preferences.
+    pub reminder: ReminderSettings,
+}
+
+#[tauri::command]
+pub async fn get_settings(
+    app: AppHandle,
+    storage: State<'_, LocalFilesystem>,
+) -> Result<SettingsBundle, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    let app_settings = AppSettings::load(&app_data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let journal_settings = JournalSettings::load(&*storage)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let journal_root = app_settings
+        .as_ref()
+        .map(|s| s.journal_root.clone())
+        .unwrap_or_else(|| storage.root().to_path_buf());
+
+    Ok(SettingsBundle {
+        first_run: app_settings.is_none(),
+        journal_root,
+        default_journal_root: default_journal_root(),
+        user_name: journal_settings.user_name,
+        reminder: journal_settings.reminder,
+    })
+}
+
+/// Payload sent by the first-run wizard on completion.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteFirstRunInput {
+    pub user_name: Option<String>,
+    pub journal_root: PathBuf,
+    pub reminder: ReminderSettings,
+}
+
+/// Writes both settings files. If the user picked a journal root different
+/// from the running storage's root, returns `true` so the frontend can prompt
+/// for an app restart. (`app.restart()` is unreliable across Tauri 2 minor
+/// versions, so we surface the need to the UI instead of triggering it.)
+#[tauri::command]
+pub async fn complete_first_run(
+    app: AppHandle,
+    storage: State<'_, LocalFilesystem>,
+    input: CompleteFirstRunInput,
+) -> Result<bool, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    // 1. Save app-level settings (journal_root).
+    let app_settings = AppSettings {
+        version: CURRENT_VERSION,
+        journal_root: input.journal_root.clone(),
+    };
+    app_settings
+        .save(&app_data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 2. Save journal-level settings into the CHOSEN root (which may differ
+    //    from the storage instance's root if the user picked a non-default).
+    let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
+    let journal_settings = JournalSettings {
+        version: CURRENT_VERSION,
+        user_name: input.user_name,
+        reminder: input.reminder,
+    };
+    journal_settings
+        .save(&chosen_storage)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 3. Signal whether a restart is needed.
+    let restart_needed = storage.root() != input.journal_root.as_path();
+    Ok(restart_needed)
 }

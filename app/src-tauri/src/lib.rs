@@ -1,17 +1,17 @@
 // Captain's Log — Tauri backend.
 //
 // Module layout:
-//   storage  — StorageBackend trait + LocalFilesystem impl
-//   notes    — Note struct, markdown serialization, ISO week math, append_note
-//   labels   — Label index ( .metadata/labels.json ), inline #hashtag extraction
-//   commands — Tauri command handlers exposed to the frontend
+//   storage   — StorageBackend trait + LocalFilesystem impl
+//   notes     — Note struct, markdown serialization, ISO week math, append_note
+//   labels    — Label index ( .metadata/labels.json ), inline #hashtag extraction
+//   settings  — App + journal settings, first-run state
+//   commands  — Tauri command handlers exposed to the frontend
 
 pub mod commands;
 pub mod labels;
 pub mod notes;
+pub mod settings;
 pub mod storage;
-
-use std::path::PathBuf;
 
 use tauri::{
     image::Image,
@@ -19,6 +19,7 @@ use tauri::{
     Manager,
 };
 
+use settings::default_journal_root;
 use storage::LocalFilesystem;
 
 /// PNG for the macOS menu bar template icon (book outline). Black-with-alpha
@@ -28,34 +29,35 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-template@2x.png");
 /// Label of the small quick-capture popup window. Must match `tauri.conf.json`.
 const CAPTURE_WINDOW_LABEL: &str = "capture";
 
-/// Default journal root for v1. The first-run setup flow will write a
-/// settings file pointing wherever the user picks, and a later iteration
-/// will read that here. For now we hardcode the recommended default.
-fn default_journal_root() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join("Documents").join("CaptainsLog")
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let storage = LocalFilesystem::new(default_journal_root());
-
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(storage)
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
+            commands::get_settings,
+            commands::complete_first_run,
         ])
         .setup(|app| {
+            // Determine the journal root: from app-settings.json if present,
+            // otherwise the platform default (~/Documents/CaptainsLog/).
+            // This needs the app handle for app.path(), so we do it in setup().
+            let app_data_dir = app.path().app_data_dir()?;
+            let journal_root = match tauri::async_runtime::block_on(
+                settings::AppSettings::load(&app_data_dir),
+            ) {
+                Ok(Some(s)) => s.journal_root,
+                Ok(None) => default_journal_root(),
+                Err(e) => {
+                    eprintln!("warning: failed to load app settings ({e}); using default root");
+                    default_journal_root()
+                }
+            };
+            app.manage(LocalFilesystem::new(journal_root));
+
             // Tray icon — left-click toggles the quick-capture popup window.
-            // The PNG is a black-with-alpha template image; `icon_as_template(true)`
-            // tells macOS to recolor it for the menu bar's light/dark mode.
-            //
-            // Tauri's Image type wants raw RGBA bytes, not encoded PNG — decode
-            // once at startup with the `image` crate (png feature only).
             let decoded = image::load_from_memory_with_format(
                 TRAY_ICON_PNG,
                 image::ImageFormat::Png,
