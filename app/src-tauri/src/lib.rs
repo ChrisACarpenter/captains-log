@@ -60,6 +60,10 @@ pub fn run() {
             };
             app.manage(LocalFilesystem::new(journal_root));
 
+            // Manage the reminder task handle so commands can restart the
+            // scheduler in-process when settings change.
+            app.manage(reminders::ReminderHandle::new());
+
             // Spawn the weekly reminder task if enabled. Reads journal-level
             // settings (user_name + reminder config) from the just-mounted storage.
             {
@@ -68,8 +72,10 @@ pub fn run() {
                     settings::JournalSettings::load(&*storage),
                 )
                 .unwrap_or_default();
-                reminders::spawn_reminder_task(
+                let reminder_handle = app.state::<reminders::ReminderHandle>();
+                reminders::restart_reminder_task(
                     app.handle().clone(),
+                    &reminder_handle,
                     journal_settings.reminder,
                     journal_settings.user_name,
                 );

@@ -16,13 +16,39 @@
 //!   task continues with its initial config; restart the app to apply changes
 //! - First fire on macOS will trigger the system permission prompt
 
+use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Datelike, Duration, Local, Timelike, Weekday};
+use tauri::async_runtime::JoinHandle;
 use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
 use crate::settings::ReminderSettings;
+
+/// Tauri-managed state holding the currently-running reminder task. Lets
+/// commands (e.g. `complete_first_run`, future settings-save) cancel and
+/// re-spawn the scheduler without a binary restart.
+///
+/// Internally a `std::sync::Mutex` because the lock is only ever held
+/// briefly to swap the handle — never across `.await`.
+pub struct ReminderHandle {
+    inner: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ReminderHandle {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for ReminderHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Map 0..=6 to a chrono Weekday, where 0 = Monday (ISO convention).
 /// Out-of-range values fall back to Friday — matches the default settings.
@@ -78,20 +104,38 @@ pub fn next_reminder_time(day_of_week: u8, hour: u8, minute: u8) -> DateTime<Loc
     next_reminder_time_after(Local::now(), day_of_week, hour, minute)
 }
 
-/// Spawn a long-running task that fires a weekly notification at the configured
-/// slot. Returns immediately. The task ends when the runtime shuts down.
+/// Cancel any running reminder task and start a fresh one with the new config.
 ///
-/// A no-op when `config.enabled` is false.
-pub fn spawn_reminder_task(
+/// When `config.enabled` is `false`, any existing task is still aborted —
+/// the net effect is "stop reminders." When `true`, the new task supersedes
+/// whatever was running.
+///
+/// Called from:
+/// - `lib::run::setup()` on app launch (initial spawn from disk settings)
+/// - `commands::complete_first_run` after the wizard saves new settings
+/// - future `update_settings` command (Phase 2 settings panel)
+pub fn restart_reminder_task(
     app: AppHandle,
+    handle: &ReminderHandle,
     config: ReminderSettings,
     user_name: Option<String>,
 ) {
+    let mut slot = handle
+        .inner
+        .lock()
+        .expect("reminder handle mutex was poisoned");
+
+    if let Some(old) = slot.take() {
+        old.abort();
+        println!("[reminders] previous task aborted");
+    }
+
     if !config.enabled {
+        println!("[reminders] disabled — no task scheduled");
         return;
     }
 
-    tauri::async_runtime::spawn(async move {
+    let new_handle = tauri::async_runtime::spawn(async move {
         loop {
             let next = next_reminder_time(config.day_of_week, config.hour, config.minute);
             let now = Local::now();
@@ -137,6 +181,8 @@ pub fn spawn_reminder_task(
             tokio::time::sleep(StdDuration::from_secs(60)).await;
         }
     });
+
+    *slot = Some(new_handle);
 }
 
 // ---------------------------------------------------------------------------

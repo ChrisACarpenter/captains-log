@@ -18,6 +18,7 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::labels::record_note_labels;
 use crate::notes::{append_note, iso_year_week, Note};
+use crate::reminders::{restart_reminder_task, ReminderHandle};
 use crate::settings::{
     default_journal_root, AppSettings, JournalSettings, ReminderSettings, CURRENT_VERSION,
 };
@@ -156,6 +157,7 @@ pub struct CompleteFirstRunInput {
 pub async fn complete_first_run(
     app: AppHandle,
     storage: State<'_, LocalFilesystem>,
+    reminder_handle: State<'_, ReminderHandle>,
     input: CompleteFirstRunInput,
 ) -> Result<bool, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -175,15 +177,26 @@ pub async fn complete_first_run(
     let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
     let journal_settings = JournalSettings {
         version: CURRENT_VERSION,
-        user_name: input.user_name,
-        reminder: input.reminder,
+        user_name: input.user_name.clone(),
+        reminder: input.reminder.clone(),
     };
     journal_settings
         .save(&chosen_storage)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 3. Signal whether a restart is needed.
+    // 3. Restart the reminder scheduler in-process with the new config.
+    //    This is what removes the "second restart" friction — the wizard's
+    //    reminder takes effect immediately, no binary relaunch needed.
+    restart_reminder_task(
+        app.clone(),
+        &reminder_handle,
+        input.reminder,
+        input.user_name,
+    );
+
+    // 4. Signal whether a restart is needed (for the journal_root change,
+    //    which the running LocalFilesystem can't hot-swap yet).
     let restart_needed = storage.root() != input.journal_root.as_path();
     Ok(restart_needed)
 }
