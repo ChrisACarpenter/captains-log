@@ -235,3 +235,80 @@ Haven't done `npm run tauri dev` yet — first launch would open an empty Hello-
 - Storage layer in Rust (StorageBackend trait + LocalFilesystem)
 - First Tauri command (create_note)
 - Quick capture popup window
+
+---
+
+## 2026-06-22 (later) — Phase 1 first vertical slice end-to-end
+
+Theme → storage → notes API → create_note command → capture form → tray icon. The pipeline is wired top to bottom.
+
+```
+Svelte form → invoke('create_note') → Tauri command →
+notes::append_note → LocalFilesystem → ~/Documents/CaptainsLog/YYYY/YYYY-Www.md
+```
+
+### What got built today
+
+- **Theme infrastructure** — `src/app.css` with CSS variables for dark (default) and light themes, full palette tokens, 4px spacing scale, type scale, motion tokens, Paytone One + ABeeZee imports from Google Fonts. Signature `.btn` class with bottom drop shadow and press-collapse behavior + gemstone variants (`.btn-emerald`, `.btn-sapphire`, `.btn-ruby`, `.btn-marble`).
+- **storage.rs** — `StorageBackend` trait + `LocalFilesystem` impl. Full CRUD over weekly files (`YYYY/YYYY-Www.md`) and metadata files (`.metadata/labels.json`, `.metadata/settings.json`). 15 unit tests covering roundtrips, missing files, invalid weeks, malformed filenames.
+- **notes.rs** — `Note` struct, markdown serializer matching `docs/data-format.md`, ISO 8601 week math (including cross-year boundary), weekly-file scaffold generator, `append_note`. 13 unit tests.
+- **commands.rs** — `create_note` and `read_week` Tauri commands using `tauri::State<LocalFilesystem>`.
+- **Capture form** (`src/routes/+page.svelte`) — title, body, labels fields. Cmd+Enter submit. Inline saved/error status. Styled with theme tokens.
+- **Tray icon** — left-click toggles main window visibility. Built with `tauri::tray::TrayIconBuilder` (required enabling the `tray-icon` feature on the tauri crate). Uses default app icon as placeholder.
+
+### Verified
+
+- Backend: 28/28 unit tests passing (`cargo test --lib`)
+- Frontend: `svelte-check` clean (135 files, 0 errors)
+- `cargo check` passes for the lib + tray-icon feature
+- `npm run build` produces a clean static SPA
+
+### Needs manual verification (when Chris is back at his machine)
+
+Can't run `npm run tauri dev` from here (opens an interactive window). When you're back:
+
+```bash
+cd /Users/chris.carpenter/PROJECTS/Prodigy/CaptainsLog/app
+npm run tauri dev
+```
+
+Checklist:
+1. Window opens at 1200×800, dark theme, Paytone heading
+2. Capture form: enter title + body + labels, click Submit
+3. Status shows "Captured. Note written to this week's file."
+4. Verify `~/Documents/CaptainsLog/2026/2026-W26.md` exists with frontmatter, Weekly Summary scaffold, Weekly Notes section, and the captured note
+5. Capture another note — should append to the same file
+6. Click the tray icon (top of menu bar) — window should hide
+7. Click again — window should show and focus
+8. Cmd+Enter from the capture form should also submit
+
+### Architectural decisions
+
+- **Async-throughout storage trait.** Tauri commands are async; future GoogleDrive backend will be async; `tokio::fs` is the natural fit. No regret on the boilerplate.
+- **LocalFilesystem as concrete `State<>`, not `Box<dyn StorageBackend>`.** Phase 1 has one backend; dyn dispatch adds friction with no current benefit. Refactor to a trait-object state if we ever switch backends at runtime.
+- **Frontmatter not re-written on note append.** `last_modified` is set once at file creation. Full file parsing + frontmatter updates come in Phase 2 when we actually need them.
+- **Timestamps captured server-side.** `chrono::Local::now().fixed_offset()` in the Rust process, not the frontend, so clock skew can't drift the journal.
+- **Journal root hardcoded** to `~/Documents/CaptainsLog/`. First-run setup (writing `settings.json`) will replace this in a follow-up.
+
+### Known Phase 1 limitations (Phase 2 fodder)
+
+- Single window — no dedicated quick-capture popup yet. Main window IS the capture surface for now.
+- No label autocomplete (plain comma-separated input).
+- No UI to view past notes.
+- No first-run setup flow (journal root hardcoded).
+- Default app icon used in tray (works, not on-brand). Anchor/compass template image to come.
+
+### Commits today
+
+1. `ec7e026` — Phase 1 kickoff: scaffold Tauri 2.0 + SvelteKit app
+2. `00b8ca8` — Theme infrastructure: tokens, fonts, signature button class
+3. `ab432e8` — Phase 1 core: storage layer, notes API, capture command + UI
+4. (this commit) Tray icon + journal sync
+
+### Next session
+
+- Manual end-to-end test (above checklist)
+- Split quick capture into its own popup window (label `"capture"`, route `/capture`, smaller dimensions, tray opens it instead of main window)
+- First-run setup flow (writes `settings.json`, lets user pick journal location)
+- Replace tray icon with a proper macOS template image (anchor from RPG assets, recolored to black-with-alpha)
+- Label index updates on note save (write to `.metadata/labels.json`)
