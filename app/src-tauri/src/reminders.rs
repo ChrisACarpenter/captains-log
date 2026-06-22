@@ -16,6 +16,7 @@
 //!   task continues with its initial config; restart the app to apply changes
 //! - First fire on macOS will trigger the system permission prompt
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
@@ -25,6 +26,26 @@ use tauri::AppHandle;
 use tauri_plugin_notification::NotificationExt;
 
 use crate::settings::ReminderSettings;
+
+/// PNG used as the notification icon (Prodigy RPG `ui-raster-icons/scroll.png`).
+/// Embedded into the binary so we don't depend on bundle-resource path resolution
+/// behaving differently in dev vs production builds.
+const NOTIFICATION_ICON_PNG: &[u8] = include_bytes!("../icons/notification-scroll.png");
+
+/// Write the embedded notification icon to the OS temp directory (idempotent)
+/// and return its absolute path. macOS's notification API wants a file path,
+/// not raw bytes — writing once to a stable temp location is the simplest
+/// way to give it one without fighting Tauri's `BaseDirectory` resolution.
+fn notification_icon_path() -> Option<PathBuf> {
+    let path = std::env::temp_dir().join("captainslog-notification-scroll.png");
+    if !path.exists() {
+        if let Err(e) = std::fs::write(&path, NOTIFICATION_ICON_PNG) {
+            eprintln!("[reminders] failed to write notification icon: {e}");
+            return None;
+        }
+    }
+    Some(path)
+}
 
 /// Tauri-managed state holding the currently-running reminder task. Lets
 /// commands (e.g. `complete_first_run`, future settings-save) cancel and
@@ -163,12 +184,17 @@ pub fn restart_reminder_task(
             let greeting = user_name.as_deref().unwrap_or("Captain");
             let body = format!("Time to log this week's summary, {greeting}.");
 
-            let result = app
+            let mut builder = app
                 .notification()
                 .builder()
                 .title("Captain's Log")
-                .body(&body)
-                .show();
+                .body(&body);
+
+            if let Some(icon_path) = notification_icon_path() {
+                builder = builder.icon(icon_path.to_string_lossy().into_owned());
+            }
+
+            let result = builder.show();
 
             if let Err(e) = result {
                 eprintln!("[reminders] notification failed: {e}");
