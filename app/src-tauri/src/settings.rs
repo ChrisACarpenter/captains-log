@@ -49,6 +49,7 @@ pub type SettingsResult<T> = Result<T, SettingsError>;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
     pub journal_root: PathBuf,
@@ -93,6 +94,7 @@ impl AppSettings {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReminderSettings {
     pub enabled: bool,
     /// 0 = Monday … 6 = Sunday (ISO weekday convention)
@@ -114,6 +116,7 @@ impl Default for ReminderSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JournalSettings {
     pub version: u32,
     pub user_name: Option<String>,
