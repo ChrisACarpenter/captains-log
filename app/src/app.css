@@ -1,0 +1,213 @@
+/*
+ * Captain's Log — Global Styles
+ *
+ * Single source of theme tokens for the app. See ../STYLE-GUIDE.md for the
+ * design language behind these tokens.
+ *
+ * Dark theme is :root (default). Light theme is [data-theme='light'].
+ * The data-theme attribute is set on <html> — see app.html.
+ */
+
+/* ---------- Fonts ---------- */
+@import url('https://fonts.googleapis.com/css2?family=ABeeZee:ital@0;1&family=Paytone+One&display=swap');
+
+/* ---------- Theme tokens ---------- */
+:root {
+  /* Surfaces */
+  --bg-base: #2b2a28;
+  --bg-surface: #3a3835;
+  --bg-elevated: #4a4844;
+
+  /* Text */
+  --text-primary: #f7e7db;
+  --text-secondary: #c8ac92;
+  --text-muted: rgba(200, 172, 146, 0.6);
+
+  /* Brand accents */
+  --accent-primary: #ff5c08;
+  --accent-secondary: #6c1e38;
+
+  /* Lines & focus */
+  --border-subtle: #4a4844;
+  --focus-ring: #ff5c08;
+
+  /* Button drop shadow — the RPG signature move */
+  --btn-shadow: 0 4px 0 0 rgba(36, 20, 44, 0.5);
+  --btn-shadow-offset: 4px;
+
+  /* Palette — raw brand colors (use sparingly; prefer semantic tokens above) */
+  --brand-orange: #ff5c08;
+  --brand-maroon: #6c1e38;
+
+  --accent-pink: #eb018b;
+  --accent-yellow: #fec702;
+  --accent-sky: #aae6f5;
+  --accent-lavender: #beaeed;
+  --accent-green: #95c13b;
+  --accent-teal: #235151;
+
+  --neutral-cream: #f7e7db;
+  --neutral-tan: #c8ac92;
+  --neutral-near-black: #2b2a28;
+
+  /* Spacing — 4px grid */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Radii */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+
+  /* Typography */
+  --font-display: 'Paytone One', system-ui, -apple-system, sans-serif;
+  --font-body: 'ABeeZee', system-ui, -apple-system, sans-serif;
+
+  --text-display-lg: 32px;
+  --text-display-lg-lh: 40px;
+  --text-display-sm: 24px;
+  --text-display-sm-lh: 32px;
+  --text-button: 18px;
+  --text-button-lh: 26px;
+  --text-body: 16px;
+  --text-body-lh: 24px;
+  --text-caption: 13px;
+  --text-caption-lh: 18px;
+
+  /* Motion */
+  --transition-fast: 120ms ease-out;
+  --transition-base: 180ms ease-out;
+}
+
+/* ---------- Light theme ---------- */
+[data-theme='light'] {
+  --bg-base: #f7e7db;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+
+  --text-primary: #2b2a28;
+  --text-secondary: #6c1e38;
+  --text-muted: #c8ac92;
+
+  --border-subtle: rgba(200, 172, 146, 0.3);
+
+  /* Maroon-tinted shadow on light backgrounds */
+  --btn-shadow: 0 4px 0 0 rgba(108, 30, 56, 0.4);
+}
+
+/* ---------- Base reset ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  line-height: var(--text-body-lh);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-display);
+  font-weight: normal;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+h1 {
+  font-size: var(--text-display-lg);
+  line-height: var(--text-display-lg-lh);
+}
+
+h2 {
+  font-size: var(--text-display-sm);
+  line-height: var(--text-display-sm-lh);
+}
+
+p {
+  margin: 0;
+}
+
+::selection {
+  background: var(--accent-primary);
+  color: var(--neutral-cream);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* ---------- Buttons ----------
+ * The signature RPG button. Bottom-only drop shadow that collapses
+ * on press. See STYLE-GUIDE.md for full spec.
+ *
+ * Default = Marble (neutral). Apply a variant class for color:
+ *   .btn .btn-emerald   — confirm / save
+ *   .btn .btn-sapphire  — primary navigation
+ *   .btn .btn-ruby      — cancel / destructive (Esc/Backspace bound to these later)
+ *   .btn .btn-marble    — secondary / neutral (default)
+ * Disabled state uses .btn-stone treatment (no shadow, greyed).
+ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 48px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: var(--radius-md);
+  font-family: var(--font-display);
+  font-size: var(--text-button);
+  line-height: var(--text-button-lh);
+  color: #ffffff;
+  background: var(--brand-orange);
+  box-shadow: var(--btn-shadow);
+  cursor: pointer;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.btn:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(var(--btn-shadow-offset));
+  box-shadow: none;
+}
+
+.btn:disabled {
+  background: var(--text-muted);
+  color: var(--bg-base);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* Button variants */
+.btn-emerald  { background: var(--accent-green); }
+.btn-sapphire { background: #3a82c8; }
+.btn-ruby     { background: var(--brand-maroon); }
+.btn-marble   { background: var(--neutral-cream); color: #363636; }
+
+.btn-sm { min-height: 36px; padding: 0 var(--space-3); }
+.btn-lg { min-height: 56px; padding: 0 var(--space-6); }
