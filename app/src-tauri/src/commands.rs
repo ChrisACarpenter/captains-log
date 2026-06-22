@@ -13,6 +13,7 @@ use chrono::Local;
 use serde::Deserialize;
 use tauri::State;
 
+use crate::labels::record_note_labels;
 use crate::notes::{append_note, iso_year_week, Note};
 use crate::storage::{LocalFilesystem, StorageBackend};
 
@@ -61,7 +62,15 @@ pub async fn create_note(
 
     append_note(&*storage, year, week, &note)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Best-effort: update the label index. If this fails, we don't want to
+    // surface an error to the user — the Note itself has already been saved.
+    if let Err(e) = record_note_labels(&*storage, &note, now.date_naive()).await {
+        eprintln!("warning: label index update failed: {e}");
+    }
+
+    Ok(())
 }
 
 /// Read the raw markdown of a weekly file. Returns `None` if the file does

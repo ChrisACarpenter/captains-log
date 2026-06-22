@@ -3,10 +3,11 @@
 // Module layout:
 //   storage  — StorageBackend trait + LocalFilesystem impl
 //   notes    — Note struct, markdown serialization, ISO week math, append_note
+//   labels   — Label index ( .metadata/labels.json ), inline #hashtag extraction
 //   commands — Tauri command handlers exposed to the frontend
-//   labels   — Label index management [TODO]
 
 pub mod commands;
+pub mod labels;
 pub mod notes;
 pub mod storage;
 

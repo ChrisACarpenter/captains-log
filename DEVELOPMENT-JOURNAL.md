@@ -303,7 +303,21 @@ Checklist:
 1. `ec7e026` — Phase 1 kickoff: scaffold Tauri 2.0 + SvelteKit app
 2. `00b8ca8` — Theme infrastructure: tokens, fonts, signature button class
 3. `ab432e8` — Phase 1 core: storage layer, notes API, capture command + UI
-4. (this commit) Tray icon + journal sync
+4. `e6efd98` — Tray icon + journal sync
+5. (this commit) Label index module
+
+### Label index (added after the initial Phase 1 milestone)
+
+- `labels.rs` — `LabelIndex` (versioned), `LabelEntry`, `extract_all_labels(note)` covering both the labels field and inline `#hashtags` in body, `record_note_labels` integration helper. 19 unit tests.
+- `commands.rs::create_note` now updates `.metadata/labels.json` after a successful note save (best-effort — label index failure logs a warning but doesn't fail the user's note save).
+- `storage.rs` — added `StorageError::Serde` variant for JSON serialization errors.
+- Sorts entries by `last_used` desc, then `count` desc, then alphabetical (per `docs/label-system.md`'s autocomplete ranking).
+- Corrupt `labels.json` falls back to empty + warns to stderr. Full rebuild-from-scan is Phase 2.
+
+### Test totals at end of session
+
+- Backend: **47/47 unit tests passing** (15 storage + 13 notes + 19 labels)
+- Frontend: `svelte-check` clean (135 files, 0 errors)
 
 ### Next session
 
@@ -311,4 +325,4 @@ Checklist:
 - Split quick capture into its own popup window (label `"capture"`, route `/capture`, smaller dimensions, tray opens it instead of main window)
 - First-run setup flow (writes `settings.json`, lets user pick journal location)
 - Replace tray icon with a proper macOS template image (anchor from RPG assets, recolored to black-with-alpha)
-- Label index updates on note save (write to `.metadata/labels.json`)
+- Label autocomplete UI (Phase 2) — the index is in place; the UI hooks come when we wire CodeMirror or the JIRA-style chip input

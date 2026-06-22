@@ -45,6 +45,9 @@ pub enum StorageError {
 
     #[error("invalid week number: year={year} week={week}")]
     InvalidWeek { year: u32, week: u32 },
+
+    #[error("serialization error: {0}")]
+    Serde(String),
 }
 
 /// Convenience alias used throughout the storage layer.
