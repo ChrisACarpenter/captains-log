@@ -5,11 +5,13 @@
 //   notes     — Note struct, markdown serialization, ISO week math, append_note
 //   labels    — Label index ( .metadata/labels.json ), inline #hashtag extraction
 //   settings  — App + journal settings, first-run state
+//   reminders — Weekly notification scheduler
 //   commands  — Tauri command handlers exposed to the frontend
 
 pub mod commands;
 pub mod labels;
 pub mod notes;
+pub mod reminders;
 pub mod settings;
 pub mod storage;
 
@@ -34,6 +36,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
@@ -56,6 +59,21 @@ pub fn run() {
                 }
             };
             app.manage(LocalFilesystem::new(journal_root));
+
+            // Spawn the weekly reminder task if enabled. Reads journal-level
+            // settings (user_name + reminder config) from the just-mounted storage.
+            {
+                let storage = app.state::<LocalFilesystem>();
+                let journal_settings = tauri::async_runtime::block_on(
+                    settings::JournalSettings::load(&*storage),
+                )
+                .unwrap_or_default();
+                reminders::spawn_reminder_task(
+                    app.handle().clone(),
+                    journal_settings.reminder,
+                    journal_settings.user_name,
+                );
+            }
 
             // Tray icon — left-click toggles the quick-capture popup window.
             let decoded = image::load_from_memory_with_format(
