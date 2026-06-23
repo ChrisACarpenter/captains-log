@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
   import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
@@ -330,12 +331,21 @@
       {#if editorLoading}
         <p class="muted">Loading week…</p>
       {:else}
-        <textarea
+        <!-- Wrap the editor in SpellcheckTextarea so misspelled words get
+          a wavy-red underline. The CSS variables forward the editor's
+          monospace font + 16px padding to the backdrop so the squiggles
+          line up under the real glyphs to the pixel. -->
+        <SpellcheckTextarea
           class="editor"
           bind:value={content}
-          spellcheck="true"
           placeholder="No content yet. Anything you type here saves to the weekly file."
-        ></textarea>
+          style="flex: 1; min-height: 200px;
+            --sq-padding: var(--space-4);
+            --sq-font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+            --sq-font-size: 14px;
+            --sq-line-height: 1.5;"
+        />
+
 
         <div class="actions">
           {#if saveStatus === 'error'}
@@ -518,7 +528,12 @@
     margin: var(--space-1) 0 0;
   }
 
-  .editor {
+  /* Editor lives inside <SpellcheckTextarea>. Reach across the
+   * component boundary with :global() to give the inner textarea the
+   * same monospace look + flex-grow behavior the raw textarea had.
+   * Font/padding here MUST match the --sq-* CSS variables passed to
+   * the component or the squiggles will misalign. */
+  :global(textarea.sq-textarea.editor) {
     flex: 1;
     min-height: 200px;
     width: 100%;
@@ -534,7 +549,7 @@
     transition: border-color var(--transition-fast);
   }
 
-  .editor:focus-visible {
+  :global(textarea.sq-textarea.editor:focus-visible) {
     outline: none;
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 2px var(--focus-glow);

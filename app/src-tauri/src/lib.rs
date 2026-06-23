@@ -13,6 +13,7 @@ pub mod labels;
 pub mod notes;
 pub mod reminders;
 pub mod settings;
+pub mod spellcheck;
 pub mod storage;
 
 use std::collections::HashMap;
@@ -292,6 +293,7 @@ pub fn run() {
             commands::load_capture_draft,
             commands::save_capture_draft,
             commands::clear_capture_draft,
+            spellcheck::check_spelling,
         ])
         .setup(|app| {
             // Seed NSUserDefaults so WKWebView's continuous spell-checker

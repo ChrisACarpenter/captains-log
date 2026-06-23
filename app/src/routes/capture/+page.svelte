@@ -4,6 +4,7 @@
   import { confirm } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
+  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
   import { reportDirty } from '$lib/dirty';
 
   // Submit lifecycle — distinct from auto-save status. 'submitting' is the
@@ -277,14 +278,19 @@
       bind:value={title}
     />
 
+    <!-- Body wraps in SpellcheckTextarea so misspellings get a wavy-red
+      underline. The wrapper picks up `.sq-grow` to flex-grow like the
+      original textarea did; see :global() rules at the bottom of <style>
+      that route the look to the inner textarea. -->
     <!-- svelte-ignore a11y_autofocus -->
-    <textarea
+    <SpellcheckTextarea
       class="body-input"
       placeholder="What did you just do?"
-      spellcheck="true"
       bind:value={body}
+      style="flex: 1; min-height: 100px;"
       autofocus
-    ></textarea>
+    />
+
 
     <LabelInput bind:labels placeholder="Labels (type to search, Enter to add)" />
 
@@ -336,8 +342,9 @@
     min-height: 0;
   }
 
-  input,
-  textarea {
+  /* Title input is still rendered directly by this template, so the
+   * unscoped element selector applies normally. */
+  input {
     width: 100%;
     padding: var(--space-3);
     background: var(--bg-surface);
@@ -350,14 +357,33 @@
     transition: border-color var(--transition-fast);
   }
 
-  textarea {
+  input:focus-visible {
+    outline: none;
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 0 2px var(--focus-glow);
+  }
+
+  /* Body textarea now lives inside <SpellcheckTextarea>. Reach across
+   * the component boundary with :global() to give it the same chrome
+   * the unwrapped textarea had. flex: 1 makes it fill the remaining
+   * vertical space in the form column. */
+  :global(textarea.sq-textarea.body-input) {
+    width: 100%;
     flex: 1;
     resize: none;
     min-height: 100px;
+    padding: var(--space-3);
+    background: var(--bg-surface);
+    color: var(--text-primary);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-md);
+    font-family: var(--font-body);
+    font-size: var(--text-body);
+    line-height: var(--text-body-lh);
+    transition: border-color var(--transition-fast);
   }
 
-  input:focus-visible,
-  textarea:focus-visible {
+  :global(textarea.sq-textarea.body-input:focus-visible) {
     outline: none;
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 2px var(--focus-glow);

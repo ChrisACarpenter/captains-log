@@ -52,6 +52,12 @@ mac-notification-sys = "0.6"
 # can `use` them.
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# AppKit bindings — used for NSSpellChecker access in the spellcheck
+# module. tauri-apps/tauri#7705 means WKWebView's built-in red squiggle
+# styling doesn't render in Tauri webviews, so we draw squiggles ourselves
+# from misspelled-range data returned by macOS's native checker.
+# Feature-gated to keep compile time small.
+objc2-app-kit = { version = "0.3", features = ["NSSpellChecker"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

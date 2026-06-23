@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import LabelInput from '$lib/LabelInput.svelte';
+  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
   import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
@@ -259,46 +260,42 @@
       <div class="form">
         <div class="field">
           <label for="key-acc">Key accomplishments</label>
-          <textarea
-            spellcheck="true"
+          <SpellcheckTextarea
             id="key-acc"
             bind:value={keyAccomplishments}
             placeholder="- "
-            rows="5"
-          ></textarea>
+            rows={5}
+          />
         </div>
 
         <div class="field">
           <label for="plans">Plans and priorities for next week</label>
-          <textarea
-            spellcheck="true"
+          <SpellcheckTextarea
             id="plans"
             bind:value={plansAndPriorities}
             placeholder="- "
-            rows="4"
-          ></textarea>
+            rows={4}
+          />
         </div>
 
         <div class="field">
           <label for="challenges">Challenges or roadblocks</label>
-          <textarea
-            spellcheck="true"
+          <SpellcheckTextarea
             id="challenges"
             bind:value={challengesOrRoadblocks}
             placeholder="- "
-            rows="3"
-          ></textarea>
+            rows={3}
+          />
         </div>
 
         <div class="field">
           <label for="else">Anything else on your mind</label>
-          <textarea
-            spellcheck="true"
+          <SpellcheckTextarea
             id="else"
             bind:value={anythingElse}
             placeholder=""
-            rows="3"
-          ></textarea>
+            rows={3}
+          />
         </div>
 
         <div class="field">
@@ -395,7 +392,10 @@
     color: var(--text-primary);
   }
 
-  textarea {
+  /* Textareas now live inside <SpellcheckTextarea>, so the styles must
+   * pierce the component boundary via :global(). The sq-textarea class
+   * is added by the wrapper component automatically. */
+  :global(textarea.sq-textarea) {
     width: 100%;
     padding: var(--space-3);
     background: var(--bg-surface);
@@ -410,7 +410,7 @@
     transition: border-color var(--transition-fast);
   }
 
-  textarea:focus-visible {
+  :global(textarea.sq-textarea:focus-visible) {
     outline: none;
     border-color: var(--accent-primary);
     box-shadow: 0 0 0 2px var(--focus-glow);
