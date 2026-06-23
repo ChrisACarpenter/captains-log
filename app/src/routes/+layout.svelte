@@ -1,23 +1,33 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { page } from '$app/state';
   import WeekStripe from '$lib/WeekStripe.svelte';
   import '../app.css';
 
   let { children } = $props();
+  let unlistenSettings: UnlistenFn | undefined;
 
-  // On every window mount (main, capture, settings) read the persisted theme
-  // and apply it. data-theme="dark" is already on <html> from app.html so
-  // dark stays dark; only light needs to flip the attribute.
-  onMount(async () => {
+  // Apply the persisted theme to <html>. Both windows (main + capture) run
+  // this layout, so the capture popup picks up theme changes too — via the
+  // "settings-changed" event the backend emits after update_settings saves.
+  async function applyTheme() {
     try {
       const settings = await invoke<{ theme: 'dark' | 'light' }>('get_settings');
       document.documentElement.setAttribute('data-theme', settings.theme);
     } catch {
-      // If settings can't load (e.g., first launch before storage is ready),
-      // dark remains the default — no recovery needed.
+      // First launch / pre-storage: dark stays default.
     }
+  }
+
+  onMount(async () => {
+    await applyTheme();
+    unlistenSettings = await listen('settings-changed', () => applyTheme());
+  });
+
+  onDestroy(() => {
+    if (unlistenSettings) unlistenSettings();
   });
 
   // Week stripe lives on the main window only — the quick-capture popup

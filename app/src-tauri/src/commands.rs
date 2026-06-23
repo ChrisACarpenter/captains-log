@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::labels::{record_note_labels, LabelEntry, LabelIndex};
 use crate::notes::{
@@ -337,6 +337,10 @@ pub async fn complete_first_run(
         input.user_name,
     );
 
+    // 5. Broadcast so any open window (main, capture) can re-fetch and apply
+    //    the new settings immediately — theme, reminder position, etc.
+    let _ = app.emit("settings-changed", ());
+
     // No restart needed — storage and reminder both hot-swap.
     Ok(())
 }
@@ -395,6 +399,11 @@ pub async fn update_settings(
         input.reminder,
         input.user_name,
     );
+
+    // 5. Broadcast so all windows refresh (theme on capture popup, Noot
+    //    appears/disappears on the week stripe, etc.) without waiting for
+    //    the next 60-second tick.
+    let _ = app.emit("settings-changed", ());
 
     Ok(())
 }

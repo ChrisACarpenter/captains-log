@@ -6,12 +6,15 @@
     fill   = solid orange (--stripe-fill), width = (now - monday) / 7 days
     Noot   = small mascot positioned at the reminder day/time, if enabled
 
-  Updates every minute so the fill grows smoothly across the week and the
-  reminder marker stays in sync with settings.
+  Updates every minute so the fill grows smoothly across the week. Also
+  re-fetches settings whenever the backend emits "settings-changed", so
+  toggling the reminder in Settings makes Noot appear/disappear immediately
+  instead of waiting up to a minute for the next tick.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -26,6 +29,7 @@
   let progressPct = $state(0);
   let reminderPosPct = $state<number | null>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
+  let unlistenSettings: UnlistenFn | undefined;
 
   function computeProgress() {
     const now = new Date();
@@ -45,34 +49,25 @@
     return (elapsedMs / WEEK_MS) * 100;
   }
 
-  // DEBUG — temporary diagnostics for Noot positioning. Remove once verified.
-  let debugMsg = $state('');
-
   async function refresh() {
     computeProgress();
     try {
       const s = await invoke<Settings>('get_settings');
-      if (s.reminder?.enabled) {
-        const r = s.reminder;
-        reminderPosPct = reminderPosition(r);
-        debugMsg = `now=${progressPct.toFixed(2)}% reminder=${reminderPosPct.toFixed(2)}% (d=${r.dayOfWeek} h=${r.hour} m=${r.minute})`;
-        console.log('[WeekStripe]', debugMsg, 'raw reminder:', r);
-      } else {
-        reminderPosPct = null;
-        debugMsg = `now=${progressPct.toFixed(2)}% (no reminder)`;
-      }
-    } catch (e) {
-      debugMsg = `error: ${e}`;
+      reminderPosPct = s.reminder?.enabled ? reminderPosition(s.reminder) : null;
+    } catch {
+      // Stripe still works without the reminder marker.
     }
   }
 
-  onMount(() => {
-    refresh();
+  onMount(async () => {
+    await refresh();
     timer = setInterval(refresh, 60_000);
+    unlistenSettings = await listen('settings-changed', () => refresh());
   });
 
   onDestroy(() => {
     if (timer) clearInterval(timer);
+    if (unlistenSettings) unlistenSettings();
   });
 </script>
 
@@ -85,10 +80,6 @@
       alt=""
       style="left: {reminderPosPct}%;"
     />
-  {/if}
-  <!-- DEBUG: remove once Noot position is verified -->
-  {#if debugMsg}
-    <div class="debug">{debugMsg}</div>
   {/if}
 </div>
 
@@ -112,27 +103,11 @@
 
   .noot {
     position: absolute;
-    top: 4px; /* sits just below the stripe (per Chris's preference 2026-06-23) */
+    top: 4px; /* hangs just below the stripe, into the route's top padding */
     transform: translateX(-50%);
     height: 28px;
     width: auto;
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
     pointer-events: none;
-  }
-
-  /* DEBUG overlay — remove once Noot position is verified */
-  .debug {
-    position: absolute;
-    top: 36px;
-    left: 50%;
-    transform: translateX(-50%);
-    padding: 4px 8px;
-    background: rgba(0, 0, 0, 0.85);
-    color: #fff;
-    font: 11px/14px ui-monospace, SFMono-Regular, Menlo, monospace;
-    border-radius: 4px;
-    white-space: nowrap;
-    pointer-events: none;
-    z-index: 101;
   }
 </style>
