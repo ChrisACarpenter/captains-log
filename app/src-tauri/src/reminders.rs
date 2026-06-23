@@ -409,10 +409,13 @@ fn open_summary(app: &AppHandle) {
 #[cfg(target_os = "macos")]
 pub fn check_macos_bundle() {
     const BUNDLE_ID: &str = "com.prodigygame.captainslog";
-    if let Err(e) = mac_notification_sys::set_application(BUNDLE_ID) {
-        eprintln!("[reminders] bundle-id swizzle failed: {e}");
-    }
     if is_running_in_app_bundle() {
+        // Real .app — the on-disk Info.plist provides CFBundleIdentifier and
+        // the codesign identifier matches it (via tauri.conf.json's
+        // bundle.macOS.signingIdentity). DO NOT swizzle here — adding a
+        // second source of bundle-id truth inside a properly-signed bundle
+        // causes usernotificationsd to silently deny auth requests as a
+        // suspected bundle-id spoof.
         match mac_usernotifications::check_bundle() {
             Ok(()) => println!("[reminders] bundled .app — UN path active ({BUNDLE_ID})"),
             Err(e) => eprintln!(
@@ -420,6 +423,13 @@ pub fn check_macos_bundle() {
             ),
         }
     } else {
+        // Bare binary (`tauri dev`) — NSUserNotification fallback. The
+        // swizzle is required here so NSBundle.bundleIdentifier returns
+        // something for the NS API path. UN is NOT used in this mode (it
+        // would abort the process), so the swizzle can't interfere with it.
+        if let Err(e) = mac_notification_sys::set_application(BUNDLE_ID) {
+            eprintln!("[reminders] bundle-id swizzle failed: {e}");
+        }
         println!(
             "[reminders] bare binary (dev mode) — NSUserNotification fallback. \
              For full UN experience build a debug bundle: \

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist additions auto-merged into the bundled Info.plist by Tauri's
+  macOS bundler. Tauri provides CFBundleIdentifier / CFBundleVersion / etc.
+  from tauri.conf.json; this file is for keys Tauri doesn't manage.
+
+  NSUserNotificationAlertStyle = alert
+    Persistent-style notifications, which keep the Write/OK action buttons
+    on-screen until the user clicks one. Pairs with interruption_level:
+    Active in reminders.rs to keep the reminder visible. "banner" is the
+    macOS default — it auto-dismisses after a few seconds and hides the
+    action buttons behind a hover-to-reveal interaction.
+
+  ITSAppUsesNonExemptEncryption = false
+    Declares we don't use non-exempt encryption. Silences notarization
+    warnings; we ship plain HTTPS via the system networking stack, which
+    is exempt.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+</dict>
+</plist>
