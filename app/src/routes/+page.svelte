@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
 
@@ -242,6 +243,10 @@
           <strong>book icon in your menu bar</strong> (top of the screen).
         </p>
       </div>
+
+      <div class="main-actions">
+        <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
+      </div>
     </section>
   </main>
 {/if}
@@ -444,5 +449,11 @@
 
   .card p:last-child {
     margin-bottom: 0;
+  }
+
+  .main-actions {
+    margin-top: var(--space-6);
+    display: flex;
+    justify-content: flex-end;
   }
 </style>

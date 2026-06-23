@@ -20,7 +20,7 @@ use crate::labels::record_note_labels;
 use crate::notes::{append_note, iso_year_week, Note};
 use crate::reminders::{restart_reminder_task, ReminderHandle};
 use crate::settings::{
-    default_journal_root, AppSettings, JournalSettings, ReminderSettings, CURRENT_VERSION,
+    default_journal_root, AppSettings, JournalSettings, ReminderSettings, Theme, CURRENT_VERSION,
 };
 use crate::storage::{LocalFilesystem, StorageBackend};
 
@@ -109,6 +109,8 @@ pub struct SettingsBundle {
     pub user_name: Option<String>,
     /// Reminder preferences.
     pub reminder: ReminderSettings,
+    /// Active theme — defaults to Dark, persisted in app-settings.json.
+    pub theme: Theme,
 }
 
 #[tauri::command]
@@ -130,6 +132,7 @@ pub async fn get_settings(
         .as_ref()
         .map(|s| s.journal_root.clone())
         .unwrap_or_else(|| storage.root().to_path_buf());
+    let theme = app_settings.as_ref().map(|s| s.theme).unwrap_or_default();
 
     Ok(SettingsBundle {
         first_run: app_settings.is_none(),
@@ -137,6 +140,7 @@ pub async fn get_settings(
         default_journal_root: default_journal_root(),
         user_name: journal_settings.user_name,
         reminder: journal_settings.reminder,
+        theme,
     })
 }
 
@@ -147,6 +151,19 @@ pub struct CompleteFirstRunInput {
     pub user_name: Option<String>,
     pub journal_root: PathBuf,
     pub reminder: ReminderSettings,
+}
+
+/// Payload sent by the post-first-run settings panel.
+///
+/// All fields are present (not optional) because the settings panel always
+/// renders a full form — partial updates aren't a thing yet.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSettingsInput {
+    pub user_name: Option<String>,
+    pub journal_root: PathBuf,
+    pub reminder: ReminderSettings,
+    pub theme: Theme,
 }
 
 /// Writes both settings files. If the user picked a journal root different
@@ -162,10 +179,11 @@ pub async fn complete_first_run(
 ) -> Result<bool, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
-    // 1. Save app-level settings (journal_root).
+    // 1. Save app-level settings (journal_root + theme — theme defaults to Dark on first run).
     let app_settings = AppSettings {
         version: CURRENT_VERSION,
         journal_root: input.journal_root.clone(),
+        theme: Theme::default(),
     };
     app_settings
         .save(&app_data_dir)
@@ -197,6 +215,59 @@ pub async fn complete_first_run(
 
     // 4. Signal whether a restart is needed (for the journal_root change,
     //    which the running LocalFilesystem can't hot-swap yet).
+    let restart_needed = storage.root() != input.journal_root.as_path();
+    Ok(restart_needed)
+}
+
+/// Save edits from the post-first-run settings panel.
+///
+/// Like `complete_first_run`, but also handles `theme` (which the wizard
+/// doesn't expose) and is meant for use after the user has already onboarded.
+/// Returns `true` if a restart is needed because the journal root changed —
+/// the reminder + theme always apply in-process without restart.
+#[tauri::command]
+pub async fn update_settings(
+    app: AppHandle,
+    storage: State<'_, LocalFilesystem>,
+    reminder_handle: State<'_, ReminderHandle>,
+    input: UpdateSettingsInput,
+) -> Result<bool, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    // 1. App-level (journal_root + theme).
+    let app_settings = AppSettings {
+        version: CURRENT_VERSION,
+        journal_root: input.journal_root.clone(),
+        theme: input.theme,
+    };
+    app_settings
+        .save(&app_data_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 2. Journal-level (write to the chosen root so a root change still lands
+    //    the new prefs at the right place).
+    let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
+    let journal_settings = JournalSettings {
+        version: CURRENT_VERSION,
+        user_name: input.user_name.clone(),
+        reminder: input.reminder.clone(),
+    };
+    journal_settings
+        .save(&chosen_storage)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 3. Restart the reminder scheduler with the new config (no-op if disabled).
+    restart_reminder_task(
+        app.clone(),
+        &reminder_handle,
+        input.reminder,
+        input.user_name,
+    );
+
+    // 4. Restart needed only when journal_root changed — theme + reminder
+    //    apply in-process.
     let restart_needed = storage.root() != input.journal_root.as_path();
     Ok(restart_needed)
 }

@@ -48,11 +48,34 @@ pub type SettingsResult<T> = Result<T, SettingsError>;
 // AppSettings — per-machine
 // ---------------------------------------------------------------------------
 
+/// Theme preference, persisted in `AppSettings`.
+///
+/// Dark is the default and matches `:root` in `app.css`. Light is opt-in
+/// via the settings panel and applied by setting `data-theme="light"` on
+/// the `<html>` element.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    Dark,
+    Light,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Theme::Dark
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub version: u32,
     pub journal_root: PathBuf,
+
+    /// Theme preference. Optional in the JSON so older app-settings.json files
+    /// (written before this field existed) still parse — they get the default.
+    #[serde(default)]
+    pub theme: Theme,
 }
 
 impl AppSettings {
@@ -191,12 +214,41 @@ mod tests {
         let original = AppSettings {
             version: CURRENT_VERSION,
             journal_root: PathBuf::from("/Users/test/MyJournal"),
+            theme: Theme::Light,
         };
         original.save(&app_dir).await.unwrap();
 
         let loaded = AppSettings::load(&app_dir).await.unwrap().unwrap();
         assert_eq!(loaded.version, original.version);
         assert_eq!(loaded.journal_root, original.journal_root);
+        assert_eq!(loaded.theme, Theme::Light);
+    }
+
+    #[tokio::test]
+    async fn app_settings_legacy_without_theme_defaults_to_dark() {
+        // Simulate an app-settings.json written before the theme field existed
+        // (e.g. anyone who ran the wizard on yesterday's build). Serde's
+        // #[default] should fill it in transparently.
+        let dir = TempDir::new().unwrap();
+        let app_dir = dir.path();
+        let legacy_json = r#"{
+          "version": 1,
+          "journalRoot": "/Users/test/MyJournal"
+        }"#;
+        tokio::fs::write(app_dir.join(APP_SETTINGS_FILENAME), legacy_json)
+            .await
+            .unwrap();
+
+        let loaded = AppSettings::load(app_dir).await.unwrap().unwrap();
+        assert_eq!(loaded.theme, Theme::Dark);
+    }
+
+    #[test]
+    fn theme_serializes_lowercase() {
+        let json = serde_json::to_string(&Theme::Dark).unwrap();
+        assert_eq!(json, r#""dark""#);
+        let json = serde_json::to_string(&Theme::Light).unwrap();
+        assert_eq!(json, r#""light""#);
     }
 
     #[tokio::test]
