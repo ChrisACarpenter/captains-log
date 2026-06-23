@@ -40,6 +40,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
+            commands::get_labels,
             commands::get_settings,
             commands::complete_first_run,
             commands::update_settings,

@@ -32,16 +32,25 @@ const METADATA_FILE: &str = "labels.json";
 const CURRENT_VERSION: u32 = 1;
 
 /// One label's aggregate stats.
+///
+/// Serialized in camelCase to match the rest of the IPC + on-disk JSON.
+/// The serde `alias` annotations keep older `labels.json` files (which used
+/// snake_case `first_used` / `last_used` from the initial release) parseable
+/// — they get normalized to camelCase on the next write.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct LabelEntry {
     pub name: String,
     pub count: u32,
+    #[serde(alias = "first_used")]
     pub first_used: NaiveDate,
+    #[serde(alias = "last_used")]
     pub last_used: NaiveDate,
 }
 
 /// The on-disk label index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct LabelIndex {
     pub version: u32,
     pub labels: Vec<LabelEntry>,
@@ -390,6 +399,49 @@ mod tests {
 
         let read = LabelIndex::load(&backend).await.unwrap();
         assert_eq!(read, idx);
+    }
+
+    #[tokio::test]
+    async fn legacy_snake_case_labels_json_still_loads() {
+        // Simulate a labels.json written before the camelCase sweep — the
+        // serde aliases on first_used/last_used should let it parse, and
+        // the next save will normalize to camelCase.
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let legacy_json = r#"{
+          "version": 1,
+          "labels": [
+            {
+              "name": "release",
+              "count": 47,
+              "first_used": "2026-01-12",
+              "last_used": "2026-06-18"
+            }
+          ]
+        }"#;
+        backend.write_metadata("labels.json", legacy_json).await.unwrap();
+
+        let idx = LabelIndex::load(&backend).await.unwrap();
+        assert_eq!(idx.labels.len(), 1);
+        assert_eq!(idx.labels[0].name, "release");
+        assert_eq!(idx.labels[0].count, 47);
+        assert_eq!(idx.labels[0].first_used, ymd(2026, 1, 12));
+        assert_eq!(idx.labels[0].last_used, ymd(2026, 6, 18));
+    }
+
+    #[test]
+    fn label_entry_serializes_camel_case() {
+        let entry = LabelEntry {
+            name: "release".to_string(),
+            count: 1,
+            first_used: ymd(2026, 6, 22),
+            last_used: ymd(2026, 6, 22),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"firstUsed\""), "expected camelCase firstUsed in {json}");
+        assert!(json.contains("\"lastUsed\""), "expected camelCase lastUsed in {json}");
+        assert!(!json.contains("first_used"));
+        assert!(!json.contains("last_used"));
     }
 
     #[tokio::test]

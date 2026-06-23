@@ -16,7 +16,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
-use crate::labels::record_note_labels;
+use crate::labels::{record_note_labels, LabelEntry, LabelIndex};
 use crate::notes::{append_note, iso_year_week, Note};
 use crate::reminders::{restart_reminder_task, ReminderHandle};
 use crate::settings::{
@@ -89,6 +89,18 @@ pub async fn read_week(
         .read_week(year, week)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Return all known labels with their usage stats, sorted by recent-then-frequent
+/// (the autocomplete ranking from `docs/label-system.md`).
+#[tauri::command]
+pub async fn get_labels(
+    storage: State<'_, LocalFilesystem>,
+) -> Result<Vec<LabelEntry>, String> {
+    let index = LabelIndex::load(&*storage)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(index.labels)
 }
 
 // ---------------------------------------------------------------------------

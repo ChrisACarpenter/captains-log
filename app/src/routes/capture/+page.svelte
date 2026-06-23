@@ -1,12 +1,13 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import LabelInput from '$lib/LabelInput.svelte';
 
   type Status = 'idle' | 'saving' | 'saved' | 'error';
 
   let title = $state('');
   let body = $state('');
-  let labelsInput = $state('');
+  let labels = $state<string[]>([]);
   let status = $state<Status>('idle');
   let errorMessage = $state('');
 
@@ -17,11 +18,6 @@
 
     status = 'saving';
     errorMessage = '';
-
-    const labels = labelsInput
-      .split(/[\s,]+/)
-      .map((l) => l.trim().replace(/^#+/, ''))
-      .filter((l) => l.length > 0);
 
     try {
       await invoke('create_note', {
@@ -35,7 +31,7 @@
       // Reset form and close popup. The user can re-open it via the tray for the next capture.
       title = '';
       body = '';
-      labelsInput = '';
+      labels = [];
       status = 'idle';
       await getCurrentWindow().hide();
     } catch (err) {
@@ -82,12 +78,7 @@
       autofocus
     ></textarea>
 
-    <input
-      class="labels-input"
-      type="text"
-      placeholder="e.g. release, journal-app"
-      bind:value={labelsInput}
-    />
+    <LabelInput bind:labels placeholder="Labels (type to search, Enter to add)" />
 
     <div class="actions">
       <button
@@ -95,7 +86,7 @@
         class="btn btn-emerald"
         disabled={status === 'saving' || (!body.trim() && !title.trim())}
       >
-        {status === 'saving' ? 'Saving...' : 'Submit'}
+        {status === 'saving' ? 'Saving…' : 'Submit'}
       </button>
       <span class="hint">⌘↩ submit · esc close</span>
     </div>
