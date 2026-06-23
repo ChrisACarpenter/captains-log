@@ -392,6 +392,8 @@ dependencies = [
  "image",
  "mac-notification-sys",
  "mac-usernotifications",
+ "objc2",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",

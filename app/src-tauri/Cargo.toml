@@ -44,6 +44,14 @@ mac-usernotifications = "=0.3.1"
 # We do NOT use this crate's notification-sending code; that path remains UN.
 # TODO: replace with a small objc2-runtime swizzle of our own to drop the dep.
 mac-notification-sys = "0.6"
+# Used at startup to seed NSUserDefaults flags that enable WKWebView's
+# continuous spell-checking. macOS doesn't expose a Tauri-level toggle for
+# this; the flags must be set via NSUserDefaults before any web view
+# initializes its editor. Both crates are already in the dep tree
+# transitively via mac-usernotifications — we declare them directly so we
+# can `use` them.
+objc2 = "0.6"
+objc2-foundation = "0.3"
 
 [dev-dependencies]
 tempfile = "3.27.0"

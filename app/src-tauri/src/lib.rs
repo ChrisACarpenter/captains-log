@@ -21,7 +21,7 @@ use std::sync::Mutex;
 use serde::Deserialize;
 use tauri::{
     image::Image,
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
+    menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, WindowEvent,
 };
@@ -178,6 +178,55 @@ fn handle_main_close(app: &AppHandle) {
     hide_main_to_accessory(app);
 }
 
+/// Seed NSUserDefaults flags that gate WKWebView's continuous spell-checker.
+/// macOS apps that ship without a standard Edit > Spelling and Grammar menu
+/// (Tauri's PredefinedMenuItem set doesn't include one — muda issue) have no
+/// UI for users to toggle these flags, and the underlying defaults are FALSE
+/// on a fresh bundle. WKWebView checks `WebContinuousSpellCheckingEnabled`
+/// on each editable focus; with it false, `spellcheck="true"` on the HTML
+/// element is a no-op and the right-click "Show Spelling and Grammar"
+/// affordance never appears.
+///
+/// We call standardUserDefaults().setBool(true, forKey:) for the three
+/// relevant keys — this both writes to disk AND updates NSUserDefaults's
+/// in-memory cache, so WKWebView sees the new value when the user first
+/// focuses an editable.
+///
+/// Idempotent; safe to call on every launch. Wrapped in unsafe FFI because
+/// objc2 needs explicit unsafe for `msg_send!`.
+///
+/// (Known follow-up: tauri-apps/tauri#7705 reports that even with the
+/// checker active, the red squiggle underlines don't render inside Tauri's
+/// WKWebView. The right-click suggestion menu is the authoritative
+/// behavior; squiggles are out of scope.)
+#[cfg(target_os = "macos")]
+fn seed_spellcheck_defaults() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSString, NSUserDefaults};
+
+    // SAFETY: NSUserDefaults.standardUserDefaults returns a singleton
+    // shared instance; setBool:forKey: is a safe Obj-C method. NSString
+    // construction is the standard objc2-foundation idiom.
+    unsafe {
+        let defaults = NSUserDefaults::standardUserDefaults();
+        for key in [
+            "WebContinuousSpellCheckingEnabled",
+            "WebGrammarCheckingEnabled",
+            "NSAllowContinuousSpellChecking",
+        ] {
+            let ns_key = NSString::from_str(key);
+            let _: () = msg_send![&*defaults, setBool: true, forKey: &*ns_key];
+        }
+        // Touch _ so the AnyObject import isn't flagged as unused even
+        // if some objc2 version trims the msg_send return path.
+        let _ = std::ptr::null::<AnyObject>();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn seed_spellcheck_defaults() {}
+
 /// English list-join with serial comma: ["A"] → "A"; ["A","B"] → "A and B";
 /// ["A","B","C"] → "A, B, and C". Only used in the quit-confirmation copy.
 fn format_dirty_list(items: &[String]) -> String {
@@ -245,6 +294,12 @@ pub fn run() {
             commands::clear_capture_draft,
         ])
         .setup(|app| {
+            // Seed NSUserDefaults so WKWebView's continuous spell-checker
+            // turns on for editable HTML controls. Without this AND a real
+            // Edit menu (installed below), spellcheck="true" on the
+            // textareas is a no-op. Idempotent — runs every launch.
+            seed_spellcheck_defaults();
+
             // Cross-window dirty registry — read at quit time by try_quit.
             app.manage(DirtyRegistry::default());
 
@@ -290,21 +345,82 @@ pub fn run() {
                 );
             }
 
-            // Install the macOS app menu with our custom Quit item. This
-            // replaces the default app menu (disabled via
-            // `enable_macos_default_menu(false)` on the Builder). The Quit
-            // item shares its id (`QUIT_MENU_ID`) with the tray menu's Quit,
-            // so both Cmd+Q and tray-menu Quit funnel through `try_quit`.
+            // Install a complete macOS app menu — replaces Tauri's default
+            // (disabled via `.enable_macos_default_menu(false)` on the
+            // Builder above). Four submenus:
+            //
+            //   1. Captain's Log — About, Services, Hide* (×3), and our
+            //      custom Quit item that flows through `try_quit`. CRITICAL:
+            //      do NOT use `PredefinedMenuItem::quit` here — it dispatches
+            //      AppKit's `terminate:` directly and bypasses our
+            //      unsaved-work guard.
+            //   2. Edit — Undo/Redo + Cut/Copy/Paste/SelectAll. Restores the
+            //      standard editing shortcuts AND, more importantly, gives
+            //      AppKit the responder-chain context it expects to surface
+            //      the spell-check context menu on right-click in editable
+            //      controls. Without an Edit menu, WKWebView's right-click
+            //      "Show Spelling and Grammar" affordance never appears.
+            //   3. View — Toggle full screen.
+            //   4. Window — Minimize / Zoom / Bring All to Front /
+            //      Close Window. Note Cmd+W closes the focused window but
+            //      doesn't quit; Cmd+Q stays the only path through the
+            //      unsaved-work guard.
+            //
+            // PredefinedMenuItem variants come from muda (re-exported via
+            // tauri::menu) and dispatch to the standard AppKit responder
+            // selectors — we never need to intercept them.
             #[cfg(target_os = "macos")]
             {
-                let quit_item = MenuItemBuilder::new("Quit Captain's Log")
+                let quit_item = MenuItemBuilder::new("Quit Captain\u{2019}s Log")
                     .id(QUIT_MENU_ID)
                     .accelerator("CmdOrCtrl+Q")
                     .build(app)?;
-                let app_submenu = SubmenuBuilder::new(app, "Captain's Log")
+
+                let app_submenu = SubmenuBuilder::new(app, "Captain\u{2019}s Log")
+                    .item(&PredefinedMenuItem::about(
+                        app,
+                        None,
+                        Some(AboutMetadata::default()),
+                    )?)
+                    .separator()
+                    .item(&PredefinedMenuItem::services(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::hide(app, None)?)
+                    .item(&PredefinedMenuItem::hide_others(app, None)?)
+                    .item(&PredefinedMenuItem::show_all(app, None)?)
+                    .separator()
                     .item(&quit_item)
                     .build()?;
-                let app_menu = MenuBuilder::new(app).item(&app_submenu).build()?;
+
+                let edit_submenu = SubmenuBuilder::new(app, "Edit")
+                    .item(&PredefinedMenuItem::undo(app, None)?)
+                    .item(&PredefinedMenuItem::redo(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::cut(app, None)?)
+                    .item(&PredefinedMenuItem::copy(app, None)?)
+                    .item(&PredefinedMenuItem::paste(app, None)?)
+                    .item(&PredefinedMenuItem::select_all(app, None)?)
+                    .build()?;
+
+                let view_submenu = SubmenuBuilder::new(app, "View")
+                    .item(&PredefinedMenuItem::fullscreen(app, None)?)
+                    .build()?;
+
+                let window_submenu = SubmenuBuilder::new(app, "Window")
+                    .item(&PredefinedMenuItem::minimize(app, None)?)
+                    .item(&PredefinedMenuItem::maximize(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::bring_all_to_front(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::close_window(app, None)?)
+                    .build()?;
+
+                let app_menu = MenuBuilder::new(app)
+                    .item(&app_submenu)
+                    .item(&edit_submenu)
+                    .item(&view_submenu)
+                    .item(&window_submenu)
+                    .build()?;
                 app.set_menu(app_menu)?;
             }
 
