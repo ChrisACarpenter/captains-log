@@ -104,6 +104,7 @@ The reason this app exists.
 
 ## Deferred / TBD
 
+- [ ] **Weekly reminder notification action buttons (OK / Write)** — `tauri-plugin-notification` 2.3.3 only exposes `NotificationAction` / `ActionType` under `#[cfg(mobile)]`; the desktop builder accepts title/body/icon/sound only. Path forward when this becomes a priority: (a) wait for upstream plugin to expose desktop actions, or (b) integrate `mac-notification-sys` directly for macOS-specific button support (`MainButton::SingleAction` + `other_button` + a blocking response loop). Today's notification still surfaces and lands in Notification Center; it just can't carry buttons or a click-to-summary handler.
 - [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
 - [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
 - [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.
