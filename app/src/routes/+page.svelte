@@ -221,7 +221,7 @@
   </main>
 {:else}
   <!-- ============================== Normal mode ============================== -->
-  <main>
+  <main class="normal">
     <section class="welcome">
       <h1>{settings?.userName ? `Welcome back, ${settings.userName}.` : "Captain's Log"}</h1>
       <p class="lead">Weekly work journal that makes self-reviews painless.</p>
@@ -243,15 +243,20 @@
       </div>
 
       <div class="main-actions">
-        <button class="btn btn-marble" onclick={() => goto('/journal')}>
-          Browse journal
-        </button>
         <button class="btn btn-emerald" onclick={() => goto('/summary')}>
           Write Weekly Summary
+        </button>
+        <button class="btn btn-marble" onclick={() => goto('/journal')}>
+          Browse Journal
         </button>
         <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
       </div>
     </section>
+
+    <footer class="brand-footer" aria-hidden="true">
+      <img src="/branded/prodigy-mark.png" class="brand-mark" alt="" />
+      <span class="brand-wordmark">Prodigy</span>
+    </footer>
   </main>
 {/if}
 
@@ -269,9 +274,42 @@
     align-items: center;
   }
 
+  /* Normal mode stacks the welcome content + brand footer vertically so
+   * the footer can pin to the bottom of the viewport. */
+  main.normal {
+    flex-direction: column;
+    align-items: center;
+  }
+
   .welcome {
     max-width: 560px;
     width: 100%;
+  }
+
+  /* Prodigy brand mark — sits at the bottom of the home screen, centered.
+   * Subtle (50% opacity) so it's a quiet presence, not a logo lockup. */
+  .brand-footer {
+    margin-top: auto;
+    padding-top: var(--space-12);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+    opacity: 0.55;
+    pointer-events: none;
+  }
+
+  .brand-mark {
+    height: 48px;
+    width: auto;
+  }
+
+  .brand-wordmark {
+    font-family: var(--font-display);
+    font-size: 28px;
+    line-height: 1;
+    color: var(--accent-primary);
+    letter-spacing: 0.01em;
   }
 
   /* ---- Wizard ---- */
