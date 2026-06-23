@@ -27,17 +27,14 @@ export function reportDirty(key: DirtyKey, what: string): (dirty: boolean) => vo
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   function flush(dirty: boolean) {
-    // DEBUG: temporary — remove once flow 7 is verified.
-    console.log(`[dirty] flush key=${key} dirty=${dirty}`);
-    invoke('set_window_dirty', { key, entry: { dirty, what } }).catch((e) => {
-      console.error(`[dirty] invoke set_window_dirty failed:`, e);
+    invoke('set_window_dirty', { key, entry: { dirty, what } }).catch(() => {
+      // Backend not reachable — silently drop. This only happens during
+      // shutdown or in tests; the quit guard is best-effort either way.
     });
   }
 
   function push(dirty: boolean) {
     if (dirty === lastDirty) return;
-    // DEBUG: temporary.
-    console.log(`[dirty] push key=${key} dirty=${dirty} (was ${lastDirty})`);
     lastDirty = dirty;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => flush(dirty), 150);

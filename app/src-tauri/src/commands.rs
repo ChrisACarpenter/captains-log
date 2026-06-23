@@ -452,11 +452,6 @@ pub fn set_window_dirty(
     key: String,
     entry: DirtyEntry,
 ) {
-    // DEBUG: temporary — remove once flow 7 is verified.
-    eprintln!(
-        "[dirty] set_window_dirty key={key} dirty={} what={:?}",
-        entry.dirty, entry.what
-    );
     let mut guard = registry.0.lock().expect("dirty registry mutex poisoned");
     guard.insert(key, entry);
 }

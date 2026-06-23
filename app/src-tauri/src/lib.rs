@@ -163,23 +163,13 @@ fn handle_main_close(app: &AppHandle) {
     let capture_dirty = {
         let registry = app.state::<DirtyRegistry>();
         let guard = registry.0.lock().expect("dirty registry mutex poisoned");
-        // DEBUG: temporary — remove once flow 7 is verified.
-        eprintln!(
-            "[dirty] handle_main_close: registry snapshot = {:?}",
-            guard
-                .iter()
-                .map(|(k, v)| (k.clone(), v.dirty))
-                .collect::<Vec<_>>()
-        );
         guard.get("capture").map(|e| e.dirty).unwrap_or(false)
     };
 
     if !capture_dirty {
-        eprintln!("[dirty] handle_main_close: capture clean, hiding without prompt");
         hide_main_to_accessory(app);
         return;
     }
-    eprintln!("[dirty] handle_main_close: capture dirty, prompting");
 
     // Capture popup has unsaved text. The user is choosing to hide the
     // main window; we ask whether to also discard the in-flight capture.

@@ -16,12 +16,20 @@
     lastUpdated: string | null;
   };
 
+  // Auto-save status. 'idle' = settled, no unsaved edits and no recent save
+  // to advertise. 'dirty' = typed something, debounce timer pending. 'saving'
+  // = invoke in-flight. 'saved' = last write succeeded; show the timestamp.
+  // 'error' = last save threw; show retry affordance.
+  type SaveStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+
+  const AUTOSAVE_DEBOUNCE_MS = 1500;
+
   // State
   let loading = $state(true);
   let loadError = $state('');
-  let saving = $state(false);
-  let saveError = $state('');
-  let savedFlash = $state(false);
+  let saveStatus = $state<SaveStatus>('idle');
+  let saveErrorMessage = $state('');
+  let lastSavedAt = $state<Date | null>(null);
 
   let yearWeek = $state<YearWeek | null>(null);
   let lastUpdated = $state<string | null>(null);
@@ -54,6 +62,29 @@
 
   const pushDirty = reportDirty('summary', 'the weekly summary');
   $effect(() => pushDirty(isDirty));
+
+  // Auto-save: debounced 1.5s after typing stops. We touch the inputs
+  // explicitly so this effect re-runs on every keystroke (a derived bool
+  // like isDirty wouldn't, since once it's true it stays true).
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    keyAccomplishments;
+    plansAndPriorities;
+    challengesOrRoadblocks;
+    anythingElse;
+    labels;
+
+    if (loading) return;
+    if (!isDirty) return;
+
+    saveStatus = 'dirty';
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      void saveNow();
+    }, AUTOSAVE_DEBOUNCE_MS);
+  });
 
   // Computed week range label like "Week of June 22 – June 28, 2026"
   const weekLabel = $derived.by(() => {
@@ -107,52 +138,95 @@
     }
   });
 
-  async function save() {
+  /// Save the current form to disk. Used by both the auto-save debounce and
+  /// the manual Save button + Cmd+S / Cmd+↩ shortcuts. Idempotent: returns
+  /// early if a save is already in flight.
+  async function saveNow() {
     if (!yearWeek) return;
-    saveError = '';
-    saving = true;
+    if (saveStatus === 'saving') return;
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+
+    // Capture what we're about to save BEFORE the await so we can re-baseline
+    // the snapshot to exactly what hit disk — even if the user keeps typing
+    // during the await, isDirty will correctly flip back to true after this
+    // save completes and trigger another auto-save.
+    const committed = {
+      keyAccomplishments,
+      plansAndPriorities,
+      challengesOrRoadblocks,
+      anythingElse,
+      labelsJson: JSON.stringify(labels),
+      labels: [...labels]
+    };
+
+    saveStatus = 'saving';
+    saveErrorMessage = '';
     try {
       await invoke('update_weekly_summary', {
         input: {
           year: yearWeek.year,
           week: yearWeek.week,
-          keyAccomplishments,
-          plansAndPriorities,
-          challengesOrRoadblocks,
-          anythingElse,
-          labels
+          keyAccomplishments: committed.keyAccomplishments,
+          plansAndPriorities: committed.plansAndPriorities,
+          challengesOrRoadblocks: committed.challengesOrRoadblocks,
+          anythingElse: committed.anythingElse,
+          labels: committed.labels
         }
       });
-      // Refresh last_updated from server (avoids drift from frontend clock).
+      // Refresh lastUpdated from the server (avoids drift from frontend clock).
       const refreshed = await invoke<WeeklySummary>('get_weekly_summary', {
         year: yearWeek.year,
         week: yearWeek.week
       });
       lastUpdated = refreshed.lastUpdated;
-      // Re-baseline the snapshot so the form is no longer dirty.
       snapshot = {
-        keyAccomplishments,
-        plansAndPriorities,
-        challengesOrRoadblocks,
-        anythingElse,
-        labelsJson: JSON.stringify(labels)
+        keyAccomplishments: committed.keyAccomplishments,
+        plansAndPriorities: committed.plansAndPriorities,
+        challengesOrRoadblocks: committed.challengesOrRoadblocks,
+        anythingElse: committed.anythingElse,
+        labelsJson: committed.labelsJson
       };
-      savedFlash = true;
-      setTimeout(() => (savedFlash = false), 2000);
+      lastSavedAt = new Date();
+      saveStatus = 'saved';
     } catch (err) {
-      saveError = String(err);
-    } finally {
-      saving = false;
+      saveErrorMessage = String(err);
+      saveStatus = 'error';
     }
   }
+
+  /// Format a Date as "2:34 PM" — used in the "Saved HH:MM" status line.
+  function formatTime(d: Date): string {
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+  }
+
+  // The save-status indicator text. Empty string when idle (don't clutter
+  // the actions row with "nothing to report").
+  const saveStatusText = $derived.by(() => {
+    switch (saveStatus) {
+      case 'saving':
+        return 'Saving…';
+      case 'dirty':
+        return 'Unsaved changes';
+      case 'saved':
+        return lastSavedAt ? `Saved ${formatTime(lastSavedAt)}` : 'Saved';
+      case 'error':
+        return "Couldn't save — retry?";
+      case 'idle':
+      default:
+        return '';
+    }
+  });
 
   function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      save();
+      void saveNow();
     } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
-      save();
+      void saveNow();
     }
   }
 </script>
@@ -228,20 +302,36 @@
           <LabelInput bind:labels placeholder="Tag this week (type to search, Enter to add)" />
         </div>
 
-        {#if saveError}
-          <p class="status status-error">Error: {saveError}</p>
-        {/if}
-        {#if savedFlash}
-          <p class="status status-success">Saved ✓</p>
+        {#if saveStatus === 'error' && saveErrorMessage}
+          <p class="status status-error">Error: {saveErrorMessage}</p>
         {/if}
 
         <div class="actions">
-          <button class="btn btn-marble" onclick={() => goto('/')} disabled={saving}>
+          <button
+            class="btn btn-marble"
+            onclick={() => goto('/')}
+            disabled={saveStatus === 'saving'}
+          >
             Done
           </button>
-          <span class="hint">⌘S / ⌘↩ to save</span>
-          <button class="btn btn-emerald btn-save" onclick={save} disabled={saving}>
-            {saving ? 'Saving…' : 'Save'}
+          <!-- Auto-save status indicator. Click-to-retry when in error state. -->
+          {#if saveStatus === 'error'}
+            <button
+              type="button"
+              class="save-status is-error"
+              onclick={() => void saveNow()}
+            >
+              {saveStatusText}
+            </button>
+          {:else}
+            <span class="save-status is-{saveStatus}">{saveStatusText}</span>
+          {/if}
+          <button
+            class="btn btn-emerald btn-save"
+            onclick={() => void saveNow()}
+            disabled={saveStatus === 'saving'}
+          >
+            {saveStatus === 'saving' ? 'Saving…' : 'Save'}
           </button>
         </div>
       </div>
@@ -333,10 +423,39 @@
     margin-left: auto;
   }
 
-  .hint {
+  /* Auto-save indicator — small italic text between Done and Save. State is
+   * encoded via .is-{idle|dirty|saving|saved|error} modifier classes. Stays
+   * intentionally subtle so it doesn't compete with the form content. */
+  .save-status {
     font-size: var(--text-caption);
     line-height: var(--text-caption-lh);
+    font-style: italic;
+    color: var(--text-muted);
+    /* The error variant is a button — strip default button chrome so it
+     * matches the span variants except for the underline + cursor. */
+    background: none;
+    border: none;
+    padding: 0;
+    font-family: var(--font-body);
+  }
+
+  .save-status.is-saving,
+  .save-status.is-dirty {
     color: var(--text-secondary);
+  }
+
+  .save-status.is-saved {
+    color: var(--text-muted);
+  }
+
+  .save-status.is-error {
+    color: var(--accent-pink);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+
+  .save-status.is-error:hover {
+    filter: brightness(1.1);
   }
 
   .status {
