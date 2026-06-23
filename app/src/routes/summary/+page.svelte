@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import LabelInput from '$lib/LabelInput.svelte';
+  import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
 
@@ -30,6 +31,29 @@
   let challengesOrRoadblocks = $state('');
   let anythingElse = $state('');
   let labels = $state<string[]>([]);
+
+  // Last-saved snapshot. We compare the live form values against this to
+  // know whether the route is "dirty" (has unsaved edits). Reset on load
+  // and after a successful save.
+  let snapshot = $state({
+    keyAccomplishments: '',
+    plansAndPriorities: '',
+    challengesOrRoadblocks: '',
+    anythingElse: '',
+    labelsJson: '[]'
+  });
+
+  const isDirty = $derived(
+    !loading &&
+      (keyAccomplishments !== snapshot.keyAccomplishments ||
+        plansAndPriorities !== snapshot.plansAndPriorities ||
+        challengesOrRoadblocks !== snapshot.challengesOrRoadblocks ||
+        anythingElse !== snapshot.anythingElse ||
+        JSON.stringify(labels) !== snapshot.labelsJson)
+  );
+
+  const pushDirty = reportDirty('summary', 'the weekly summary');
+  $effect(() => pushDirty(isDirty));
 
   // Computed week range label like "Week of June 22 – June 28, 2026"
   const weekLabel = $derived.by(() => {
@@ -68,6 +92,14 @@
       anythingElse = s.anythingElse;
       labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
+      // Baseline the dirty-comparison snapshot to what we just loaded.
+      snapshot = {
+        keyAccomplishments,
+        plansAndPriorities,
+        challengesOrRoadblocks,
+        anythingElse,
+        labelsJson: JSON.stringify(labels)
+      };
     } catch (err) {
       loadError = String(err);
     } finally {
@@ -97,6 +129,14 @@
         week: yearWeek.week
       });
       lastUpdated = refreshed.lastUpdated;
+      // Re-baseline the snapshot so the form is no longer dirty.
+      snapshot = {
+        keyAccomplishments,
+        plansAndPriorities,
+        challengesOrRoadblocks,
+        anythingElse,
+        labelsJson: JSON.stringify(labels)
+      };
       savedFlash = true;
       setTimeout(() => (savedFlash = false), 2000);
     } catch (err) {

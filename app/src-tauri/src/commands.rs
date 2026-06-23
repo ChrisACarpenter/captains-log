@@ -24,6 +24,7 @@ use crate::notes::{
 use crate::reminders::{
     request_notification_authorization, restart_reminder_task, ReminderHandle,
 };
+use crate::{DirtyEntry, DirtyRegistry};
 use crate::settings::{
     default_journal_root, AppSettings, JournalSettings, ReminderSettings, Theme, CURRENT_VERSION,
 };
@@ -431,4 +432,26 @@ pub async fn update_settings(
     let _ = app.emit("settings-changed", ());
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dirty registry
+// ---------------------------------------------------------------------------
+
+/// Publish the dirty state of a frontend surface into the backend's
+/// DirtyRegistry. Called by `app/src/lib/dirty.ts` from /summary and the
+/// capture popup whenever their form state diverges from the last-saved
+/// snapshot. Read at quit time by `try_quit` (in lib.rs).
+///
+/// `key` is a stable namespace string ("summary", "capture"). Adding more
+/// dirty surfaces later doesn't require Rust changes — just call with a
+/// new key from the frontend.
+#[tauri::command]
+pub fn set_window_dirty(
+    registry: State<'_, DirtyRegistry>,
+    key: String,
+    entry: DirtyEntry,
+) {
+    let mut guard = registry.0.lock().expect("dirty registry mutex poisoned");
+    guard.insert(key, entry);
 }

@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
+  import { reportDirty } from '$lib/dirty';
 
   type Status = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -10,6 +13,32 @@
   let labels = $state<string[]>([]);
   let status = $state<Status>('idle');
   let errorMessage = $state('');
+
+  // Cross-window dirty tracking: capture state persists across hide (the
+  // window isn't destroyed by Esc or the red-X — see lib.rs capture
+  // close handler), so a "hidden but dirty" popup must still count as
+  // unsaved work for the quit confirmation guard.
+  const pushDirty = reportDirty('capture', 'the quick-capture note');
+  $effect(() => {
+    pushDirty(title.trim() !== '' || body.trim() !== '' || labels.length > 0);
+  });
+
+  // Reset on demand. Fired by the backend's main-close handler when the
+  // user picks "Hide and discard" — we drop the typed text so the popup
+  // doesn't reappear with stale content next time it's shown.
+  let unlistenReset: UnlistenFn | undefined;
+  onMount(async () => {
+    unlistenReset = await listen('capture-reset', () => {
+      title = '';
+      body = '';
+      labels = [];
+      status = 'idle';
+      errorMessage = '';
+    });
+  });
+  onDestroy(() => {
+    if (unlistenReset) unlistenReset();
+  });
 
   async function submit() {
     if (!body.trim() && !title.trim()) {
@@ -51,9 +80,10 @@
       submit();
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      // Esc dismisses the popup. If there's unsaved content, we still close
-      // (the popup re-opens with empty form on next tray click — explicit draft
-      // persistence is a Phase 3 polish item).
+      // Esc dismisses the popup but DOES preserve typed text. Svelte state
+      // persists across hide because the window is hidden, not destroyed
+      // (see lib.rs capture close handler). Unsaved text remains in the
+      // dirty registry — try_quit will warn before exit.
       await getCurrentWindow().hide();
     }
   }

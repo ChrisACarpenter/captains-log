@@ -23,7 +23,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Datelike, Duration, Local, Timelike, Weekday};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
@@ -381,13 +381,15 @@ async fn fire_notification(
 /// Bring the main window to the foreground and tell the frontend to navigate
 /// to the weekly summary page. Called when the user clicks the notification's
 /// "Write" action button (or the default action, same intent).
+///
+/// Routes through `crate::restore_main_window` which flips the activation
+/// policy back to `.Regular` BEFORE showing — so a notification click while
+/// the app is in `.Accessory` mode brings the Dock icon back. Without this,
+/// the main window would appear but the app would stay Dock-less and
+/// Cmd-Tab-invisible.
 #[cfg(target_os = "macos")]
 fn open_summary(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    crate::restore_main_window(app);
     let _ = app.emit("open-summary", ());
 }
 
