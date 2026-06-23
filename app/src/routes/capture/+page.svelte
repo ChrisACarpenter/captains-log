@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { confirm } from '@tauri-apps/plugin-dialog';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
@@ -207,6 +208,39 @@
     void submit();
   }
 
+  /// Discard the in-flight note: confirm with the user, then cancel any
+  /// pending auto-save, delete the draft file, clear form state, and hide
+  /// the popup. Destructive — there's no undo, hence the confirmation.
+  async function discardWithConfirm() {
+    if (!hasContent) return;
+    const ok = await confirm(
+      "This will delete the in-progress note and clear the saved draft. " +
+        "This can't be undone.",
+      {
+        title: 'Discard this note?',
+        kind: 'warning',
+        okLabel: 'Discard',
+        cancelLabel: 'Keep editing'
+      }
+    );
+    if (!ok) return;
+
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    await invoke('clear_capture_draft').catch(() => {});
+    resetFormState();
+    await getCurrentWindow().hide();
+  }
+
+  // True when there's anything worth keeping/discarding. Mirrors the
+  // Submit-button enablement check so both actions are disabled on an
+  // empty form.
+  const hasContent = $derived(
+    title.trim() !== '' || body.trim() !== '' || labels.length > 0
+  );
+
   async function handleKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
@@ -264,14 +298,24 @@
     <LabelInput bind:labels placeholder="Labels (type to search, Enter to add)" />
 
     <div class="actions">
+      <!-- Ruby (destructive) on the left, primary Emerald on the right —
+        per the RPG style-guide convention for modal footers. -->
+      <button
+        type="button"
+        class="btn btn-ruby"
+        onclick={() => void discardWithConfirm()}
+        disabled={!hasContent || submitStatus === 'submitting'}
+      >
+        Discard
+      </button>
+      <span class="hint">⌘↩ submit · esc close</span>
       <button
         type="submit"
-        class="btn btn-emerald"
-        disabled={submitStatus === 'submitting' || (!body.trim() && !title.trim())}
+        class="btn btn-emerald btn-submit"
+        disabled={submitStatus === 'submitting' || !hasContent}
       >
         {submitStatus === 'submitting' ? 'Submitting…' : 'Submit'}
       </button>
-      <span class="hint">⌘↩ submit · esc close</span>
     </div>
 
     <!-- Draft auto-save indicator — kept subtle in this tight popup. -->
@@ -338,6 +382,12 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
+  }
+
+  /* Pushes Submit to the right; hint absorbs the remaining horizontal
+   * space between Discard (left) and Submit (right). */
+  .btn-submit {
+    margin-left: auto;
   }
 
   .hint {
