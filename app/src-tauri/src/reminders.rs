@@ -324,20 +324,35 @@ fn open_summary(app: &AppHandle) {
     let _ = app.emit("open-summary", ());
 }
 
-/// Verify the process has a CFBundleIdentifier — UNUserNotificationCenter
-/// requires this. Tauri's `embed_plist` injects the Info.plist into the
-/// `__TEXT,__info_plist` section of the dev binary on macOS, so this should
-/// succeed in both `npm run tauri dev` and bundled `.app` builds.
+/// Install the NSBundle.bundleIdentifier swizzle and verify UN can read it.
+///
+/// Tauri's `embed_plist` injects CFBundleName + CFBundleVersion into the dev
+/// binary's `__TEXT,__info_plist` section, but NOT CFBundleIdentifier — so
+/// `NSBundle.mainBundle.bundleIdentifier` returns nil in `tauri dev`,
+/// `UNUserNotificationCenter` rejects every call, and reminders silently
+/// fail. `mac_notification_sys::set_application` swizzles
+/// `-[NSBundle bundleIdentifier]` to return our id when called on the main
+/// bundle; that's enough for UN's `check_bundle()` (just an NSBundle call)
+/// and for the auth + send paths that read the same property internally.
+///
+/// In bundled `.app` builds (`tauri build`) the swizzle is a no-op because
+/// the real Info.plist already has the identifier — set_application replaces
+/// the same value with itself.
 ///
 /// No-op on other platforms.
 #[cfg(target_os = "macos")]
 pub fn check_macos_bundle() {
+    const BUNDLE_ID: &str = "com.prodigygame.captainslog";
+    if let Err(e) = mac_notification_sys::set_application(BUNDLE_ID) {
+        eprintln!("[reminders] bundle-id swizzle failed: {e}");
+        // Don't return — check_bundle below will report a clearer error
+        // if NSBundle still has nothing to return.
+    }
     match mac_usernotifications::check_bundle() {
-        Ok(()) => println!("[reminders] macOS bundle identity OK"),
+        Ok(()) => println!("[reminders] macOS bundle identity OK ({BUNDLE_ID})"),
         Err(e) => eprintln!(
             "[reminders] macOS bundle check failed: {e}. \
-             UNUserNotificationCenter likely won't deliver notifications. \
-             If running via `tauri dev`, make sure Tauri's embed_plist is enabled."
+             UNUserNotificationCenter likely won't deliver notifications."
         ),
     }
 }

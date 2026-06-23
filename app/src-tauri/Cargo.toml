@@ -33,11 +33,17 @@ tauri-plugin-window-state = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 # Modern macOS notification API — wraps UNUserNotificationCenter and gives us
 # action buttons that render reliably (the deprecated NSUserNotification API
-# behind mac-notification-sys auto-dismisses banners and renders buttons
-# inconsistently on modern macOS). Same author (hoodie) as notify-rust /
-# mac-notification-sys, so this is the intended successor.
+# auto-dismisses banners and renders buttons inconsistently on modern macOS).
 # Used by reminders::fire_notification on macOS only.
 mac-usernotifications = "=0.3.1"
+# Kept ONLY for its `set_application` helper, which swizzles
+# NSBundle.mainBundle.bundleIdentifier to return our bundle id in dev mode.
+# Tauri's embed_plist injects CFBundleName/Version into the dev binary but
+# NOT CFBundleIdentifier — without this swizzle, UNUserNotificationCenter's
+# `check_bundle()` (and therefore request_auth/send) fails in `tauri dev`.
+# We do NOT use this crate's notification-sending code; that path remains UN.
+# TODO: replace with a small objc2-runtime swizzle of our own to drop the dep.
+mac-notification-sys = "0.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"

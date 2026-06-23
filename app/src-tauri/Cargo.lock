@@ -390,6 +390,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "image",
+ "mac-notification-sys",
  "mac-usernotifications",
  "serde",
  "serde_json",
