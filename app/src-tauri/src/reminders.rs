@@ -236,9 +236,11 @@ fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::
         let response = send_notification("Captain's Log", None, &body, Some(&notification));
 
         match response {
-            Ok(NotificationResponse::ActionButton(action)) if action == "Write" => {
-                println!("[reminders] user clicked Write");
-                open_summary(&app);
+            Ok(NotificationResponse::ActionButton(action)) => {
+                println!("[reminders] user clicked action: {action}");
+                if action == "Write" {
+                    open_summary(&app);
+                }
             }
             Ok(NotificationResponse::Click) => {
                 // Clicking the body (not the buttons) also opens the summary —
