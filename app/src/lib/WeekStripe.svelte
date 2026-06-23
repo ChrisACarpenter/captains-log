@@ -45,13 +45,24 @@
     return (elapsedMs / WEEK_MS) * 100;
   }
 
+  // DEBUG — temporary diagnostics for Noot positioning. Remove once verified.
+  let debugMsg = $state('');
+
   async function refresh() {
     computeProgress();
     try {
       const s = await invoke<Settings>('get_settings');
-      reminderPosPct = s.reminder?.enabled ? reminderPosition(s.reminder) : null;
-    } catch {
-      // Stripe still works without the reminder marker.
+      if (s.reminder?.enabled) {
+        const r = s.reminder;
+        reminderPosPct = reminderPosition(r);
+        debugMsg = `now=${progressPct.toFixed(2)}% reminder=${reminderPosPct.toFixed(2)}% (d=${r.dayOfWeek} h=${r.hour} m=${r.minute})`;
+        console.log('[WeekStripe]', debugMsg, 'raw reminder:', r);
+      } else {
+        reminderPosPct = null;
+        debugMsg = `now=${progressPct.toFixed(2)}% (no reminder)`;
+      }
+    } catch (e) {
+      debugMsg = `error: ${e}`;
     }
   }
 
@@ -75,6 +86,10 @@
       style="left: {reminderPosPct}%;"
     />
   {/if}
+  <!-- DEBUG: remove once Noot position is verified -->
+  {#if debugMsg}
+    <div class="debug">{debugMsg}</div>
+  {/if}
 </div>
 
 <style>
@@ -97,11 +112,27 @@
 
   .noot {
     position: absolute;
-    top: -8px; /* lifts him so his upper body overlaps the stripe — he stands ON the bar */
+    top: 4px; /* sits just below the stripe (per Chris's preference 2026-06-23) */
     transform: translateX(-50%);
     height: 28px;
     width: auto;
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
     pointer-events: none;
+  }
+
+  /* DEBUG overlay — remove once Noot position is verified */
+  .debug {
+    position: absolute;
+    top: 36px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 4px 8px;
+    background: rgba(0, 0, 0, 0.85);
+    color: #fff;
+    font: 11px/14px ui-monospace, SFMono-Regular, Menlo, monospace;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 101;
   }
 </style>
