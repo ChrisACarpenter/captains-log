@@ -2,7 +2,6 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { confirm } from '@tauri-apps/plugin-dialog';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
   import { reportDirty } from '$lib/dirty';
@@ -120,8 +119,6 @@
   }
 
   // ---------- load / restore ----------
-  let unlistenReset: UnlistenFn | undefined;
-
   onMount(async () => {
     // Restore the saved draft (if any) before enabling auto-save — otherwise
     // the load itself would look like "the user typed something" and we'd
@@ -144,17 +141,9 @@
       labelsJson: JSON.stringify(labels)
     };
     initialLoadDone = true;
-
-    // Listen for the backend's "discard the in-flight note" signal —
-    // currently only fired by the main-window close handler in lib.rs.
-    unlistenReset = await listen('capture-reset', () => {
-      resetFormState();
-      void invoke('clear_capture_draft').catch(() => {});
-    });
   });
 
   onDestroy(() => {
-    if (unlistenReset) unlistenReset();
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
   });
 

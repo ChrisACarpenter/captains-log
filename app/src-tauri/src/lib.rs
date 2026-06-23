@@ -23,7 +23,7 @@ use tauri::{
     image::Image,
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, WindowEvent,
+    AppHandle, Manager, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
@@ -155,56 +155,27 @@ fn try_quit(app: &AppHandle) {
         });
 }
 
-/// Main-window close handler. Replaces the previous "close = exit if
-/// capture popup is visible" behavior with Option B: red X always hides
-/// the main window and switches to `.Accessory`. Only prompts when the
-/// capture popup has actual unsaved text (per the DirtyRegistry).
+/// Main-window close handler — Option B with auto-save.
+///
+/// Red X always hides silently. No prompt, ever. The capture popup is also
+/// hidden if it's currently visible so both windows tuck away together
+/// (otherwise the popup would float around with no main app behind it,
+/// which looked weird in testing).
+///
+/// In-flight typed work is never lost: /summary auto-saves on 1.5s debounce,
+/// and the capture popup auto-saves its draft to disk on the same cadence.
+/// Cmd+Q / tray-menu Quit still routes through `try_quit`, which prompts
+/// only inside the rare debounce gap when a save was pending. For hide
+/// (red X), there's no data loss — the window's webview state persists
+/// across hide, the summary file is written, the capture draft is written
+/// — so the prompt was theatre, not protection.
 fn handle_main_close(app: &AppHandle) {
-    let capture_dirty = {
-        let registry = app.state::<DirtyRegistry>();
-        let guard = registry.0.lock().expect("dirty registry mutex poisoned");
-        guard.get("capture").map(|e| e.dirty).unwrap_or(false)
-    };
-
-    if !capture_dirty {
-        hide_main_to_accessory(app);
-        return;
+    if let Some(capture) = app.get_webview_window(CAPTURE_WINDOW_LABEL) {
+        if capture.is_visible().unwrap_or(false) {
+            let _ = capture.hide();
+        }
     }
-
-    // Capture popup has unsaved text. The user is choosing to hide the
-    // main window; we ask whether to also discard the in-flight capture.
-    let app_h = app.clone();
-    app.dialog()
-        .message(
-            "You have an open quick-capture note with unsaved text. \
-             Hide the main window and discard the note?",
-        )
-        .title("Hide Captain's Log?")
-        // "Keep open" in the OK slot — safest default (don't lose work).
-        // `confirmed=true` means user clicked Keep open; do nothing.
-        // `confirmed=false` means user clicked Hide and discard.
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Keep open".to_string(),
-            "Hide and discard".to_string(),
-        ))
-        .kind(MessageDialogKind::Warning)
-        .show(move |confirmed| {
-            if !confirmed {
-                // Reset the capture popup state (clears typed text in JS),
-                // then hide it. Then hide main + go .Accessory.
-                if let Some(capture) = app_h.get_webview_window(CAPTURE_WINDOW_LABEL) {
-                    let _ = capture.emit("capture-reset", ());
-                    let _ = capture.hide();
-                }
-                {
-                    let registry = app_h.state::<DirtyRegistry>();
-                    let mut guard =
-                        registry.0.lock().expect("dirty registry mutex poisoned");
-                    guard.remove("capture");
-                }
-                hide_main_to_accessory(&app_h);
-            }
-        });
+    hide_main_to_accessory(app);
 }
 
 /// English list-join with serial comma: ["A"] → "A"; ["A","B"] → "A and B";

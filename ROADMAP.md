@@ -59,11 +59,12 @@ Phase 1 MVP is complete. Phase 2's daily-driver polish is mostly done — first-
 - [x] **Persistent Alert Style hint** — settings page explains that macOS defaults new apps to "Temporary" notifications (auto-dismiss, hide action buttons) and provides a one-click deep link to the Captain's Log notification preference panel via `x-apple.systempreferences:`.
 - [x] **Close flow — Option B** (`.Accessory` activation policy). Red X on main hides + flips to `.Accessory` (Dock icon hides, tray persists). Tray right-click menu with **Show Captain's Log** / **Quit Captain's Log**. Custom macOS app menu (with Cmd+Q routed through our handler, not the predefined Quit that bypasses it). Cross-window `DirtyRegistry` + native NSAlert prompt at quit time if any surface has unsaved work.
 
+- [x] **Auto-save Phase 1** — Weekly Summary debounced auto-save (1.5s after typing stops). Status indicator beside the Save button: `Saving…` / `Saved HH:MM` / `Unsaved changes` / `Couldn't save — retry?`. Manual Save still works as force-immediate. After auto-save, summary leaves the dirty registry.
+- [x] **Auto-save Phase 2** — Capture popup draft persistence. Drafts at `<journal>/.metadata/capture-draft.json`; load on mount, debounced save on change, clear on Submit. `Draft saved HH:MM` indicator below the actions row. New `delete_metadata` trait method on `StorageBackend`. Also adds a Ruby **Discard** button with native confirmation that cancels pending saves, deletes the draft, and hides the popup.
+- [x] **Auto-save Phase 3** — Stripped the red-X prompts. Red X now hides main + capture silently (no dialog). Cmd+Q / tray Quit still uses the unsaved-work guard as a backstop for the rare debounce-gap case.
+
 ### Remaining
 
-- [ ] **Auto-save Phase 1** — Weekly Summary debounced auto-save (1.5s after typing stops). Status indicator beside the Save button: `Saving…` / `Saved HH:MM` / `Unsaved changes` / `Couldn't save — retry?`. Manual Save still works as a force-immediate. After auto-save, summary leaves the dirty registry → no quit prompt for summary.
-- [ ] **Auto-save Phase 2** — Capture popup draft persistence. New backend commands (`load_capture_draft`/`save_capture_draft`/`clear_capture_draft`) writing to `<journal>/.metadata/capture-draft.json`. Restore on mount, debounced save on change, clear on Submit success. "Draft saved" indicator at the bottom of the popup.
-- [ ] **Auto-save Phase 3** — Strip the red-X prompts entirely. Red X = pure hide on both windows silently. Cmd+Q keeps the unsaved-work guard purely as a backstop for the rare "save just failed" case.
 - [ ] Full journal window with year/week tree sidebar (the big one)
 - [ ] Open and edit past Notes (depends on browser)
 - [ ] Markdown editor with rich text rendering (CodeMirror 6 or similar)
