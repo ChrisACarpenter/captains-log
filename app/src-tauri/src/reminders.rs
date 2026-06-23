@@ -211,23 +211,63 @@ const WRITE_ACTION: &str = "WRITE";
 #[cfg(target_os = "macos")]
 const OK_ACTION: &str = "OK";
 
+/// True when the running process is launched from inside an `.app` bundle.
+/// `UNUserNotificationCenter.current()` calls `bundleProxyForCurrentProcess`
+/// internally and aborts the process when no real `.app` bundle is registered
+/// with LaunchServices (NSBundle.bundleIdentifier swizzling doesn't help —
+/// it's a different lookup path). So we gate the UN code path on this check.
+///
+/// A real .app path looks like `.../Foo.app/Contents/MacOS/Foo`. `tauri dev`
+/// runs the bare binary from `target/debug/`, which doesn't match.
+#[cfg(target_os = "macos")]
+fn is_running_in_app_bundle() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let Some(macos_dir) = exe.parent() else { return false };
+    if macos_dir.file_name().and_then(|s| s.to_str()) != Some("MacOS") {
+        return false;
+    }
+    let Some(contents_dir) = macos_dir.parent() else { return false };
+    if contents_dir.file_name().and_then(|s| s.to_str()) != Some("Contents") {
+        return false;
+    }
+    let Some(app_dir) = contents_dir.parent() else { return false };
+    app_dir.extension().and_then(|s| s.to_str()) == Some("app")
+}
+
 /// Display the weekly reminder.
 ///
-/// On macOS, uses `UNUserNotificationCenter` (via `mac-usernotifications`).
-/// Notifications persist until the user interacts and render action buttons
-/// reliably regardless of the user's "Banners vs Alerts" notification-style
-/// preference — both improvements over the deprecated `NSUserNotification`
-/// path we used previously.
+/// On macOS, the dispatch is hybrid:
+///   - **Running from a real `.app` bundle** (production / `tauri build`):
+///     use `UNUserNotificationCenter` via `mac-usernotifications`. Action
+///     buttons, persistence, modern API.
+///   - **Running from a bare binary** (`tauri dev`): fall back to the
+///     deprecated `NSUserNotification` via `mac-notification-sys`. No action
+///     buttons in this mode (banner auto-dismiss), but no crash either —
+///     UN's `currentNotificationCenter()` aborts when LaunchServices can't
+///     find a bundle proxy for the running process, and swizzling NSBundle
+///     isn't enough to satisfy that lookup.
 ///
 /// On other platforms, falls back to `tauri-plugin-notification`.
-///
-/// Response handling on macOS happens in a spawned task so the scheduler
-/// loop can continue immediately after the notification is delivered. The
-/// task waits up to 24 hours for the user to click an action; if no click
-/// arrives in that window the listener gives up (the notification is still
-/// in Notification Center, but at that age it's stale).
 #[cfg(target_os = "macos")]
 async fn fire_notification(
+    app: &AppHandle,
+    body: &str,
+    icon_path: Option<&std::path::Path>,
+) {
+    if is_running_in_app_bundle() {
+        fire_via_un(app, body, icon_path).await;
+    } else {
+        fire_via_nsuser_notification(body, icon_path);
+    }
+}
+
+/// Modern path — UNUserNotificationCenter via mac-usernotifications.
+/// Only safe to call when running from a real `.app` bundle.
+#[cfg(target_os = "macos")]
+async fn fire_via_un(
     app: &AppHandle,
     body: &str,
     icon_path: Option<&std::path::Path>,
@@ -250,7 +290,7 @@ async fn fire_notification(
     match builder.send().await {
         Ok(sent) => {
             println!(
-                "[reminders] notification sent (id: {})",
+                "[reminders] UN notification sent (id: {})",
                 sent.notification_id()
             );
 
@@ -285,8 +325,35 @@ async fn fire_notification(
             });
         }
         Err(e) => {
-            eprintln!("[reminders] failed to send notification: {e}");
+            eprintln!("[reminders] UN send failed: {e}");
         }
+    }
+}
+
+/// Dev-mode fallback — NSUserNotification via mac-notification-sys.
+/// Deprecated API but works from a bare binary, which UN can't.
+///
+/// Fire-and-forget; we don't try to wait for action-button responses here
+/// because the deprecated path doesn't render them reliably anyway, and
+/// dev-mode testing usually just needs "did the notification fire" not
+/// "did the click handler navigate." Test the full UN experience by
+/// running a bundled build (`npm run tauri build -- --debug` then launch
+/// `target/debug/bundle/macos/Captain's Log.app`).
+#[cfg(target_os = "macos")]
+fn fire_via_nsuser_notification(body: &str, icon_path: Option<&std::path::Path>) {
+    use mac_notification_sys::{send_notification, Notification};
+
+    let mut notification = Notification::new();
+    let icon_string;
+    if let Some(path) = icon_path {
+        icon_string = path.to_string_lossy().into_owned();
+        notification.app_icon(&icon_string);
+    }
+
+    if let Err(e) = send_notification("Captain's Log", None, body, Some(&notification)) {
+        eprintln!("[reminders] NSUserNotification send failed: {e}");
+    } else {
+        println!("[reminders] dev mode: NSUserNotification fired (no action buttons)");
     }
 }
 
@@ -324,20 +391,19 @@ fn open_summary(app: &AppHandle) {
     let _ = app.emit("open-summary", ());
 }
 
-/// Install the NSBundle.bundleIdentifier swizzle and verify UN can read it.
+/// Set up the macOS bundle identity needed by both notification paths.
 ///
-/// Tauri's `embed_plist` injects CFBundleName + CFBundleVersion into the dev
-/// binary's `__TEXT,__info_plist` section, but NOT CFBundleIdentifier — so
-/// `NSBundle.mainBundle.bundleIdentifier` returns nil in `tauri dev`,
-/// `UNUserNotificationCenter` rejects every call, and reminders silently
-/// fail. `mac_notification_sys::set_application` swizzles
-/// `-[NSBundle bundleIdentifier]` to return our id when called on the main
-/// bundle; that's enough for UN's `check_bundle()` (just an NSBundle call)
-/// and for the auth + send paths that read the same property internally.
+/// `mac_notification_sys::set_application` swizzles
+/// `-[NSBundle bundleIdentifier]` to return our id — required for the
+/// `NSUserNotification` dev-mode fallback to deliver notifications when
+/// running from a bare binary.
 ///
-/// In bundled `.app` builds (`tauri build`) the swizzle is a no-op because
-/// the real Info.plist already has the identifier — set_application replaces
-/// the same value with itself.
+/// We do NOT call `mac_usernotifications::check_bundle()` here unconditionally.
+/// UN's bundle check passes because of the NSBundle swizzle, but the actual
+/// notification path uses `UNUserNotificationCenter.current()` which reaches
+/// into `bundleProxyForCurrentProcess` / LaunchServices and aborts the
+/// process when called from a bare binary. So we only verify UN identity
+/// when running from a real `.app`.
 ///
 /// No-op on other platforms.
 #[cfg(target_os = "macos")]
@@ -345,15 +411,21 @@ pub fn check_macos_bundle() {
     const BUNDLE_ID: &str = "com.prodigygame.captainslog";
     if let Err(e) = mac_notification_sys::set_application(BUNDLE_ID) {
         eprintln!("[reminders] bundle-id swizzle failed: {e}");
-        // Don't return — check_bundle below will report a clearer error
-        // if NSBundle still has nothing to return.
     }
-    match mac_usernotifications::check_bundle() {
-        Ok(()) => println!("[reminders] macOS bundle identity OK ({BUNDLE_ID})"),
-        Err(e) => eprintln!(
-            "[reminders] macOS bundle check failed: {e}. \
-             UNUserNotificationCenter likely won't deliver notifications."
-        ),
+    if is_running_in_app_bundle() {
+        match mac_usernotifications::check_bundle() {
+            Ok(()) => println!("[reminders] bundled .app — UN path active ({BUNDLE_ID})"),
+            Err(e) => eprintln!(
+                "[reminders] UN bundle check unexpectedly failed in .app: {e}"
+            ),
+        }
+    } else {
+        println!(
+            "[reminders] bare binary (dev mode) — NSUserNotification fallback. \
+             For full UN experience build a debug bundle: \
+             `npm run tauri build -- --debug` then launch the .app from \
+             target/debug/bundle/macos/"
+        );
     }
 }
 
@@ -362,13 +434,20 @@ pub fn check_macos_bundle() {}
 
 /// Request notification authorization on macOS. Idempotent — the first call
 /// shows the system prompt; subsequent calls return immediately with the
-/// remembered choice. Call this at the moment a user configures a reminder
-/// (not at app launch), so the permission prompt is contextual rather than
-/// surprising.
+/// remembered choice.
+///
+/// Only meaningful (and only safe) when running from a real `.app` bundle —
+/// UN's `current()` call aborts the process from a bare binary. In dev mode
+/// (bare binary), the NSUserNotification fallback doesn't have a permission
+/// concept, so we skip the prompt entirely.
 ///
 /// No-op on other platforms.
 #[cfg(target_os = "macos")]
 pub async fn request_notification_authorization() {
+    if !is_running_in_app_bundle() {
+        println!("[reminders] dev mode: skipping UN auth request (NS fallback doesn't need it)");
+        return;
+    }
     match mac_usernotifications::request_auth().await {
         Ok(true) => println!("[reminders] notification permission granted"),
         Ok(false) => eprintln!(
