@@ -101,6 +101,44 @@ pub async fn read_week(
         .map_err(|e| e.to_string())
 }
 
+/// Overwrite the entire weekly file with the given markdown. Used by the
+/// journal browser's raw-markdown editor (`/journal` route) to save edits
+/// to past weeks. The structured Weekly Summary editor at `/summary` uses
+/// `update_weekly_summary` instead, which splices changes into the summary
+/// section while preserving Weekly Notes below.
+#[tauri::command]
+pub async fn write_week(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+    content: String,
+) -> Result<(), String> {
+    let storage = storage_state.read().await;
+    storage
+        .write_week(year, week, &content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// List ISO years that have any weekly files, sorted ascending. Empty if
+/// the journal root has nothing yet.
+#[tauri::command]
+pub async fn list_years(storage_state: State<'_, SharedStorage>) -> Result<Vec<u32>, String> {
+    let storage = storage_state.read().await;
+    storage.list_years().await.map_err(|e| e.to_string())
+}
+
+/// List ISO week numbers present for the given year, sorted ascending.
+/// Empty if the year folder doesn't exist.
+#[tauri::command]
+pub async fn list_weeks(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+) -> Result<Vec<u32>, String> {
+    let storage = storage_state.read().await;
+    storage.list_weeks(year).await.map_err(|e| e.to_string())
+}
+
 /// Return all known labels with their usage stats, sorted by recent-then-frequent
 /// (the autocomplete ranking from `docs/label-system.md`).
 #[tauri::command]

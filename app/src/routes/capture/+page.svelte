@@ -273,6 +273,7 @@
       class="title-input"
       type="text"
       placeholder="Title (optional)"
+      spellcheck="true"
       bind:value={title}
     />
 
@@ -280,6 +281,7 @@
     <textarea
       class="body-input"
       placeholder="What did you just do?"
+      spellcheck="true"
       bind:value={body}
       autofocus
     ></textarea>

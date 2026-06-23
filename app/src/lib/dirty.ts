@@ -20,7 +20,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { onDestroy } from 'svelte';
 
-type DirtyKey = 'summary' | 'capture';
+type DirtyKey = 'summary' | 'capture' | 'journal';
 
 export function reportDirty(key: DirtyKey, what: string): (dirty: boolean) => void {
   let lastDirty: boolean | null = null;

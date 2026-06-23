@@ -167,6 +167,7 @@
             class="text-input"
             type="text"
             placeholder="Chris"
+            spellcheck="false"
             bind:value={nameInput}
           />
           <p class="hint">Used in the reminder notification body.</p>
@@ -180,6 +181,7 @@
               id="root"
               class="text-input path-input"
               type="text"
+              spellcheck="false"
               bind:value={journalRootInput}
             />
             <button class="btn btn-marble btn-sm" onclick={pickFolder}>Browse…</button>

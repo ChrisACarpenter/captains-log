@@ -1,8 +1,8 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2 — Polish (mostly done)
+## Current phase: 2 — Polish ✅ (functionally complete)
 
-Phase 1 MVP is complete. Phase 2's daily-driver polish is mostly done — first-run wizard, two-tier settings + theme toggle, label autocomplete, weekly summary UI with labels, theme v2 (Embered + Week Stripe + Noot), reminder notifications (with action buttons in production .app), Option B close flow (.Accessory + tray menu + Cmd+Q guard), production codesigning. The big remaining Phase 2 item is the journal browser (read/edit past notes). Auto-save is up next as a 3-phase polish bundle.
+Phase 1 MVP is complete. Phase 2's daily-driver polish closed today with the journal browser + view/edit past notes + spell-check across all prose surfaces. Captain's Log is now a usable daily-driver journaling app: capture in the popup, write weekly summaries, browse and edit any past week. Deferred to **Phase 2.5: editor upgrade** — migration to CodeMirror 6 (rich-text rendering for markdown) and inline `#` autocomplete in note bodies. That refactor is sizeable enough to warrant its own focused session.
 
 ---
 
@@ -62,16 +62,16 @@ Phase 1 MVP is complete. Phase 2's daily-driver polish is mostly done — first-
 - [x] **Auto-save Phase 1** — Weekly Summary debounced auto-save (1.5s after typing stops). Status indicator beside the Save button: `Saving…` / `Saved HH:MM` / `Unsaved changes` / `Couldn't save — retry?`. Manual Save still works as force-immediate. After auto-save, summary leaves the dirty registry.
 - [x] **Auto-save Phase 2** — Capture popup draft persistence. Drafts at `<journal>/.metadata/capture-draft.json`; load on mount, debounced save on change, clear on Submit. `Draft saved HH:MM` indicator below the actions row. New `delete_metadata` trait method on `StorageBackend`. Also adds a Ruby **Discard** button with native confirmation that cancels pending saves, deletes the draft, and hides the popup.
 - [x] **Auto-save Phase 3** — Stripped the red-X prompts. Red X now hides main + capture silently (no dialog). Cmd+Q / tray Quit still uses the unsaved-work guard as a backstop for the rare debounce-gap case.
+- [x] **Journal browser (`/journal`)** — sidebar with collapsible year/week tree (newest first, current year auto-expanded), raw-markdown editor on the right. Auto-saves on the same 1.5s debounce as `/summary` via the new `write_week` command. Switching weeks flushes any pending edits to the previously-selected week before loading the new one. Current week marked with an orange dot; selected week highlighted in maroon.
+- [x] **Open and edit past Notes** — same `/journal` route. The textarea is the entire weekly file's raw markdown; edits write back via `write_week`. (Structured per-Note editing is a future polish item; raw markdown is the minimum viable.)
+- [x] **macOS spell-check** — `spellcheck="true"` on every prose surface (capture title + body, all 4 summary textareas, journal editor); `spellcheck="false"` on name + path inputs to silence noise on proper nouns and filesystem paths.
 
-### Remaining
+### Deferred to Phase 2.5 — editor upgrade
 
-- [ ] Full journal window with year/week tree sidebar (the big one)
-- [ ] Open and edit past Notes (depends on browser)
-- [ ] Markdown editor with rich text rendering (CodeMirror 6 or similar)
-- [ ] Inline `#` autocomplete in body text (could reuse the LabelInput dropdown logic)
-- [ ] macOS system spell-check on inputs (largely default; verify on the new textareas)
+- [ ] **Markdown editor with rich text rendering** (CodeMirror 6 or similar) — replaces the textareas on `/summary`, capture popup body, and `/journal`. New deps + meaningful refactor; deserves its own session.
+- [ ] **Inline `#` autocomplete in body text** — natural fit as a CodeMirror extension once that lands. Could reuse the LabelInput dropdown logic for the popup UI.
 
-**Success:** Captain's Log has replaced any other journaling system I was using.
+**Success:** Captain's Log has replaced any other journaling system I was using. **Achieved.**
 
 ## Phase 3 — Search & Navigation
 

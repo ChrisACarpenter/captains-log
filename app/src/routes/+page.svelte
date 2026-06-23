@@ -135,6 +135,7 @@
               class="text-input"
               type="text"
               placeholder="Chris"
+              spellcheck="false"
               bind:value={nameInput}
             />
           </div>
@@ -155,6 +156,7 @@
               <input
                 class="text-input path-input"
                 type="text"
+                spellcheck="false"
                 bind:value={journalRootInput}
               />
               <button class="btn btn-marble btn-sm" onclick={pickFolder}>Browse…</button>
@@ -225,18 +227,25 @@
       <p class="lead">Weekly work journal that makes self-reviews painless.</p>
 
       <div class="card">
-        <h2>You're in the main window.</h2>
+        <h2>What now?</h2>
         <p>
-          This space will become the journal browser — year/week sidebar, past
-          notes, weekly summaries. That's coming next.
+          <strong>Capture a note</strong> any time — click the book icon in
+          your menu bar at the top of the screen.
         </p>
         <p>
-          For now, capture a note by clicking the
-          <strong>book icon in your menu bar</strong> (top of the screen).
+          <strong>Write your weekly summary</strong> when Friday rolls around,
+          or whenever it suits you.
+        </p>
+        <p>
+          <strong>Browse past weeks</strong> to read or edit what you've
+          written.
         </p>
       </div>
 
       <div class="main-actions">
+        <button class="btn btn-marble" onclick={() => goto('/journal')}>
+          Browse journal
+        </button>
         <button class="btn btn-emerald" onclick={() => goto('/summary')}>
           Write Weekly Summary
         </button>

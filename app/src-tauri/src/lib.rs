@@ -229,6 +229,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
+            commands::write_week,
+            commands::list_years,
+            commands::list_weeks,
             commands::get_labels,
             commands::get_settings,
             commands::complete_first_run,

@@ -260,6 +260,7 @@
         <div class="field">
           <label for="key-acc">Key accomplishments</label>
           <textarea
+            spellcheck="true"
             id="key-acc"
             bind:value={keyAccomplishments}
             placeholder="- "
@@ -270,6 +271,7 @@
         <div class="field">
           <label for="plans">Plans and priorities for next week</label>
           <textarea
+            spellcheck="true"
             id="plans"
             bind:value={plansAndPriorities}
             placeholder="- "
@@ -280,6 +282,7 @@
         <div class="field">
           <label for="challenges">Challenges or roadblocks</label>
           <textarea
+            spellcheck="true"
             id="challenges"
             bind:value={challengesOrRoadblocks}
             placeholder="- "
@@ -290,6 +293,7 @@
         <div class="field">
           <label for="else">Anything else on your mind</label>
           <textarea
+            spellcheck="true"
             id="else"
             bind:value={anythingElse}
             placeholder=""
