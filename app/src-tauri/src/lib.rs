@@ -18,8 +18,9 @@ pub mod storage;
 use tauri::{
     image::Image,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Manager, WindowEvent,
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tokio::sync::RwLock;
 
 use settings::default_journal_root;
@@ -43,6 +44,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        // Auto-saves and restores window positions/sizes across launches —
+        // so the capture popup (and main) remember which monitor and where.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
@@ -91,6 +95,50 @@ pub fn run() {
                     journal_settings.reminder,
                     journal_settings.user_name,
                 );
+            }
+
+            // Intercept the main window's close button. When the quick-capture
+            // popup is currently visible, prompt the user before exiting —
+            // otherwise the popup would orphan itself, surviving the main
+            // window's close while having no app shell behind it.
+            {
+                let main_window = app
+                    .get_webview_window("main")
+                    .expect("main window declared in tauri.conf.json");
+                let app_handle = app.handle().clone();
+                main_window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        let capture_visible = app_handle
+                            .get_webview_window(CAPTURE_WINDOW_LABEL)
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+
+                        if capture_visible {
+                            api.prevent_close();
+                            let app_h = app_handle.clone();
+                            app_handle
+                                .dialog()
+                                .message(
+                                    "You have an open quick-capture note. Closing now will \
+                                     discard whatever's typed there.\n\n\
+                                     Close Captain's Log and the note popup together?",
+                                )
+                                .title("Close Captain's Log?")
+                                .buttons(MessageDialogButtons::OkCancelCustom(
+                                    "Close both".to_string(),
+                                    "Keep open".to_string(),
+                                ))
+                                .kind(MessageDialogKind::Warning)
+                                .show(move |confirmed| {
+                                    if confirmed {
+                                        app_h.exit(0);
+                                    }
+                                });
+                        }
+                        // Otherwise: default close behavior — main window
+                        // closes, app continues running in the tray.
+                    }
+                });
             }
 
             // Tray icon — left-click toggles the quick-capture popup window.
