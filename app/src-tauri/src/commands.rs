@@ -21,7 +21,9 @@ use crate::notes::{
     append_note, iso_year_week, parse_weekly_summary, replace_weekly_summary_in_file,
     weekly_file_scaffold, Note, WeeklySummary,
 };
-use crate::reminders::{restart_reminder_task, ReminderHandle};
+use crate::reminders::{
+    request_notification_authorization, restart_reminder_task, ReminderHandle,
+};
 use crate::settings::{
     default_journal_root, AppSettings, JournalSettings, ReminderSettings, Theme, CURRENT_VERSION,
 };
@@ -336,7 +338,15 @@ pub async fn complete_first_run(
         }
     }
 
-    // 4. Restart the reminder scheduler in-process with the new config.
+    // 4. Request notification permission if the user just enabled reminders.
+    //    This is the highest-acceptance moment for the prompt — the user
+    //    explicitly opted in. Idempotent: subsequent calls return the
+    //    remembered decision. No-op on non-macOS platforms.
+    if input.reminder.enabled {
+        request_notification_authorization().await;
+    }
+
+    // 5. Restart the reminder scheduler in-process with the new config.
     //    The wizard's reminder takes effect immediately — no relaunch needed.
     restart_reminder_task(
         app.clone(),
@@ -345,7 +355,7 @@ pub async fn complete_first_run(
         input.user_name,
     );
 
-    // 5. Broadcast so any open window (main, capture) can re-fetch and apply
+    // 6. Broadcast so any open window (main, capture) can re-fetch and apply
     //    the new settings immediately — theme, reminder position, etc.
     let _ = app.emit("settings-changed", ());
 
@@ -400,7 +410,14 @@ pub async fn update_settings(
         }
     }
 
-    // 4. Restart the reminder scheduler with the new config (no-op if disabled).
+    // 4. Request notification permission if the user has reminders enabled.
+    //    macOS only — the system prompt fires once, subsequent calls return
+    //    the remembered decision.
+    if input.reminder.enabled {
+        request_notification_authorization().await;
+    }
+
+    // 5. Restart the reminder scheduler with the new config (no-op if disabled).
     restart_reminder_task(
         app.clone(),
         &reminder_handle,
@@ -408,7 +425,7 @@ pub async fn update_settings(
         input.user_name,
     );
 
-    // 5. Broadcast so all windows refresh (theme on capture popup, Noot
+    // 6. Broadcast so all windows refresh (theme on capture popup, Noot
     //    appears/disappears on the week stripe, etc.) without waiting for
     //    the next 60-second tick.
     let _ = app.emit("settings-changed", ());

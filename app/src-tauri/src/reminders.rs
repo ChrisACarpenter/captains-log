@@ -1,10 +1,12 @@
 //! Weekly reminder scheduling.
 //!
-//! When journal settings say `reminder.enabled = true`, [`spawn_reminder_task`]
+//! When journal settings say `reminder.enabled = true`, [`restart_reminder_task`]
 //! starts a long-running async task that:
 //!   1. Computes the next occurrence of `(day_of_week, hour, minute)` in local time
 //!   2. Sleeps until then
-//!   3. Fires a macOS notification via `tauri-plugin-notification`
+//!   3. Fires a notification — on macOS via `UNUserNotificationCenter` (action
+//!      buttons + persistent until interacted with); on other platforms via
+//!      `tauri-plugin-notification` as a fallback
 //!   4. Sleeps a minute (so we don't immediately fire again within the same wall-clock minute)
 //!   5. Loops forever (until the app shuts down)
 //!
@@ -12,9 +14,8 @@
 //!
 //! - Doesn't survive across app restarts in the sense that nothing fires while
 //!   the app is closed — macOS-scheduled notifications would be needed for that
-//! - Doesn't react to settings changes during the same session — the running
-//!   task continues with its initial config; restart the app to apply changes
-//! - First fire on macOS will trigger the system permission prompt
+//! - Reacts to settings changes via `restart_reminder_task` (called from
+//!   `commands::complete_first_run` and `commands::update_settings`)
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -186,7 +187,7 @@ pub fn restart_reminder_task(
             let body = format!("Time to log this week's summary, {greeting}.");
             let icon_path = notification_icon_path();
 
-            fire_notification(&app, &body, icon_path.as_deref());
+            fire_notification(&app, &body, icon_path.as_deref()).await;
 
             println!("[reminders] fired at {}", Local::now().format("%H:%M:%S"));
 
@@ -203,78 +204,98 @@ pub fn restart_reminder_task(
 // Fire-the-notification (platform-specific)
 // ---------------------------------------------------------------------------
 
-/// Display the weekly reminder. macOS uses `mac-notification-sys` directly so
-/// we can render action buttons (`Write` / `OK`) and control the icon shown
-/// next to the title — neither is exposed by `tauri-plugin-notification` on
-/// desktop. Other platforms still go through the Tauri plugin.
-///
-/// The macOS path spawns a blocking task because `send_notification` waits
-/// for the user to interact (or for the notification to dismiss/timeout)
-/// before returning. The scheduler loop is async, so we fire-and-forget and
-/// the response handling happens inside the spawned closure.
+/// Identifier for the "Write" action — comes back in NotificationResponse.action_identifier.
 #[cfg(target_os = "macos")]
-fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::Path>) {
-    use mac_notification_sys::{send_notification, MainButton, Notification, NotificationResponse};
+const WRITE_ACTION: &str = "WRITE";
+/// Identifier for the "OK" / dismiss action.
+#[cfg(target_os = "macos")]
+const OK_ACTION: &str = "OK";
 
-    let app = app.clone();
-    let body = body.to_string();
-    let icon = icon_path.map(|p| p.to_string_lossy().into_owned());
+/// Display the weekly reminder.
+///
+/// On macOS, uses `UNUserNotificationCenter` (via `mac-usernotifications`).
+/// Notifications persist until the user interacts and render action buttons
+/// reliably regardless of the user's "Banners vs Alerts" notification-style
+/// preference — both improvements over the deprecated `NSUserNotification`
+/// path we used previously.
+///
+/// On other platforms, falls back to `tauri-plugin-notification`.
+///
+/// Response handling on macOS happens in a spawned task so the scheduler
+/// loop can continue immediately after the notification is delivered. The
+/// task waits up to 24 hours for the user to click an action; if no click
+/// arrives in that window the listener gives up (the notification is still
+/// in Notification Center, but at that age it's stale).
+#[cfg(target_os = "macos")]
+async fn fire_notification(
+    app: &AppHandle,
+    body: &str,
+    icon_path: Option<&std::path::Path>,
+) {
+    use mac_usernotifications::{Action, InterruptionLevel, Notification};
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut notification = Notification::new();
-        notification
-            .main_button(MainButton::SingleAction("Write"))
-            .close_button("OK")
-            // Explicit: block the call until the user interacts (or the OS
-            // auto-dismisses the banner). Without this, certain button-only
-            // configurations can return immediately.
-            .wait_for_click(true);
-        if let Some(icon_path) = icon.as_deref() {
-            notification.app_icon(icon_path);
-        }
+    let mut builder = Notification::default()
+        .title("Captain's Log")
+        .message(body)
+        .action(Action::button(WRITE_ACTION, "Write"))
+        .action(Action::button(OK_ACTION, "OK"))
+        .interruption_level(InterruptionLevel::Active)
+        .default_sound()
+        .timeout(StdDuration::from_secs(24 * 60 * 60));
 
-        let response = send_notification("Captain's Log", None, &body, Some(&notification));
+    if let Some(path) = icon_path {
+        builder = builder.image_path(path.to_string_lossy());
+    }
 
-        match response {
-            Ok(NotificationResponse::ActionButton(action)) => {
-                println!("[reminders] user clicked action: {action}");
-                if action == "Write" {
-                    open_summary(&app);
+    match builder.send().await {
+        Ok(sent) => {
+            println!(
+                "[reminders] notification sent (id: {})",
+                sent.notification_id()
+            );
+
+            // Don't block the scheduler waiting for the user's response —
+            // spawn a task to listen and act on the click whenever it arrives.
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                match sent.response().await {
+                    Ok(response) => {
+                        if response.action_identifier == WRITE_ACTION
+                            || response.is_default_action()
+                        {
+                            println!("[reminders] user clicked Write");
+                            open_summary(&app);
+                        } else if response.action_identifier == OK_ACTION {
+                            println!("[reminders] user clicked OK");
+                        } else if response.is_dismiss_action() {
+                            println!("[reminders] user dismissed the notification");
+                        } else if response.is_timed_out() {
+                            println!("[reminders] response wait timed out");
+                        } else {
+                            println!(
+                                "[reminders] unhandled response: {}",
+                                response.action_identifier
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[reminders] response error: {e}");
+                    }
                 }
-            }
-            Ok(NotificationResponse::Click) => {
-                // Clicking the body (not the buttons) also opens the summary —
-                // same UX intent as the Write action.
-                println!("[reminders] user clicked notification body");
-                open_summary(&app);
-            }
-            Ok(NotificationResponse::CloseButton(_)) => {
-                println!("[reminders] user clicked OK (close)");
-            }
-            Ok(NotificationResponse::None) => {
-                // Most common reason for this: the user's notification style
-                // for Captain's Log is set to "Banners" (System Settings >
-                // Notifications > Captain's Log), so macOS auto-dismissed the
-                // banner before the user could interact. Setting the style to
-                // "Alerts" keeps the notification on screen until clicked.
-                println!(
-                    "[reminders] notification auto-dismissed without interaction \
-                     (System Settings > Notifications > Captain's Log: set to 'Alerts' \
-                     to keep buttons visible)"
-                );
-            }
-            Ok(NotificationResponse::Reply(_)) => {
-                // Reply text field isn't exposed in our config — defensive.
-            }
-            Err(e) => {
-                eprintln!("[reminders] mac-notification-sys failed: {e}");
-            }
+            });
         }
-    });
+        Err(e) => {
+            eprintln!("[reminders] failed to send notification: {e}");
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::Path>) {
+async fn fire_notification(
+    app: &AppHandle,
+    body: &str,
+    icon_path: Option<&std::path::Path>,
+) {
     let mut builder = app
         .notification()
         .builder()
@@ -292,7 +313,8 @@ fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::
 
 /// Bring the main window to the foreground and tell the frontend to navigate
 /// to the weekly summary page. Called when the user clicks the notification's
-/// "Write" action button (or the body, same intent).
+/// "Write" action button (or the default action, same intent).
+#[cfg(target_os = "macos")]
 fn open_summary(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
@@ -302,19 +324,48 @@ fn open_summary(app: &AppHandle) {
     let _ = app.emit("open-summary", ());
 }
 
-/// Register the macOS bundle identifier with mac-notification-sys. macOS
-/// requires this for notifications to render correctly when running outside
-/// a fully-bundled .app (e.g. during `npm run tauri dev`). Idempotent — safe
-/// to call once at startup.
+/// Verify the process has a CFBundleIdentifier — UNUserNotificationCenter
+/// requires this. Tauri's `embed_plist` injects the Info.plist into the
+/// `__TEXT,__info_plist` section of the dev binary on macOS, so this should
+/// succeed in both `npm run tauri dev` and bundled `.app` builds.
+///
+/// No-op on other platforms.
 #[cfg(target_os = "macos")]
-pub fn register_macos_bundle() {
-    if let Err(e) = mac_notification_sys::set_application("com.prodigygame.captainslog") {
-        eprintln!("[reminders] failed to set macOS bundle identifier: {e}");
+pub fn check_macos_bundle() {
+    match mac_usernotifications::check_bundle() {
+        Ok(()) => println!("[reminders] macOS bundle identity OK"),
+        Err(e) => eprintln!(
+            "[reminders] macOS bundle check failed: {e}. \
+             UNUserNotificationCenter likely won't deliver notifications. \
+             If running via `tauri dev`, make sure Tauri's embed_plist is enabled."
+        ),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn register_macos_bundle() {}
+pub fn check_macos_bundle() {}
+
+/// Request notification authorization on macOS. Idempotent — the first call
+/// shows the system prompt; subsequent calls return immediately with the
+/// remembered choice. Call this at the moment a user configures a reminder
+/// (not at app launch), so the permission prompt is contextual rather than
+/// surprising.
+///
+/// No-op on other platforms.
+#[cfg(target_os = "macos")]
+pub async fn request_notification_authorization() {
+    match mac_usernotifications::request_auth().await {
+        Ok(true) => println!("[reminders] notification permission granted"),
+        Ok(false) => eprintln!(
+            "[reminders] notification permission denied — reminders won't fire \
+             until granted via System Settings > Notifications > Captain's Log"
+        ),
+        Err(e) => eprintln!("[reminders] auth request failed: {e}"),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn request_notification_authorization() {}
 
 // ---------------------------------------------------------------------------
 // Tests

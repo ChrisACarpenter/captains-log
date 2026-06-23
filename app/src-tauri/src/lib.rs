@@ -77,10 +77,12 @@ pub fn run() {
             commands::update_weekly_summary,
         ])
         .setup(|app| {
-            // Register the macOS bundle ID with mac-notification-sys so the
-            // weekly reminder notification (in reminders::fire_notification)
-            // can render with action buttons. No-op on other platforms.
-            reminders::register_macos_bundle();
+            // Sanity-check the macOS bundle identity needed by
+            // UNUserNotificationCenter. Tauri's embed_plist injects the
+            // Info.plist (with CFBundleIdentifier) into the binary, so this
+            // succeeds in both `tauri dev` and bundled `.app` builds. No-op
+            // on other platforms.
+            reminders::check_macos_bundle();
 
             // Determine the journal root: from app-settings.json if present,
             // otherwise the platform default (~/Documents/CaptainsLog/).

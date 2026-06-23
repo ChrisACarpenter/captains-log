@@ -31,10 +31,13 @@ tauri-plugin-notification = "2.3.3"
 tauri-plugin-window-state = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Native macOS notification API — gives us action buttons (the cross-platform
-# tauri-plugin-notification gates those behind #[cfg(mobile)] for desktop).
+# Modern macOS notification API — wraps UNUserNotificationCenter and gives us
+# action buttons that render reliably (the deprecated NSUserNotification API
+# behind mac-notification-sys auto-dismisses banners and renders buttons
+# inconsistently on modern macOS). Same author (hoodie) as notify-rust /
+# mac-notification-sys, so this is the intended successor.
 # Used by reminders::fire_notification on macOS only.
-mac-notification-sys = "0.6"
+mac-usernotifications = "=0.3.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"
