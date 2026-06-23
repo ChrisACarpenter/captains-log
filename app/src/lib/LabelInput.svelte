@@ -227,7 +227,7 @@
     gap: var(--space-2);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     min-height: 44px;
     align-items: center;
@@ -237,7 +237,7 @@
 
   .chips:focus-within {
     border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px rgba(255, 92, 8, 0.25);
+    box-shadow: 0 0 0 2px var(--focus-glow);
   }
 
   .chip {
@@ -295,7 +295,7 @@
     right: 0;
     margin-top: var(--space-1);
     background: var(--bg-elevated);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
     max-height: 280px;
@@ -335,7 +335,7 @@
   }
 
   .option.create {
-    border-top: 1px solid var(--border-subtle);
+    border-top: 1px solid var(--border-structural);
   }
 
   .create-prefix {

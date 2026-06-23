@@ -1,41 +1,65 @@
 /*
- * Captain's Log — Global Styles
+ * Captain's Log — Global Styles (v2: Embered + Week Stripe)
  *
- * Single source of theme tokens for the app. See ../STYLE-GUIDE.md for the
- * design language behind these tokens.
+ * Single source of theme tokens. See ../STYLE-GUIDE.md for the design language.
  *
  * Dark theme is :root (default). Light theme is [data-theme='light'].
- * The data-theme attribute is set on <html> — see app.html.
+ * The data-theme attribute is set on <html> — see +layout.svelte.
+ *
+ * v2 (2026-06-23) overview:
+ *   - Warm-tinted neutrals across both themes (Embered direction)
+ *   - Split border tokens — decorative (orange-tinted) vs structural (warm-neutral)
+ *   - Tokenized previously-hardcoded values (focus glow, sapphire bg, marble colors)
+ *   - Theme-aware Marble button (fixes the "Browse button vanishes in light mode" bug)
+ *   - WCAG 2.2 contrast — light focus ring darkened, text-muted darkened in both modes
+ *   - New: --bg-code surface for Phase 2 markdown editor
+ *   - New: --stripe-track / --stripe-fill for the week-progress stripe
  */
 
 /* ---------- Fonts ---------- */
 @import url('https://fonts.googleapis.com/css2?family=ABeeZee:ital@0;1&family=Paytone+One&display=swap');
 
-/* ---------- Theme tokens ---------- */
+/* ---------- Dark theme (default) ---------- */
 :root {
   /* Surfaces */
-  --bg-base: #2b2a28;
-  --bg-surface: #3a3835;
-  --bg-elevated: #4a4844;
+  --bg-base: #2b2420;
+  --bg-surface: #36302c;
+  --bg-elevated: #3d3936;
+  --bg-code: #1f1a17;
 
   /* Text */
-  --text-primary: #f7e7db;
-  --text-secondary: #c8ac92;
-  --text-muted: rgba(200, 172, 146, 0.6);
+  --text-primary: #f6e7d7;
+  --text-secondary: #d2b094;
+  --text-muted: #a89784;
 
   /* Brand accents */
   --accent-primary: #ff5c08;
-  --accent-secondary: #6c1e38;
+  --accent-primary-text: #ff7a3a; /* For orange text on dark elevated surfaces */
+  --accent-maroon: #6c1e38;
 
   /* Lines & focus */
-  --border-subtle: #4a4844;
+  --border-decorative: rgba(255, 92, 8, 0.14);
+  --border-structural: rgba(246, 231, 215, 0.1);
   --focus-ring: #ff5c08;
+  --focus-glow: rgba(255, 92, 8, 0.22);
+
+  /* Week stripe (under title bar) */
+  --stripe-track: rgba(255, 92, 8, 0.14);
+  --stripe-fill: #ff5c08;
 
   /* Button drop shadow — the RPG signature move */
-  --btn-shadow: 0 4px 0 0 rgba(36, 20, 44, 0.5);
+  --btn-shadow: 0 4px 0 0 rgba(0, 0, 0, 0.6);
   --btn-shadow-offset: 4px;
 
-  /* Palette — raw brand colors (use sparingly; prefer semantic tokens above) */
+  /* Marble button (theme-aware secondary/neutral) */
+  --btn-marble-bg: #3a322c;
+  --btn-marble-text: #f6e7d7;
+  --btn-marble-border: rgba(255, 92, 8, 0.22);
+
+  /* Sapphire button (tokenized — was hardcoded #3a82c8) */
+  --btn-sapphire: #3a82c8;
+
+  /* Palette — raw brand colors. Prefer semantic tokens above. */
   --brand-orange: #ff5c08;
   --brand-maroon: #6c1e38;
 
@@ -87,18 +111,31 @@
 
 /* ---------- Light theme ---------- */
 [data-theme='light'] {
-  --bg-base: #f7e7db;
+  --bg-base: #f7e7db; /* Snapped to documented brand cream */
   --bg-surface: #ffffff;
-  --bg-elevated: #ffffff;
+  --bg-elevated: #fdf6ee; /* Cream-tinted off-white — distinct from bg-surface */
+  --bg-code: #f4e3d2;
 
-  --text-primary: #2b2a28;
-  --text-secondary: #6c1e38;
-  --text-muted: #c8ac92;
+  --text-primary: #1c1612;
+  --text-secondary: #5a4438; /* Warm neutral — maroon demoted out of body text */
+  --text-muted: #7a5e48; /* Darkened: passes AA on cream (5.0:1) and white (5.8:1) */
 
-  --border-subtle: rgba(200, 172, 146, 0.3);
+  --accent-primary-text: #c44400; /* For orange text on light surfaces (4.6:1 on cream) */
 
-  /* Maroon-tinted shadow on light backgrounds */
-  --btn-shadow: 0 4px 0 0 rgba(108, 30, 56, 0.4);
+  --border-decorative: rgba(255, 92, 8, 0.18);
+  --border-structural: rgba(28, 22, 18, 0.12);
+
+  --focus-ring: #d94a00; /* Darkened to pass WCAG 2.2 SC 1.4.11 on cream (3.4:1) */
+  --focus-glow: rgba(255, 92, 8, 0.22);
+
+  --stripe-track: rgba(255, 92, 8, 0.18);
+  --stripe-fill: #ff5c08;
+
+  --btn-shadow: 0 4px 0 0 rgba(108, 30, 56, 0.32);
+
+  --btn-marble-bg: #ffffff;
+  --btn-marble-text: #1c1612;
+  --btn-marble-border: rgba(255, 92, 8, 0.22); /* Dropped from 0.35 — less brand-loud on utility buttons */
 }
 
 /* ---------- Base reset ---------- */
@@ -159,9 +196,8 @@ p {
 
 /* ---------- Buttons ----------
  * The signature RPG button. Bottom-only drop shadow that collapses
- * on press. See STYLE-GUIDE.md for full spec.
+ * on press. Marble is now theme-aware so it stays visible in both modes.
  *
- * Default = Marble (neutral). Apply a variant class for color:
  *   .btn .btn-emerald   — confirm / save
  *   .btn .btn-sapphire  — primary navigation
  *   .btn .btn-ruby      — cancel / destructive (Esc/Backspace bound to these later)
@@ -175,7 +211,7 @@ p {
   gap: var(--space-2);
   min-height: 48px;
   padding: 0 var(--space-4);
-  border: none;
+  border: 1.5px solid transparent;
   border-radius: var(--radius-md);
   font-family: var(--font-display);
   font-size: var(--text-button);
@@ -204,10 +240,14 @@ p {
 }
 
 /* Button variants */
-.btn-emerald  { background: var(--accent-green); }
-.btn-sapphire { background: #3a82c8; }
+.btn-emerald  { background: var(--accent-green); color: #1a2b0a; } /* Dark text — white-on-emerald fails AA */
+.btn-sapphire { background: var(--btn-sapphire); }
 .btn-ruby     { background: var(--brand-maroon); }
-.btn-marble   { background: var(--neutral-cream); color: #363636; }
+.btn-marble   {
+  background: var(--btn-marble-bg);
+  color: var(--btn-marble-text);
+  border-color: var(--btn-marble-border);
+}
 
 .btn-sm { min-height: 36px; padding: 0 var(--space-3); }
 .btn-lg { min-height: 56px; padding: 0 var(--space-6); }

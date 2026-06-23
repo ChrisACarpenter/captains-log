@@ -255,7 +255,7 @@
     padding: var(--space-3);
     background: var(--bg-surface);
     color: var(--text-primary);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     font-family: var(--font-body);
     font-size: var(--text-body);
@@ -268,7 +268,7 @@
   textarea:focus-visible {
     outline: none;
     border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px rgba(255, 92, 8, 0.25);
+    box-shadow: 0 0 0 2px var(--focus-glow);
   }
 
   .actions {
@@ -311,7 +311,7 @@
     max-width: 480px;
     padding: var(--space-6);
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-lg);
   }
 

@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { page } from '$app/state';
+  import WeekStripe from '$lib/WeekStripe.svelte';
   import '../app.css';
 
   let { children } = $props();
@@ -17,6 +19,14 @@
       // dark remains the default — no recovery needed.
     }
   });
+
+  // Week stripe lives on the main window only — the quick-capture popup
+  // (label "capture", served at /capture) stays minimal.
+  const showStripe = $derived(page.url.pathname !== '/capture');
 </script>
+
+{#if showStripe}
+  <WeekStripe />
+{/if}
 
 {@render children()}

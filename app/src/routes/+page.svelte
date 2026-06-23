@@ -129,12 +129,15 @@
       {:else if step === 1}
         <section class="step">
           <h2>What should we call you?</h2>
-          <input
-            class="text-input"
-            type="text"
-            placeholder="Chris"
-            bind:value={nameInput}
-          />
+          <div class="guide-row">
+            <img src="/branded/guide-hand.png" class="guide-hand" alt="" />
+            <input
+              class="text-input"
+              type="text"
+              placeholder="Chris"
+              bind:value={nameInput}
+            />
+          </div>
           <p class="hint">
             Just for the app — your journal stays on your machine.
           </p>
@@ -146,13 +149,16 @@
       {:else if step === 2}
         <section class="step">
           <h2>Where should we store your journal files?</h2>
-          <div class="path-row">
-            <input
-              class="text-input path-input"
-              type="text"
-              bind:value={journalRootInput}
-            />
-            <button class="btn btn-marble btn-sm" onclick={pickFolder}>Browse…</button>
+          <div class="guide-row">
+            <img src="/branded/guide-hand.png" class="guide-hand" alt="" />
+            <div class="path-row">
+              <input
+                class="text-input path-input"
+                type="text"
+                bind:value={journalRootInput}
+              />
+              <button class="btn btn-marble btn-sm" onclick={pickFolder}>Browse…</button>
+            </div>
           </div>
           <p class="hint">
             Plain markdown on your machine. You can move it later in Settings.
@@ -165,10 +171,13 @@
       {:else if step === 3}
         <section class="step">
           <h2>Want a weekly nudge to fill in your Weekly Summary?</h2>
-          <label class="checkbox-row">
-            <input type="checkbox" bind:checked={reminderEnabled} />
-            <span>Yes, remind me</span>
-          </label>
+          <div class="guide-row">
+            <img src="/branded/guide-hand.png" class="guide-hand" alt="" />
+            <label class="checkbox-row">
+              <input type="checkbox" bind:checked={reminderEnabled} />
+              <span>Yes, remind me</span>
+            </label>
+          </div>
           {#if reminderEnabled}
             <div class="reminder-row">
               <label class="field">
@@ -261,9 +270,36 @@
     width: 100%;
     max-width: 560px;
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-lg);
     padding: var(--space-8);
+  }
+
+  /* Guide-hand wrapper — places the rotated pointer-hand to the left of an
+   * input the wizard is asking the user to fill in. The hand bobs gently
+   * toward the field every ~2s to draw the eye. */
+  .guide-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  .guide-row > :not(.guide-hand) {
+    flex: 1;
+  }
+
+  .guide-hand {
+    height: 36px;
+    width: auto;
+    flex-shrink: 0;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.15));
+    animation: guide-bob 1.8s ease-in-out infinite;
+  }
+
+  @keyframes guide-bob {
+    0%, 100% { transform: translateX(0); }
+    50% { transform: translateX(4px); }
   }
 
   .step h1 {
@@ -308,7 +344,7 @@
     padding: var(--space-3);
     background: var(--bg-base);
     color: var(--text-primary);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     font-family: var(--font-body);
     font-size: var(--text-body);
@@ -319,7 +355,7 @@
   .text-input:focus-visible {
     outline: none;
     border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px rgba(255, 92, 8, 0.25);
+    box-shadow: 0 0 0 2px var(--focus-glow);
   }
 
   /* Path row: input grows, button stays fixed */
@@ -335,14 +371,13 @@
     font-size: var(--text-caption);
   }
 
-  /* Checkbox + reminder */
+  /* Checkbox + reminder. Margin-bottom is owned by .guide-row now. */
   .checkbox-row {
     display: flex;
     align-items: center;
     gap: var(--space-3);
     font-size: var(--text-body);
     cursor: pointer;
-    margin-bottom: var(--space-4);
   }
 
   .checkbox-row input[type='checkbox'] {
@@ -381,7 +416,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--border-subtle);
+    background: var(--border-decorative);
   }
 
   .dot.active {
@@ -420,7 +455,7 @@
   .card {
     padding: var(--space-6);
     background: var(--bg-surface);
-    border: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-structural);
     border-radius: var(--radius-lg);
   }
 

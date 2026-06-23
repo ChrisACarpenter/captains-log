@@ -47,35 +47,64 @@ The app supports **dark** and **light** themes. **Dark is the default.** Users c
 
 Implementation: CSS custom properties for all color tokens, with `:root` (dark theme) and `[data-theme="light"]` overrides. Theme infrastructure ships in Phase 1 so we get both themes for free; the in-app toggle UI ships in Phase 2.
 
+**Theme tokens — v2 (2026-06-23).** Refined after a six-lens adversarial critique of the original light/dark pair. Highlights of the v2 changes: warm-tinted neutrals (Embered direction), split border tokens (decorative orange-tinted vs structural warm-neutral), theme-aware Marble button, tokenized previously-hardcoded values (focus glow, sapphire bg, marble colors), WCAG 2.2 contrast fixes on light-mode focus ring and muted text, new `--bg-code` surface for the Phase 2 markdown editor, new `--stripe-track` / `--stripe-fill` for the week-progress stripe.
+
 ### Dark theme (default)
 
-| Token | Color | Hex |
+| Token | Hex / Value | Notes |
 |---|---|---|
-| `--bg-base` | Near-Black | `#2b2a28` |
-| `--bg-surface` | Slightly lighter (derived) | `#3a3835` |
-| `--bg-elevated` | Lighter still | `#4a4844` |
-| `--text-primary` | Cream | `#f7e7db` |
-| `--text-secondary` | Tan | `#c8ac92` |
-| `--text-muted` | Tan @ 60% opacity | — |
-| `--accent-primary` | Prodigy Orange | `#ff5c08` |
-| `--accent-secondary` | Maroon | `#6c1e38` |
-| `--border-subtle` | Near-Black @ lighter | `#4a4844` |
-| `--focus-ring` | Prodigy Orange | `#ff5c08` |
+| `--bg-base` | `#2b2420` | Warm near-black with orange undertone |
+| `--bg-surface` | `#36302c` | Warm dark surface — cards, inputs |
+| `--bg-elevated` | `#3d3936` | Slightly cooler than surface — dropdowns, popovers |
+| `--bg-code` | `#1f1a17` | Markdown code blocks (Phase 2) |
+| `--text-primary` | `#f6e7d7` | Warm cream |
+| `--text-secondary` | `#d2b094` | Warm tan |
+| `--text-muted` | `#a89784` | Solid warm tan — passes AA on all dark surfaces |
+| `--accent-primary` | `#ff5c08` | Prodigy Orange — fill/stroke; primary CTA bg |
+| `--accent-primary-text` | `#ff7a3a` | Brightened orange for orange text on elevated dark surfaces |
+| `--accent-maroon` | `#6c1e38` | Structural-accent only (active sidebar week, ruby button, button shadow tint). NOT a text color in dark mode |
+| `--border-decorative` | `rgba(255, 92, 8, 0.14)` | Orange-tinted — decorative edges, chip borders, stripe track |
+| `--border-structural` | `rgba(246, 231, 215, 0.10)` | Warm-neutral — cards, inputs, sidebar splits, panel rules |
+| `--focus-ring` | `#ff5c08` | Prodigy Orange (passes 1.4.11 on dark) |
+| `--focus-glow` | `rgba(255, 92, 8, 0.22)` | Tokenized — was hardcoded in 5 places before v2 |
+| `--stripe-track` | `rgba(255, 92, 8, 0.14)` | Week-stripe unfilled track |
+| `--stripe-fill` | `#ff5c08` | Week-stripe filled portion |
+| `--btn-shadow` | `0 4px 0 0 rgba(0, 0, 0, 0.6)` | Signature RPG drop shadow |
+| `--btn-marble-bg` | `#3a322c` | Theme-aware Marble (fixes the "invisible browse button" bug) |
+| `--btn-marble-text` | `#f6e7d7` | — |
+| `--btn-marble-border` | `rgba(255, 92, 8, 0.22)` | — |
+| `--btn-sapphire` | `#3a82c8` | Tokenized — was hardcoded before v2 |
 
 ### Light theme
 
-| Token | Color | Hex |
+| Token | Hex / Value | Notes |
 |---|---|---|
-| `--bg-base` | Cream | `#f7e7db` |
-| `--bg-surface` | White | `#ffffff` |
-| `--bg-elevated` | Pure white | `#ffffff` |
-| `--text-primary` | Near-Black | `#2b2a28` |
-| `--text-secondary` | Maroon | `#6c1e38` |
-| `--text-muted` | Tan | `#c8ac92` |
-| `--accent-primary` | Prodigy Orange | `#ff5c08` |
-| `--accent-secondary` | Maroon | `#6c1e38` |
-| `--border-subtle` | Tan @ 30% | — |
-| `--focus-ring` | Prodigy Orange | `#ff5c08` |
+| `--bg-base` | `#f7e7db` | Documented Prodigy brand cream |
+| `--bg-surface` | `#ffffff` | White — cards, inputs |
+| `--bg-elevated` | `#fdf6ee` | Cream-tinted off-white — third surface tier for popovers/dropdowns |
+| `--bg-code` | `#f4e3d2` | Markdown code blocks (Phase 2) |
+| `--text-primary` | `#1c1612` | Warm near-black |
+| `--text-secondary` | `#5a4438` | Warm neutral — maroon demoted out of body text after critique |
+| `--text-muted` | `#7a5e48` | Darkened — passes AA on cream (5.0:1) and white (5.8:1) |
+| `--accent-primary` | `#ff5c08` | Prodigy Orange — fill/stroke; primary CTA bg |
+| `--accent-primary-text` | `#c44400` | Darkened orange for orange text on cream (4.6:1) — brand orange fails as text on light bg |
+| `--accent-maroon` | `#6c1e38` | Structural-accent only — active sidebar week, ruby button, link hover |
+| `--border-decorative` | `rgba(255, 92, 8, 0.18)` | Orange-tinted decorative edges, stripe track |
+| `--border-structural` | `rgba(28, 22, 18, 0.12)` | Warm near-black at low opacity — cards, inputs, sidebar splits |
+| `--focus-ring` | `#d94a00` | Darkened to pass WCAG 2.2 SC 1.4.11 (3.4:1 on cream) — brand orange itself fails 1.4.11 on cream |
+| `--focus-glow` | `rgba(255, 92, 8, 0.22)` | — |
+| `--stripe-track` | `rgba(255, 92, 8, 0.18)` | Week-stripe unfilled track |
+| `--stripe-fill` | `#ff5c08` | Week-stripe filled portion |
+| `--btn-shadow` | `0 4px 0 0 rgba(108, 30, 56, 0.32)` | Maroon-tinted shadow on light bg |
+| `--btn-marble-bg` | `#ffffff` | Theme-aware Marble |
+| `--btn-marble-text` | `#1c1612` | — |
+| `--btn-marble-border` | `rgba(255, 92, 8, 0.22)` | Dropped from 0.35 — utility button shouldn't brand-shout |
+
+**Token usage rules:**
+- `--accent-primary` is fill/stroke only in light mode. For orange text use `--accent-primary-text`.
+- `--accent-maroon` is structural-accent only — never used as body-adjacent text in dark mode.
+- `--border-decorative` is for chips, decorative card edges, and the week-stripe track. Anything that defines a container boundary or affordance (cards, inputs, sidebar splits, panel rules) uses `--border-structural`.
+- `--text-muted` is solid in both themes (the dark theme used to use an alpha-channel translucent value which baked in a contrast ceiling — v2 fix).
 
 ### Label chips
 
@@ -190,6 +219,8 @@ For branded moments (app icon, empty states, splash, achievements), pull from th
 | Compass | `assets/atlases/ui-raster-epicsv2/taming-meter-Compass.png` | Empty state, navigation |
 | Stamp (red) | `assets/atlases/ui-petslots/icon-stamp-red.png` | Achievement / timestamp |
 | Wizard hat | `assets/single-images/icon/icon-hat/icon-hat-1.png` (530+ variants) | Subtle Prodigy-iconic accent |
+| Noot (npc-noot-small) | `assets/atlases/_generated/ui-login-credentials/ui-login-credentials.png` @ `(3, 178, 235×226)` | Week-stripe reminder marker — see `/branded/noot-reminder.png` |
+| Pointer hand | `assets/atlases/_generated/ui-guide-hands/ui-guide-hands.png` @ `(3, 3, 65×86)`, rotated 90° CW | Wizard input pointer — see `/branded/guide-hand.png` |
 
 **IP guidance:** generic UI elements (anchor, book, compass, stamps, generic hats, scrolls) are safe for an internal Prodigy tool. Character art (Mythics, pets, full NPC sprites) stays in the game.
 
@@ -302,6 +333,27 @@ Sizes:
 
 Always pair the meter with a numeric value or label (beside, below, or on top of the bar).
 
+### Week Stripe
+
+A 4px Prodigy-orange progress meter pinned to the top of the main window's content area (immediately under the system title bar). Implementation lives at `app/src/lib/WeekStripe.svelte`; rendered by `+layout.svelte` for every route except `/capture`.
+
+- **Track** uses `--stripe-track` (low-opacity orange — `rgba(255,92,8,0.14)` dark / `0.18` light)
+- **Fill** uses `--stripe-fill` (solid `#ff5c08`), width = `(now − Monday 00:00) / 7 days × 100%`
+- Updates every 60 seconds — smooth growth across the week
+- **Reminder marker (Noot):** when the user has a weekly reminder enabled, a small Noot mascot (`/branded/noot-reminder.png`, ~28px tall) hangs just below the stripe at the position corresponding to the reminder day/time. The image is `pointer-events: none` so it never blocks clicks.
+
+Design intent (per the v2 critique): the stripe is *load-bearing* on day 1 — a real week-progress meter, not decorative chrome. It earns its position in the most HIG-sensitive 4 pixels of the window by carrying information. The Noot marker doubles as visual proof that your reminder is wired up.
+
+Phase 2 considerations: when the journal browser ships with a sidebar, the stripe should span only the content pane (the sidebar gets its own week-list selection treatment using `--accent-maroon`). Window-state behavior (unfocused dim, fullscreen hide) is undefined for v2 and will be specced when Tauri window-state handling lands.
+
+### Wizard guide hand
+
+First-run setup uses a rotated `pointer-hand-straight` sprite (from the `ui-guide-hands` atlas) to point at the input the wizard is asking the user to fill in. Lives at `/branded/guide-hand.png` (extracted from upper-left of atlas, rotated 90° clockwise so the finger points right).
+
+- Placed inside a `.guide-row` flex container, left of the active input
+- ~36px tall, animates with a subtle 4px-amplitude horizontal "bob" every 1.8s to draw the eye toward the field
+- Used on wizard steps 1 (Name), 2 (Location), 3 (Reminder) — not on the welcome step
+
 ### Open patterns to spec later
 
 - Tooltips (delay, max width, dismissal)
@@ -309,6 +361,7 @@ Always pair the meter with a numeric value or label (beside, below, or on top of
 - Loading / skeleton states
 - Motion / animation timings
 - Modals (beyond basic confirmation)
+- Week-stripe window-state behavior (unfocused, fullscreen, Phase 2 sidebar geometry)
 
 ## Microcopy rules
 
