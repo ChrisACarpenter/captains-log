@@ -224,7 +224,11 @@ fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::
         let mut notification = Notification::new();
         notification
             .main_button(MainButton::SingleAction("Write"))
-            .close_button("OK");
+            .close_button("OK")
+            // Explicit: block the call until the user interacts (or the OS
+            // auto-dismisses the banner). Without this, certain button-only
+            // configurations can return immediately.
+            .wait_for_click(true);
         if let Some(icon_path) = icon.as_deref() {
             notification.app_icon(icon_path);
         }
@@ -233,16 +237,32 @@ fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::
 
         match response {
             Ok(NotificationResponse::ActionButton(action)) if action == "Write" => {
+                println!("[reminders] user clicked Write");
                 open_summary(&app);
             }
             Ok(NotificationResponse::Click) => {
                 // Clicking the body (not the buttons) also opens the summary —
                 // same UX intent as the Write action.
+                println!("[reminders] user clicked notification body");
                 open_summary(&app);
             }
-            Ok(_) => {
-                // OK close button, no-interaction timeout, or text reply (we
-                // don't expose an input field) — dismiss silently.
+            Ok(NotificationResponse::CloseButton(_)) => {
+                println!("[reminders] user clicked OK (close)");
+            }
+            Ok(NotificationResponse::None) => {
+                // Most common reason for this: the user's notification style
+                // for Captain's Log is set to "Banners" (System Settings >
+                // Notifications > Captain's Log), so macOS auto-dismissed the
+                // banner before the user could interact. Setting the style to
+                // "Alerts" keeps the notification on screen until clicked.
+                println!(
+                    "[reminders] notification auto-dismissed without interaction \
+                     (System Settings > Notifications > Captain's Log: set to 'Alerts' \
+                     to keep buttons visible)"
+                );
+            }
+            Ok(NotificationResponse::Reply(_)) => {
+                // Reply text field isn't exposed in our config — defensive.
             }
             Err(e) => {
                 eprintln!("[reminders] mac-notification-sys failed: {e}");
