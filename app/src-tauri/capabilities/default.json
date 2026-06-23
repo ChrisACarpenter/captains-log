@@ -7,6 +7,12 @@
     "core:default",
     "opener:default",
     "core:window:allow-hide",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "x-apple.systempreferences:*" }
+      ]
+    }
   ]
 }
