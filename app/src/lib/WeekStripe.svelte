@@ -97,7 +97,7 @@
 
   .noot {
     position: absolute;
-    top: 4px; /* sits just below the stripe, hanging into the route's top padding */
+    top: -8px; /* lifts him so his upper body overlaps the stripe — he stands ON the bar */
     transform: translateX(-50%);
     height: 28px;
     width: auto;
