@@ -1,8 +1,8 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2 — Polish (in progress)
+## Current phase: 2 — Polish (mostly done)
 
-Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — first-run + settings backend, the reminder scheduler, and the dedicated capture popup window are all shipped. Remaining: journal browser (read past notes), label autocomplete, settings panel, theme toggle.
+Phase 1 MVP is complete. Phase 2's daily-driver polish is mostly done — first-run wizard, two-tier settings + theme toggle, label autocomplete, weekly summary UI with labels, theme v2 (Embered + Week Stripe + Noot), reminder notifications (with action buttons in production .app), Option B close flow (.Accessory + tray menu + Cmd+Q guard), production codesigning. The big remaining Phase 2 item is the journal browser (read/edit past notes). Auto-save is up next as a 3-phase polish bundle.
 
 ---
 
@@ -51,11 +51,20 @@ Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — f
 - [x] **Week Stripe** at the top of the main window — a 4px Prodigy-orange progress meter (track + fill) that grows across the week. Earns its position by being load-bearing on day 1, not decorative chrome.
 - [x] **Noot reminder marker** — when a weekly reminder is set, a small Noot mascot hangs on the stripe at the reminder day/time position. (`npc-noot-small` extracted from `ui-login-credentials` atlas.)
 - [x] **Wizard guide hand** — rotated `pointer-hand-straight` sprite (from `ui-guide-hands`) bobs gently next to the active input on first-run setup steps.
-- [x] **Weekly reminder notification action buttons (Write / OK)** — macOS path via `mac-notification-sys` directly (the cross-platform `tauri-plugin-notification` doesn't expose actions on desktop). Write opens the main window + navigates to `/summary`; OK and timeout dismiss silently. Notification also carries the scroll icon via `app_icon`.
+- [x] **Weekly Summary labels field** — new `### Labels` subsection in the markdown, chip-based LabelInput on the form, full parse/render/replace pipeline + 3 new tests.
+- [x] **Settings-changed event broadcast** — `update_settings` and `complete_first_run` now emit a Tauri event so the capture popup re-applies the new theme without restart, and the week stripe makes Noot appear/disappear immediately after a reminder toggle.
+- [x] **Window state persistence (`tauri-plugin-window-state`)** — both windows remember size + position across launches. `VISIBLE` flag dropped from defaults so the capture popup respects `visible: false` on launch.
+- [x] **macOS notifications via `UNUserNotificationCenter`** — migrated from the deprecated `NSUserNotification` (`mac-notification-sys`) to the modern API (`mac-usernotifications`). Hybrid path: production `.app` → UN with action buttons + permission prompt + persistence; `tauri dev` bare binary → legacy fallback (no crash, no buttons, but functional for testing the wiring).
+- [x] **Production .app codesigning** — `bundle.macOS.signingIdentity = "-"` in tauri.conf.json so Tauri's bundler runs a real `codesign --force --sign - --identifier com.prodigygame.captainslog` pass. Required for `usernotificationsd` to accept the UN auth request (it keys permission off the codesign Identifier, not CFBundleIdentifier).
+- [x] **Persistent Alert Style hint** — settings page explains that macOS defaults new apps to "Temporary" notifications (auto-dismiss, hide action buttons) and provides a one-click deep link to the Captain's Log notification preference panel via `x-apple.systempreferences:`.
+- [x] **Close flow — Option B** (`.Accessory` activation policy). Red X on main hides + flips to `.Accessory` (Dock icon hides, tray persists). Tray right-click menu with **Show Captain's Log** / **Quit Captain's Log**. Custom macOS app menu (with Cmd+Q routed through our handler, not the predefined Quit that bypasses it). Cross-window `DirtyRegistry` + native NSAlert prompt at quit time if any surface has unsaved work.
 
 ### Remaining
 
-- [ ] Full journal window with year/week tree sidebar
+- [ ] **Auto-save Phase 1** — Weekly Summary debounced auto-save (1.5s after typing stops). Status indicator beside the Save button: `Saving…` / `Saved HH:MM` / `Unsaved changes` / `Couldn't save — retry?`. Manual Save still works as a force-immediate. After auto-save, summary leaves the dirty registry → no quit prompt for summary.
+- [ ] **Auto-save Phase 2** — Capture popup draft persistence. New backend commands (`load_capture_draft`/`save_capture_draft`/`clear_capture_draft`) writing to `<journal>/.metadata/capture-draft.json`. Restore on mount, debounced save on change, clear on Submit success. "Draft saved" indicator at the bottom of the popup.
+- [ ] **Auto-save Phase 3** — Strip the red-X prompts entirely. Red X = pure hide on both windows silently. Cmd+Q keeps the unsaved-work guard purely as a backstop for the rare "save just failed" case.
+- [ ] Full journal window with year/week tree sidebar (the big one)
 - [ ] Open and edit past Notes (depends on browser)
 - [ ] Markdown editor with rich text rendering (CodeMirror 6 or similar)
 - [ ] Inline `#` autocomplete in body text (could reuse the LabelInput dropdown logic)
