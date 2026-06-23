@@ -44,6 +44,9 @@ pub fn run() {
             commands::get_settings,
             commands::complete_first_run,
             commands::update_settings,
+            commands::get_current_year_week,
+            commands::get_weekly_summary,
+            commands::update_weekly_summary,
         ])
         .setup(|app| {
             // Determine the journal root: from app-settings.json if present,

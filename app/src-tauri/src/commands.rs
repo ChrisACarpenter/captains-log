@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
 use crate::labels::{record_note_labels, LabelEntry, LabelIndex};
-use crate::notes::{append_note, iso_year_week, Note};
+use crate::notes::{
+    append_note, iso_year_week, parse_weekly_summary, replace_weekly_summary_in_file,
+    weekly_file_scaffold, Note, WeeklySummary,
+};
 use crate::reminders::{restart_reminder_task, ReminderHandle};
 use crate::settings::{
     default_journal_root, AppSettings, JournalSettings, ReminderSettings, Theme, CURRENT_VERSION,
@@ -101,6 +104,96 @@ pub async fn get_labels(
         .await
         .map_err(|e| e.to_string())?;
     Ok(index.labels)
+}
+
+// ---------------------------------------------------------------------------
+// Weekly Summary
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YearWeek {
+    pub year: u32,
+    pub week: u32,
+}
+
+/// Return the current ISO year + week as a single struct. Used by the
+/// frontend to know which weekly file to load.
+#[tauri::command]
+pub fn get_current_year_week() -> YearWeek {
+    let (year, week) = iso_year_week(Local::now().date_naive());
+    YearWeek { year, week }
+}
+
+/// Read and parse the Weekly Summary for a given (year, week). Returns
+/// an empty/default summary when the weekly file doesn't exist yet — the
+/// frontend can render the empty form without distinguishing first-write
+/// from existing-file-with-no-summary.
+#[tauri::command]
+pub async fn get_weekly_summary(
+    storage: State<'_, LocalFilesystem>,
+    year: u32,
+    week: u32,
+) -> Result<WeeklySummary, String> {
+    let content = storage
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(match content {
+        Some(c) => parse_weekly_summary(&c),
+        None => WeeklySummary::default(),
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateWeeklySummaryInput {
+    pub year: u32,
+    pub week: u32,
+    pub key_accomplishments: String,
+    pub plans_and_priorities: String,
+    pub challenges_or_roadblocks: String,
+    pub anything_else: String,
+}
+
+/// Splice the user's edits back into the weekly file, preserving everything
+/// outside the Weekly Summary section (frontmatter, week heading, Weekly Notes
+/// with their captured notes). If the file doesn't exist yet, creates the
+/// scaffold first and then splices.
+///
+/// `last_updated` is stamped server-side with the local clock — the frontend
+/// doesn't send it.
+#[tauri::command]
+pub async fn update_weekly_summary(
+    storage: State<'_, LocalFilesystem>,
+    input: UpdateWeeklySummaryInput,
+) -> Result<(), String> {
+    let now = Local::now().fixed_offset();
+    let new_summary = WeeklySummary {
+        key_accomplishments: input.key_accomplishments,
+        plans_and_priorities: input.plans_and_priorities,
+        challenges_or_roadblocks: input.challenges_or_roadblocks,
+        anything_else: input.anything_else,
+        last_updated: Some(now.format("%Y-%m-%d %H:%M").to_string()),
+    };
+
+    let existing = storage
+        .read_week(input.year, input.week)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let updated = match existing {
+        Some(content) => replace_weekly_summary_in_file(&content, &new_summary),
+        None => {
+            let scaffold = weekly_file_scaffold(input.year, input.week, now);
+            replace_weekly_summary_in_file(&scaffold, &new_summary)
+        }
+    };
+
+    storage
+        .write_week(input.year, input.week, &updated)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

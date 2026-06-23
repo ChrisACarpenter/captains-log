@@ -245,6 +245,9 @@
       </div>
 
       <div class="main-actions">
+        <button class="btn btn-emerald" onclick={() => goto('/summary')}>
+          Write Weekly Summary
+        </button>
         <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
       </div>
     </section>
@@ -455,5 +458,6 @@
     margin-top: var(--space-6);
     display: flex;
     justify-content: flex-end;
+    gap: var(--space-3);
   }
 </style>

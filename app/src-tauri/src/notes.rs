@@ -158,6 +158,169 @@ fn format_week_range(start: NaiveDate, end: NaiveDate, period_year: u32) -> Stri
     }
 }
 
+// ---------------------------------------------------------------------------
+// Weekly Summary
+// ---------------------------------------------------------------------------
+
+/// The four-field Lattice-style summary that lives at the top of every weekly
+/// file. Each field is free markdown.
+///
+/// `last_updated` is a human-readable string (`YYYY-MM-DD HH:MM` in the user's
+/// local time when last saved) or `None` for never-saved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeeklySummary {
+    pub key_accomplishments: String,
+    pub plans_and_priorities: String,
+    pub challenges_or_roadblocks: String,
+    pub anything_else: String,
+    pub last_updated: Option<String>,
+}
+
+const SUMMARY_HEADER: &str = "## Weekly Summary";
+const NOTES_HEADER: &str = "## Weekly Notes";
+const SECTION_KEY_ACC: &str = "### Key accomplishments";
+const SECTION_PLANS: &str = "### Plans and priorities for next week";
+const SECTION_CHALLENGES: &str = "### Challenges or roadblocks";
+const SECTION_OTHER: &str = "### Anything else on your mind";
+const LAST_UPDATED_PREFIX: &str = "*Last updated: ";
+
+/// Parse the Weekly Summary section out of a weekly file's full markdown.
+/// Missing/unparseable sections yield empty strings. Never panics.
+pub fn parse_weekly_summary(file_content: &str) -> WeeklySummary {
+    let mut summary = WeeklySummary::default();
+
+    let Some(summary_start) = file_content.find(SUMMARY_HEADER) else {
+        return summary;
+    };
+    let summary_end = file_content[summary_start..]
+        .find(NOTES_HEADER)
+        .map(|i| summary_start + i)
+        .unwrap_or(file_content.len());
+
+    let section = &file_content[summary_start..summary_end];
+
+    // last_updated line: "*Last updated: VALUE*"
+    if let Some(line_start) = section.find(LAST_UPDATED_PREFIX) {
+        let after_prefix = line_start + LAST_UPDATED_PREFIX.len();
+        if let Some(end_offset) = section[after_prefix..].find('*') {
+            let value = &section[after_prefix..after_prefix + end_offset];
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && trimmed != "never" {
+                summary.last_updated = Some(trimmed.to_string());
+            }
+        }
+    }
+
+    summary.key_accomplishments = extract_subsection(section, SECTION_KEY_ACC);
+    summary.plans_and_priorities = extract_subsection(section, SECTION_PLANS);
+    summary.challenges_or_roadblocks = extract_subsection(section, SECTION_CHALLENGES);
+    summary.anything_else = extract_subsection(section, SECTION_OTHER);
+
+    summary
+}
+
+/// Pull the body of a `### Subheading` block out of the Weekly Summary section.
+/// The body runs from after the heading line to the next `### ` or end of section.
+fn extract_subsection(section: &str, header: &str) -> String {
+    let Some(start) = section.find(header) else {
+        return String::new();
+    };
+    // Skip past the header line itself.
+    let body_start = match section[start..].find('\n') {
+        Some(n) => start + n + 1,
+        None => return String::new(),
+    };
+    // Find the next "### " heading after body_start (must be at start of a line).
+    let mut body_end = section
+        .get(body_start..)
+        .and_then(|s| s.find("\n### "))
+        .map(|i| body_start + i)
+        .unwrap_or(section.len());
+    // Defensive: also stop at any "## " heading (covers ## Weekly Notes if the
+    // section boundary check missed it).
+    if let Some(idx) = section[body_start..].find("\n## ") {
+        let candidate = body_start + idx;
+        if candidate < body_end {
+            body_end = candidate;
+        }
+    }
+    section[body_start..body_end].trim().to_string()
+}
+
+/// Render a Weekly Summary section back to markdown, preserving the structure
+/// the scaffold uses (so the file stays diff-clean).
+pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
+    let last_updated = summary.last_updated.as_deref().unwrap_or("never");
+    format!(
+        "## Weekly Summary\n\
+         *Last updated: {last_updated}*\n\
+         \n\
+         ### Key accomplishments\n\
+         {key}\n\
+         \n\
+         ### Plans and priorities for next week\n\
+         {plans}\n\
+         \n\
+         ### Challenges or roadblocks\n\
+         {challenges}\n\
+         \n\
+         ### Anything else on your mind\n\
+         {other}\n",
+        last_updated = last_updated,
+        key = trim_body(&summary.key_accomplishments),
+        plans = trim_body(&summary.plans_and_priorities),
+        challenges = trim_body(&summary.challenges_or_roadblocks),
+        other = trim_body(&summary.anything_else),
+    )
+}
+
+fn trim_body(s: &str) -> &str {
+    s.trim_end()
+}
+
+/// Splice a new Weekly Summary into an existing weekly file's full content,
+/// preserving everything outside the summary section (frontmatter, the week
+/// heading, Weekly Notes, etc.).
+pub fn replace_weekly_summary_in_file(file_content: &str, new_summary: &WeeklySummary) -> String {
+    let Some(summary_start) = file_content.find(SUMMARY_HEADER) else {
+        // No Weekly Summary section yet — append before Weekly Notes if present,
+        // otherwise at the end.
+        if let Some(notes_start) = file_content.find(NOTES_HEADER) {
+            let before = &file_content[..notes_start];
+            let after = &file_content[notes_start..];
+            return format!("{}{}\n{}", before, render_weekly_summary(new_summary), after);
+        }
+        let mut out = file_content.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&render_weekly_summary(new_summary));
+        return out;
+    };
+
+    let summary_end = file_content[summary_start..]
+        .find(NOTES_HEADER)
+        .map(|i| summary_start + i)
+        .unwrap_or(file_content.len());
+
+    let before = &file_content[..summary_start];
+    let after = &file_content[summary_end..];
+
+    let mut new_section = render_weekly_summary(new_summary);
+    // Ensure exactly one blank line between the new Summary section and what
+    // follows (Weekly Notes header, or EOF).
+    if !new_section.ends_with('\n') {
+        new_section.push('\n');
+    }
+
+    format!("{before}{new_section}\n{after}")
+}
+
+// ---------------------------------------------------------------------------
+// append_note
+// ---------------------------------------------------------------------------
+
 /// Append a note into the weekly file for `(year, week)`, creating the file
 /// with a fresh scaffold if it does not yet exist.
 ///
@@ -358,6 +521,140 @@ mod tests {
 
         let expected = dir.path().join("2026").join("2026-W25.md");
         assert!(expected.exists());
+    }
+
+    // ---- WeeklySummary parsing / serialization ----
+
+    fn scaffold_with_summary(extra_body: &str) -> String {
+        // A weekly file with a scaffold + content stuffed into the first
+        // summary subsection. Used to verify parsing without coupling tests
+        // to the exact byte layout.
+        let now = ts("2026-06-22T09:00:00-04:00");
+        let scaffold = weekly_file_scaffold(2026, 26, now);
+        // Insert content under "### Key accomplishments\n"
+        scaffold.replacen(
+            "### Key accomplishments\n",
+            &format!("### Key accomplishments\n{extra_body}\n"),
+            1,
+        )
+    }
+
+    #[test]
+    fn parse_empty_summary_returns_empty_fields() {
+        let now = ts("2026-06-22T09:00:00-04:00");
+        let file = weekly_file_scaffold(2026, 26, now);
+        let s = parse_weekly_summary(&file);
+        assert_eq!(s.key_accomplishments, "");
+        assert_eq!(s.plans_and_priorities, "");
+        assert_eq!(s.challenges_or_roadblocks, "");
+        assert_eq!(s.anything_else, "");
+        assert_eq!(s.last_updated, None);
+    }
+
+    #[test]
+    fn parse_summary_extracts_each_subsection() {
+        let file = "## Weekly Summary\n*Last updated: 2026-06-22 17:00*\n\
+                    \n### Key accomplishments\n- shipped foo\n- fixed bar\n\
+                    \n### Plans and priorities for next week\n- ship baz\n\
+                    \n### Challenges or roadblocks\nnone today\n\
+                    \n### Anything else on your mind\nfeeling good\n\
+                    \n## Weekly Notes\n\
+                    \n### 2026-06-22 09:00 — Hi\nhi body\n";
+
+        let s = parse_weekly_summary(file);
+        assert_eq!(s.last_updated.as_deref(), Some("2026-06-22 17:00"));
+        assert_eq!(s.key_accomplishments, "- shipped foo\n- fixed bar");
+        assert_eq!(s.plans_and_priorities, "- ship baz");
+        assert_eq!(s.challenges_or_roadblocks, "none today");
+        assert_eq!(s.anything_else, "feeling good");
+    }
+
+    #[test]
+    fn parse_summary_ignores_never_marker_as_last_updated() {
+        let now = ts("2026-06-22T09:00:00-04:00");
+        let file = weekly_file_scaffold(2026, 26, now);
+        let s = parse_weekly_summary(&file);
+        assert_eq!(s.last_updated, None);
+    }
+
+    #[test]
+    fn parse_summary_handles_content_in_one_field_only() {
+        let file = scaffold_with_summary("Did the thing.");
+        let s = parse_weekly_summary(&file);
+        assert_eq!(s.key_accomplishments, "Did the thing.");
+        assert_eq!(s.plans_and_priorities, "");
+    }
+
+    #[test]
+    fn render_summary_roundtrips_through_parse() {
+        let original = WeeklySummary {
+            key_accomplishments: "- one\n- two".to_string(),
+            plans_and_priorities: "- three".to_string(),
+            challenges_or_roadblocks: "- four".to_string(),
+            anything_else: "five".to_string(),
+            last_updated: Some("2026-06-22 17:00".to_string()),
+        };
+        let rendered = render_weekly_summary(&original);
+        let parsed = parse_weekly_summary(&rendered);
+        assert_eq!(parsed.key_accomplishments, original.key_accomplishments);
+        assert_eq!(parsed.plans_and_priorities, original.plans_and_priorities);
+        assert_eq!(parsed.challenges_or_roadblocks, original.challenges_or_roadblocks);
+        assert_eq!(parsed.anything_else, original.anything_else);
+        assert_eq!(parsed.last_updated, original.last_updated);
+    }
+
+    #[test]
+    fn replace_summary_preserves_notes_below() {
+        let original = "## Weekly Summary\n\
+                        *Last updated: never*\n\
+                        \n### Key accomplishments\n\
+                        \n### Plans and priorities for next week\n\
+                        \n### Challenges or roadblocks\n\
+                        \n### Anything else on your mind\n\
+                        \n## Weekly Notes\n\
+                        \n### 2026-06-22 09:00 — Hi\n\
+                        **Labels:** #release\n\
+                        \nFirst note body.\n";
+
+        let new_summary = WeeklySummary {
+            key_accomplishments: "- shipped Captain's Log".to_string(),
+            plans_and_priorities: "- testing!".to_string(),
+            challenges_or_roadblocks: String::new(),
+            anything_else: String::new(),
+            last_updated: Some("2026-06-22 17:30".to_string()),
+        };
+
+        let updated = replace_weekly_summary_in_file(original, &new_summary);
+
+        // New content in
+        assert!(updated.contains("- shipped Captain's Log"));
+        assert!(updated.contains("*Last updated: 2026-06-22 17:30*"));
+        // Existing note preserved
+        assert!(updated.contains("### 2026-06-22 09:00 — Hi"));
+        assert!(updated.contains("**Labels:** #release"));
+        assert!(updated.contains("First note body."));
+        // Single Weekly Notes header still present
+        assert_eq!(updated.matches("## Weekly Notes").count(), 1);
+        // Single Weekly Summary header still present
+        assert_eq!(updated.matches("## Weekly Summary").count(), 1);
+    }
+
+    #[test]
+    fn replace_summary_works_when_file_has_no_summary_section() {
+        // Hypothetical legacy/malformed file that's missing the summary.
+        let original = "# Week of June 22 - June 28, 2026\n\
+                        \n## Weekly Notes\n\
+                        \n### 2026-06-22 09:00 — Hi\n\
+                        body\n";
+        let new_summary = WeeklySummary {
+            key_accomplishments: "recovered".to_string(),
+            ..Default::default()
+        };
+        let updated = replace_weekly_summary_in_file(original, &new_summary);
+        assert!(updated.contains("## Weekly Summary"));
+        assert!(updated.contains("recovered"));
+        assert!(updated.contains("## Weekly Notes"));
+        assert!(updated.contains("### 2026-06-22 09:00 — Hi"));
     }
 
     // ---- Local timezone integration check ----
