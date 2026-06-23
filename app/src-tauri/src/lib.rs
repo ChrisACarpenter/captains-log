@@ -21,6 +21,7 @@ use tauri::{
     Manager, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_window_state::StateFlags;
 use tokio::sync::RwLock;
 
 use settings::default_journal_root;
@@ -44,9 +45,26 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        // Auto-saves and restores window positions/sizes across launches —
-        // so the capture popup (and main) remember which monitor and where.
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Auto-saves and restores window size/position/maximized state across
+        // launches. Two important deviations from the plugin's defaults:
+        //
+        //   - VISIBLE flag dropped. The plugin's default includes VISIBLE and
+        //     its restore_state forces .show() + .set_focus() on every window,
+        //     which overrides tauri.conf.json's `"visible": false` on the
+        //     capture popup and pops it open on every launch.
+        //   - skip_initial_state for capture. Belt-and-suspenders: even if a
+        //     future flag change re-enables VISIBLE, the capture popup is
+        //     opted out of initial-state restore so it stays hidden until the
+        //     tray is clicked.
+        //
+        // Geometry is still saved on CloseRequested and on app Exit, so when
+        // the popup re-shows it lands on the monitor/position it was last on.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
+                .skip_initial_state(CAPTURE_WINDOW_LABEL)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             commands::create_note,
             commands::read_week,
@@ -137,6 +155,25 @@ pub fn run() {
                         }
                         // Otherwise: default close behavior — main window
                         // closes, app continues running in the tray.
+                    }
+                });
+            }
+
+            // Capture popup close button (red-X / Cmd-W) hides instead of
+            // destroying. Default Tauri behavior would drop the window from
+            // the app's registry, after which `get_webview_window("capture")`
+            // returns None and the tray click handler silently no-ops. Hiding
+            // keeps the WebviewWindow handle alive for the lifetime of the
+            // app so the tray reliably toggles show/hide.
+            {
+                let capture_window = app
+                    .get_webview_window(CAPTURE_WINDOW_LABEL)
+                    .expect("capture window declared in tauri.conf.json");
+                let capture_clone = capture_window.clone();
+                capture_window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = capture_clone.hide();
                     }
                 });
             }
