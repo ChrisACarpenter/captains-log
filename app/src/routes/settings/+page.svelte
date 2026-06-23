@@ -3,6 +3,7 @@
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
+  import { openUrl } from '@tauri-apps/plugin-opener';
 
   type Theme = 'dark' | 'light';
 
@@ -70,6 +71,20 @@
   function setTheme(t: Theme) {
     currentTheme = t;
     document.documentElement.setAttribute('data-theme', t);
+  }
+
+  // Deep link to System Settings → Notifications → Captain's Log.
+  // macOS defaults newly-installed apps to "Temporary" notifications which
+  // auto-dismiss and hide our Write/OK buttons behind a hover-to-reveal.
+  // "Persistent" keeps the reminder on screen with buttons visible until clicked.
+  async function openNotificationSettings() {
+    try {
+      await openUrl(
+        'x-apple.systempreferences:com.apple.preference.notifications?id=com.prodigygame.captainslog'
+      );
+    } catch (err) {
+      saveError = String(err);
+    }
   }
 
   async function pickFolder() {
@@ -222,6 +237,15 @@
                 <input class="text-input" type="time" bind:value={reminderTime} />
               </label>
             </div>
+            <p class="hint persistent-hint">
+              Tip: macOS sets new apps to <strong>Temporary</strong> notifications by default,
+              which auto-dismiss and hide the Write button behind a hover.
+              <button type="button" class="link-button" onclick={openNotificationSettings}>
+                Open Notification settings
+              </button>
+              and switch <strong>Alert Style</strong> to <strong>Persistent</strong> so the
+              reminder stays on screen with buttons visible.
+            </p>
           {/if}
         </div>
 
@@ -320,6 +344,38 @@
     font-size: var(--text-caption);
     line-height: var(--text-caption-lh);
     color: var(--text-secondary);
+  }
+
+  .persistent-hint {
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--accent-primary);
+  }
+
+  .persistent-hint strong {
+    color: var(--text-primary);
+    font-weight: normal;
+    font-family: var(--font-display);
+  }
+
+  /* Inline link styled like a text link — used in hint text to open
+   * external URLs (macOS System Settings deep links). */
+  .link-button {
+    display: inline;
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    color: var(--accent-primary);
+    font: inherit;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  .link-button:hover {
+    filter: brightness(1.1);
   }
 
   /* Theme toggle */
