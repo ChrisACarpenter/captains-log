@@ -33,7 +33,7 @@ Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — f
 ### Done
 
 - [x] Dedicated quick-capture popup window (label `capture`, 460×460, hidden by default, opens via tray)
-- [x] Dock icon in addition to menu bar — both shipped (clicking either reaches the app)
+- [x] Dock icon in addition to menu bar — both shipped
 - [x] First-run wizard (4 steps: welcome → name → location → reminder)
 - [x] Two-tier settings — app-level (`~/Library/Application Support/.../app-settings.json`) + journal-level (`<root>/.metadata/settings.json`)
 - [x] Folder picker via `tauri-plugin-dialog`
@@ -41,20 +41,20 @@ Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — f
 - [x] In-process scheduler restart on settings save (no double-restart needed)
 - [x] RPG petbook icon as the app icon (Dock, Finder, Cmd+Tab)
 - [x] RPG scroll icon as the reminder notification icon
+- [x] Settings panel — `/settings` route, full form (name, location, reminder, theme), all changes apply in-process
+- [x] Light/dark theme toggle in Settings (live preview, persisted in app-settings.json)
+- [x] Label autocomplete (chip-based JIRA-style dropdown with per-label color from accent palette, fed by `labels.json`)
+- [x] `labels.json` schema normalized to camelCase (snake_case alias kept for backwards compat)
+- [x] Weekly Summary UI (the 4-field Lattice template at `/summary`)
+- [x] Hot-swap `LocalFilesystem` when journal_root changes — settings panel changes apply in-process, no app restart needed
 
 ### Remaining
 
 - [ ] Full journal window with year/week tree sidebar
-- [ ] Open and edit past Notes
+- [ ] Open and edit past Notes (depends on browser)
 - [ ] Markdown editor with rich text rendering (CodeMirror 6 or similar)
-- [ ] Label autocomplete (JIRA-style dropdown, fed by `labels.json`)
-- [ ] Inline `#` autocomplete in body text
-- [ ] Weekly Summary UI (the 4-field Lattice template)
-- [ ] Settings panel — `/settings` route to edit name, journal location, reminder *after* first-run (uses scheduler-restart-on-save we already shipped)
-- [ ] Light/dark theme toggle in Settings
-- [ ] macOS system spell-check on inputs (mostly the editor)
-- [ ] `labels.json` schema normalized to camelCase (currently `first_used`/`last_used` — predates the camelCase sweep)
-- [ ] Hot-swap `LocalFilesystem` when journal_root changes (currently still asks for restart on root change; reminder config already hot-swaps)
+- [ ] Inline `#` autocomplete in body text (could reuse the LabelInput dropdown logic)
+- [ ] macOS system spell-check on inputs (largely default; verify on the new textareas)
 
 **Success:** Captain's Log has replaced any other journaling system I was using.
 
