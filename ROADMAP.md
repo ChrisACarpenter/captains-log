@@ -51,6 +51,7 @@ Phase 1 MVP is complete and verified end-to-end. Phase 2 is partially done — f
 - [x] **Week Stripe** at the top of the main window — a 4px Prodigy-orange progress meter (track + fill) that grows across the week. Earns its position by being load-bearing on day 1, not decorative chrome.
 - [x] **Noot reminder marker** — when a weekly reminder is set, a small Noot mascot hangs on the stripe at the reminder day/time position. (`npc-noot-small` extracted from `ui-login-credentials` atlas.)
 - [x] **Wizard guide hand** — rotated `pointer-hand-straight` sprite (from `ui-guide-hands`) bobs gently next to the active input on first-run setup steps.
+- [x] **Weekly reminder notification action buttons (Write / OK)** — macOS path via `mac-notification-sys` directly (the cross-platform `tauri-plugin-notification` doesn't expose actions on desktop). Write opens the main window + navigates to `/summary`; OK and timeout dismiss silently. Notification also carries the scroll icon via `app_icon`.
 
 ### Remaining
 
@@ -104,7 +105,6 @@ The reason this app exists.
 
 ## Deferred / TBD
 
-- [ ] **Weekly reminder notification action buttons (OK / Write)** — `tauri-plugin-notification` 2.3.3 only exposes `NotificationAction` / `ActionType` under `#[cfg(mobile)]`; the desktop builder accepts title/body/icon/sound only. Path forward when this becomes a priority: (a) wait for upstream plugin to expose desktop actions, or (b) integrate `mac-notification-sys` directly for macOS-specific button support (`MainButton::SingleAction` + `other_button` + a blocking response loop). Today's notification still surfaces and lands in Notification Center; it just can't carry buttons or a click-to-summary handler.
 - [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
 - [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
 - [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.

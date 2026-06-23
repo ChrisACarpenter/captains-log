@@ -77,6 +77,11 @@ pub fn run() {
             commands::update_weekly_summary,
         ])
         .setup(|app| {
+            // Register the macOS bundle ID with mac-notification-sys so the
+            // weekly reminder notification (in reminders::fire_notification)
+            // can render with action buttons. No-op on other platforms.
+            reminders::register_macos_bundle();
+
             // Determine the journal root: from app-settings.json if present,
             // otherwise the platform default (~/Documents/CaptainsLog/).
             // This needs the app handle for app.path(), so we do it in setup().

@@ -22,7 +22,8 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Datelike, Duration, Local, Timelike, Weekday};
 use tauri::async_runtime::JoinHandle;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::settings::ReminderSettings;
@@ -183,24 +184,11 @@ pub fn restart_reminder_task(
 
             let greeting = user_name.as_deref().unwrap_or("Captain");
             let body = format!("Time to log this week's summary, {greeting}.");
+            let icon_path = notification_icon_path();
 
-            let mut builder = app
-                .notification()
-                .builder()
-                .title("Captain's Log")
-                .body(&body);
+            fire_notification(&app, &body, icon_path.as_deref());
 
-            if let Some(icon_path) = notification_icon_path() {
-                builder = builder.icon(icon_path.to_string_lossy().into_owned());
-            }
-
-            let result = builder.show();
-
-            if let Err(e) = result {
-                eprintln!("[reminders] notification failed: {e}");
-            } else {
-                println!("[reminders] fired at {}", Local::now().format("%H:%M:%S"));
-            }
+            println!("[reminders] fired at {}", Local::now().format("%H:%M:%S"));
 
             // Sleep a minute so the next iteration doesn't recompute "now" inside
             // the same target minute and re-fire immediately.
@@ -210,6 +198,101 @@ pub fn restart_reminder_task(
 
     *slot = Some(new_handle);
 }
+
+// ---------------------------------------------------------------------------
+// Fire-the-notification (platform-specific)
+// ---------------------------------------------------------------------------
+
+/// Display the weekly reminder. macOS uses `mac-notification-sys` directly so
+/// we can render action buttons (`Write` / `OK`) and control the icon shown
+/// next to the title — neither is exposed by `tauri-plugin-notification` on
+/// desktop. Other platforms still go through the Tauri plugin.
+///
+/// The macOS path spawns a blocking task because `send_notification` waits
+/// for the user to interact (or for the notification to dismiss/timeout)
+/// before returning. The scheduler loop is async, so we fire-and-forget and
+/// the response handling happens inside the spawned closure.
+#[cfg(target_os = "macos")]
+fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::Path>) {
+    use mac_notification_sys::{send_notification, MainButton, Notification, NotificationResponse};
+
+    let app = app.clone();
+    let body = body.to_string();
+    let icon = icon_path.map(|p| p.to_string_lossy().into_owned());
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut notification = Notification::new();
+        notification
+            .main_button(MainButton::SingleAction("Write"))
+            .close_button("OK");
+        if let Some(icon_path) = icon.as_deref() {
+            notification.app_icon(icon_path);
+        }
+
+        let response = send_notification("Captain's Log", None, &body, Some(&notification));
+
+        match response {
+            Ok(NotificationResponse::ActionButton(action)) if action == "Write" => {
+                open_summary(&app);
+            }
+            Ok(NotificationResponse::Click) => {
+                // Clicking the body (not the buttons) also opens the summary —
+                // same UX intent as the Write action.
+                open_summary(&app);
+            }
+            Ok(_) => {
+                // OK close button, no-interaction timeout, or text reply (we
+                // don't expose an input field) — dismiss silently.
+            }
+            Err(e) => {
+                eprintln!("[reminders] mac-notification-sys failed: {e}");
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fire_notification(app: &AppHandle, body: &str, icon_path: Option<&std::path::Path>) {
+    let mut builder = app
+        .notification()
+        .builder()
+        .title("Captain's Log")
+        .body(body);
+
+    if let Some(icon_path) = icon_path {
+        builder = builder.icon(icon_path.to_string_lossy().into_owned());
+    }
+
+    if let Err(e) = builder.show() {
+        eprintln!("[reminders] notification failed: {e}");
+    }
+}
+
+/// Bring the main window to the foreground and tell the frontend to navigate
+/// to the weekly summary page. Called when the user clicks the notification's
+/// "Write" action button (or the body, same intent).
+fn open_summary(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    let _ = app.emit("open-summary", ());
+}
+
+/// Register the macOS bundle identifier with mac-notification-sys. macOS
+/// requires this for notifications to render correctly when running outside
+/// a fully-bundled .app (e.g. during `npm run tauri dev`). Idempotent — safe
+/// to call once at startup.
+#[cfg(target_os = "macos")]
+pub fn register_macos_bundle() {
+    if let Err(e) = mac_notification_sys::set_application("com.prodigygame.captainslog") {
+        eprintln!("[reminders] failed to set macOS bundle identifier: {e}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn register_macos_bundle() {}
 
 // ---------------------------------------------------------------------------
 // Tests
