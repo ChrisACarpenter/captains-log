@@ -34,8 +34,6 @@
   let reminderDay = $state(4);
   let savingError = $state('');
   let saving = $state(false);
-  let restartNeeded = $state(false);
-
   const DAYS = [
     { value: 0, label: 'Monday' },
     { value: 1, label: 'Tuesday' },
@@ -79,7 +77,7 @@
     saving = true;
     try {
       const [hourStr, minuteStr] = reminderTime.split(':');
-      const restart = await invoke<boolean>('complete_first_run', {
+      await invoke('complete_first_run', {
         input: {
           userName: nameInput.trim() || null,
           journalRoot: journalRootInput,
@@ -91,12 +89,9 @@
           }
         }
       });
-      if (restart) {
-        restartNeeded = true;
-      } else {
-        // No restart needed — refetch and the conditional will swap to normal mode.
-        settings = await invoke<Settings>('get_settings');
-      }
+      // Refetch settings — firstRun is now false, the conditional swaps to normal mode.
+      // Storage + reminder both hot-swap in-process; no app restart needed.
+      settings = await invoke<Settings>('get_settings');
     } catch (err) {
       savingError = String(err);
     } finally {
@@ -120,19 +115,7 @@
   <!-- ============================== Wizard ============================== -->
   <main class="wizard">
     <div class="wizard-frame">
-      {#if restartNeeded}
-        <section class="step">
-          <h1>Almost there.</h1>
-          <p class="lead">
-            You picked a journal location that's different from the default.
-          </p>
-          <p>
-            Please quit Captain's Log (<strong>⌘Q</strong>) and reopen it.
-            Your settings are saved — your next launch will start clean at your
-            chosen location.
-          </p>
-        </section>
-      {:else if step === 0}
+      {#if step === 0}
         <section class="step">
           <h1>Welcome to Captain's Log.</h1>
           <p class="lead">A weekly work journal that makes self-reviews painless.</p>
@@ -216,7 +199,7 @@
         </section>
       {/if}
 
-      {#if !restartNeeded && step > 0}
+      {#if step > 0}
         <div class="steps-indicator">
           <span class="dot" class:active={step === 1}></span>
           <span class="dot" class:active={step === 2}></span>

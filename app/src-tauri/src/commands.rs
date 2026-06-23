@@ -26,6 +26,7 @@ use crate::settings::{
     default_journal_root, AppSettings, JournalSettings, ReminderSettings, Theme, CURRENT_VERSION,
 };
 use crate::storage::{LocalFilesystem, StorageBackend};
+use crate::SharedStorage;
 
 // ---------------------------------------------------------------------------
 // create_note / read_week
@@ -45,7 +46,7 @@ pub struct CreateNoteInput {
 /// Append a Note to the current ISO week's file.
 #[tauri::command]
 pub async fn create_note(
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     input: CreateNoteInput,
 ) -> Result<(), String> {
     let now = Local::now().fixed_offset();
@@ -70,6 +71,8 @@ pub async fn create_note(
         body: input.body,
     };
 
+    let storage = storage_state.read().await;
+
     append_note(&*storage, year, week, &note)
         .await
         .map_err(|e| e.to_string())?;
@@ -84,10 +87,11 @@ pub async fn create_note(
 /// Read the raw markdown of a weekly file. Returns `None` if absent.
 #[tauri::command]
 pub async fn read_week(
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     year: u32,
     week: u32,
 ) -> Result<Option<String>, String> {
+    let storage = storage_state.read().await;
     storage
         .read_week(year, week)
         .await
@@ -98,8 +102,9 @@ pub async fn read_week(
 /// (the autocomplete ranking from `docs/label-system.md`).
 #[tauri::command]
 pub async fn get_labels(
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
 ) -> Result<Vec<LabelEntry>, String> {
+    let storage = storage_state.read().await;
     let index = LabelIndex::load(&*storage)
         .await
         .map_err(|e| e.to_string())?;
@@ -131,10 +136,11 @@ pub fn get_current_year_week() -> YearWeek {
 /// from existing-file-with-no-summary.
 #[tauri::command]
 pub async fn get_weekly_summary(
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     year: u32,
     week: u32,
 ) -> Result<WeeklySummary, String> {
+    let storage = storage_state.read().await;
     let content = storage
         .read_week(year, week)
         .await
@@ -165,7 +171,7 @@ pub struct UpdateWeeklySummaryInput {
 /// doesn't send it.
 #[tauri::command]
 pub async fn update_weekly_summary(
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     input: UpdateWeeklySummaryInput,
 ) -> Result<(), String> {
     let now = Local::now().fixed_offset();
@@ -176,6 +182,8 @@ pub async fn update_weekly_summary(
         anything_else: input.anything_else,
         last_updated: Some(now.format("%Y-%m-%d %H:%M").to_string()),
     };
+
+    let storage = storage_state.read().await;
 
     let existing = storage
         .read_week(input.year, input.week)
@@ -221,13 +229,15 @@ pub struct SettingsBundle {
 #[tauri::command]
 pub async fn get_settings(
     app: AppHandle,
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
 ) -> Result<SettingsBundle, String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     let app_settings = AppSettings::load(&app_data_dir)
         .await
         .map_err(|e| e.to_string())?;
+
+    let storage = storage_state.read().await;
 
     let journal_settings = JournalSettings::load(&*storage)
         .await
@@ -278,10 +288,10 @@ pub struct UpdateSettingsInput {
 #[tauri::command]
 pub async fn complete_first_run(
     app: AppHandle,
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     reminder_handle: State<'_, ReminderHandle>,
     input: CompleteFirstRunInput,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     // 1. Save app-level settings (journal_root + theme — theme defaults to Dark on first run).
@@ -308,9 +318,18 @@ pub async fn complete_first_run(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 3. Restart the reminder scheduler in-process with the new config.
-    //    This is what removes the "second restart" friction — the wizard's
-    //    reminder takes effect immediately, no binary relaunch needed.
+    // 3. Hot-swap the running LocalFilesystem if the user picked a non-default
+    //    root. After this, subsequent commands write to the chosen location
+    //    without an app restart.
+    {
+        let mut fs = storage_state.write().await;
+        if fs.root() != input.journal_root.as_path() {
+            *fs = LocalFilesystem::new(input.journal_root.clone());
+        }
+    }
+
+    // 4. Restart the reminder scheduler in-process with the new config.
+    //    The wizard's reminder takes effect immediately — no relaunch needed.
     restart_reminder_task(
         app.clone(),
         &reminder_handle,
@@ -318,25 +337,23 @@ pub async fn complete_first_run(
         input.user_name,
     );
 
-    // 4. Signal whether a restart is needed (for the journal_root change,
-    //    which the running LocalFilesystem can't hot-swap yet).
-    let restart_needed = storage.root() != input.journal_root.as_path();
-    Ok(restart_needed)
+    // No restart needed — storage and reminder both hot-swap.
+    Ok(())
 }
 
 /// Save edits from the post-first-run settings panel.
 ///
 /// Like `complete_first_run`, but also handles `theme` (which the wizard
 /// doesn't expose) and is meant for use after the user has already onboarded.
-/// Returns `true` if a restart is needed because the journal root changed —
-/// the reminder + theme always apply in-process without restart.
+/// Everything applies in-process — no app restart needed, even when
+/// journal_root changes (the running `LocalFilesystem` is swapped).
 #[tauri::command]
 pub async fn update_settings(
     app: AppHandle,
-    storage: State<'_, LocalFilesystem>,
+    storage_state: State<'_, SharedStorage>,
     reminder_handle: State<'_, ReminderHandle>,
     input: UpdateSettingsInput,
-) -> Result<bool, String> {
+) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
 
     // 1. App-level (journal_root + theme).
@@ -363,7 +380,15 @@ pub async fn update_settings(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 3. Restart the reminder scheduler with the new config (no-op if disabled).
+    // 3. Hot-swap the running LocalFilesystem if root changed.
+    {
+        let mut fs = storage_state.write().await;
+        if fs.root() != input.journal_root.as_path() {
+            *fs = LocalFilesystem::new(input.journal_root.clone());
+        }
+    }
+
+    // 4. Restart the reminder scheduler with the new config (no-op if disabled).
     restart_reminder_task(
         app.clone(),
         &reminder_handle,
@@ -371,8 +396,5 @@ pub async fn update_settings(
         input.user_name,
     );
 
-    // 4. Restart needed only when journal_root changed — theme + reminder
-    //    apply in-process.
-    let restart_needed = storage.root() != input.journal_root.as_path();
-    Ok(restart_needed)
+    Ok(())
 }

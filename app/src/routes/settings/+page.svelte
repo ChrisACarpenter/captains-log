@@ -37,8 +37,6 @@
   let loadError = $state('');
   let saving = $state(false);
   let saveError = $state('');
-  let restartNeeded = $state(false);
-
   // Form fields
   let nameInput = $state('');
   let journalRootInput = $state('');
@@ -94,7 +92,7 @@
     saving = true;
     try {
       const [hourStr, minuteStr] = reminderTime.split(':');
-      const restart = await invoke<boolean>('update_settings', {
+      await invoke('update_settings', {
         input: {
           userName: nameInput.trim() || null,
           journalRoot: journalRootInput,
@@ -107,11 +105,8 @@
           theme: currentTheme
         }
       });
-      if (restart) {
-        restartNeeded = true;
-      } else {
-        await goto('/');
-      }
+      // Storage, reminder, and theme all hot-swap in-process — no restart needed.
+      await goto('/');
     } catch (err) {
       saveError = String(err);
     } finally {
@@ -138,16 +133,6 @@
       <h2>Couldn't load settings.</h2>
       <p>{loadError}</p>
       <button class="btn btn-marble" onclick={() => goto('/')}>Back</button>
-    </div>
-  </main>
-{:else if restartNeeded}
-  <main class="loading">
-    <div class="card">
-      <h2>Almost there.</h2>
-      <p>
-        You changed your journal location. Please quit Captain's Log (<strong>⌘Q</strong>)
-        and reopen it. Your settings are saved.
-      </p>
     </div>
   </main>
 {:else}
@@ -185,9 +170,9 @@
             <button class="btn btn-marble btn-sm" onclick={pickFolder}>Browse…</button>
           </div>
           {#if journalRootInput !== originalJournalRoot}
-            <p class="hint warn">
-              Changing this will require Captain's Log to restart so the new
-              location takes effect.
+            <p class="hint">
+              The change applies as soon as you click Done — existing notes
+              stay at the old location.
             </p>
           {/if}
         </div>
@@ -337,10 +322,6 @@
     color: var(--text-secondary);
   }
 
-  .hint.warn {
-    color: var(--accent-yellow);
-  }
-
   /* Theme toggle */
   .theme-row {
     display: flex;
@@ -439,9 +420,5 @@
   .error-card {
     background: rgba(235, 1, 139, 0.08);
     border-color: rgba(235, 1, 139, 0.4);
-  }
-
-  strong {
-    color: var(--text-primary);
   }
 </style>

@@ -20,9 +20,15 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     Manager,
 };
+use tokio::sync::RwLock;
 
 use settings::default_journal_root;
 use storage::LocalFilesystem;
+
+/// Tauri-managed storage state. Wrapped in a `tokio::sync::RwLock` so a
+/// settings change can swap the root in-process without an app restart.
+/// All commands take a brief read lock; only `update_settings` ever writes.
+pub type SharedStorage = RwLock<LocalFilesystem>;
 
 /// PNG for the macOS menu bar template icon (book outline). Black-with-alpha
 /// at 22pt @ 2x so the system can recolor for light/dark menu bar mode.
@@ -63,7 +69,7 @@ pub fn run() {
                     default_journal_root()
                 }
             };
-            app.manage(LocalFilesystem::new(journal_root));
+            app.manage::<SharedStorage>(RwLock::new(LocalFilesystem::new(journal_root)));
 
             // Manage the reminder task handle so commands can restart the
             // scheduler in-process when settings change.
@@ -72,10 +78,11 @@ pub fn run() {
             // Spawn the weekly reminder task if enabled. Reads journal-level
             // settings (user_name + reminder config) from the just-mounted storage.
             {
-                let storage = app.state::<LocalFilesystem>();
-                let journal_settings = tauri::async_runtime::block_on(
-                    settings::JournalSettings::load(&*storage),
-                )
+                let storage_state = app.state::<SharedStorage>();
+                let journal_settings = tauri::async_runtime::block_on(async {
+                    let fs = storage_state.read().await;
+                    settings::JournalSettings::load(&*fs).await
+                })
                 .unwrap_or_default();
                 let reminder_handle = app.state::<reminders::ReminderHandle>();
                 reminders::restart_reminder_task(
