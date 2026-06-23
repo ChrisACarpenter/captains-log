@@ -164,6 +164,37 @@ fn format_week_range(start: NaiveDate, end: NaiveDate, period_year: u32) -> Stri
 // Weekly Summary
 // ---------------------------------------------------------------------------
 
+/// In-flight quick-capture note auto-saved to `.metadata/capture-draft.json`.
+/// Distinct from a real `Note`: a draft is the user's typing state that
+/// hasn't been formally submitted yet, so we persist it (so it survives a
+/// quit / crash / mistaken hide) without committing it to the weekly file.
+///
+/// On Submit, the draft is cleared and the contents become a real Note.
+/// On load, an empty draft (no title, no body, no labels) is treated as
+/// "nothing to restore" — the frontend doesn't populate fields with empties.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDraft {
+    pub title: Option<String>,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+impl CaptureDraft {
+    /// True when there's nothing to restore — neither a title, body text,
+    /// nor any labels typed.
+    pub fn is_empty(&self) -> bool {
+        let title_empty = self
+            .title
+            .as_deref()
+            .map(|t| t.trim().is_empty())
+            .unwrap_or(true);
+        title_empty && self.body.trim().is_empty() && self.labels.is_empty()
+    }
+}
+
 /// The four-field Lattice-style summary that lives at the top of every weekly
 /// file. Each field is free markdown.
 ///

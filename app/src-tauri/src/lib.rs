@@ -266,6 +266,9 @@ pub fn run() {
             commands::get_weekly_summary,
             commands::update_weekly_summary,
             commands::set_window_dirty,
+            commands::load_capture_draft,
+            commands::save_capture_draft,
+            commands::clear_capture_draft,
         ])
         .setup(|app| {
             // Cross-window dirty registry — read at quit time by try_quit.

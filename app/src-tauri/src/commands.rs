@@ -19,7 +19,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::labels::{record_note_labels, LabelEntry, LabelIndex};
 use crate::notes::{
     append_note, iso_year_week, parse_weekly_summary, replace_weekly_summary_in_file,
-    weekly_file_scaffold, Note, WeeklySummary,
+    weekly_file_scaffold, CaptureDraft, Note, WeeklySummary,
 };
 use crate::reminders::{
     request_notification_authorization, restart_reminder_task, ReminderHandle,
@@ -454,4 +454,80 @@ pub fn set_window_dirty(
 ) {
     let mut guard = registry.0.lock().expect("dirty registry mutex poisoned");
     guard.insert(key, entry);
+}
+
+// ---------------------------------------------------------------------------
+// Capture draft (auto-save Phase 2)
+// ---------------------------------------------------------------------------
+//
+// The quick-capture popup auto-saves its in-flight contents to
+// `<journal>/.metadata/capture-draft.json` on a 1.5s debounce. This lets the
+// user close the popup, quit the app, or crash without losing what they were
+// typing — the draft reloads on next launch. The draft is cleared on a
+// successful Submit (when it becomes a real Note in the weekly file).
+
+const CAPTURE_DRAFT_FILE: &str = "capture-draft.json";
+
+/// Load the saved draft, if any. Returns `None` when the file is missing,
+/// when it parses but is empty (all fields blank — semantically nothing to
+/// restore), or when the file is corrupt (treated as "no draft" rather than
+/// surfacing a parse error — a corrupt file simply means the user starts
+/// with an empty popup, which is the same as no draft).
+#[tauri::command]
+pub async fn load_capture_draft(
+    storage_state: State<'_, SharedStorage>,
+) -> Result<Option<CaptureDraft>, String> {
+    let storage = storage_state.read().await;
+    let raw = match storage.read_metadata(CAPTURE_DRAFT_FILE).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let draft: CaptureDraft = match serde_json::from_str(&raw) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[capture-draft] failed to parse {CAPTURE_DRAFT_FILE}: {e}");
+            return Ok(None);
+        }
+    };
+    if draft.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(draft))
+    }
+}
+
+/// Persist the current draft. If the draft is empty (after normalization)
+/// we delete the file instead of writing empty bytes — keeps the
+/// `.metadata/` folder clean for the no-draft case.
+#[tauri::command]
+pub async fn save_capture_draft(
+    storage_state: State<'_, SharedStorage>,
+    draft: CaptureDraft,
+) -> Result<(), String> {
+    let storage = storage_state.read().await;
+    if draft.is_empty() {
+        return storage
+            .delete_metadata(CAPTURE_DRAFT_FILE)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    let serialized = serde_json::to_string_pretty(&draft).map_err(|e| e.to_string())?;
+    storage
+        .write_metadata(CAPTURE_DRAFT_FILE, &serialized)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Delete the draft file. Called after a successful Submit (the draft
+/// became a real Note). Idempotent — "file already absent" is fine.
+#[tauri::command]
+pub async fn clear_capture_draft(
+    storage_state: State<'_, SharedStorage>,
+) -> Result<(), String> {
+    let storage = storage_state.read().await;
+    storage
+        .delete_metadata(CAPTURE_DRAFT_FILE)
+        .await
+        .map_err(|e| e.to_string())
 }

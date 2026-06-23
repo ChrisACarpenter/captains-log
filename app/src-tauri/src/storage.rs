@@ -82,6 +82,17 @@ pub trait StorageBackend: Send + Sync {
 
     /// Write a named metadata file. Creates `.metadata/` as needed.
     async fn write_metadata(&self, name: &str, content: &str) -> StorageResult<()>;
+
+    /// Delete a named metadata file. Treats "file already absent" as success
+    /// so callers can use this for idempotent cleanup without checking
+    /// existence first.
+    ///
+    /// Default impl is a no-op for backends where deletion is unsupported or
+    /// unnecessary (e.g. a future read-only mirror). LocalFilesystem
+    /// overrides with the real `remove_file` call.
+    async fn delete_metadata(&self, _name: &str) -> StorageResult<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +240,15 @@ impl StorageBackend for LocalFilesystem {
         tokio::fs::write(&path, content)
             .await
             .map_err(|e| io(&path, e))
+    }
+
+    async fn delete_metadata(&self, name: &str) -> StorageResult<()> {
+        let path = self.metadata_path(name);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io(path, e)),
+        }
     }
 }
 
