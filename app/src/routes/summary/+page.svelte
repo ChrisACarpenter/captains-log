@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import LabelInput from '$lib/LabelInput.svelte';
 
   type YearWeek = { year: number; week: number };
 
@@ -10,6 +11,7 @@
     plansAndPriorities: string;
     challengesOrRoadblocks: string;
     anythingElse: string;
+    labels: string[];
     lastUpdated: string | null;
   };
 
@@ -27,6 +29,7 @@
   let plansAndPriorities = $state('');
   let challengesOrRoadblocks = $state('');
   let anythingElse = $state('');
+  let labels = $state<string[]>([]);
 
   // Computed week range label like "Week of June 22 – June 28, 2026"
   const weekLabel = $derived.by(() => {
@@ -63,6 +66,7 @@
       plansAndPriorities = s.plansAndPriorities;
       challengesOrRoadblocks = s.challengesOrRoadblocks;
       anythingElse = s.anythingElse;
+      labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
     } catch (err) {
       loadError = String(err);
@@ -83,7 +87,8 @@
           keyAccomplishments,
           plansAndPriorities,
           challengesOrRoadblocks,
-          anythingElse
+          anythingElse,
+          labels
         }
       });
       // Refresh last_updated from server (avoids drift from frontend clock).
@@ -178,6 +183,11 @@
           ></textarea>
         </div>
 
+        <div class="field">
+          <span class="field-heading">Labels</span>
+          <LabelInput bind:labels placeholder="Tag this week (type to search, Enter to add)" />
+        </div>
+
         {#if saveError}
           <p class="status status-error">Error: {saveError}</p>
         {/if}
@@ -244,7 +254,8 @@
     gap: var(--space-2);
   }
 
-  .field > label {
+  .field > label,
+  .field > .field-heading {
     font-family: var(--font-display);
     font-size: var(--text-button);
     color: var(--text-primary);

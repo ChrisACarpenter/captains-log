@@ -160,6 +160,8 @@ pub struct UpdateWeeklySummaryInput {
     pub plans_and_priorities: String,
     pub challenges_or_roadblocks: String,
     pub anything_else: String,
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// Splice the user's edits back into the weekly file, preserving everything
@@ -180,6 +182,12 @@ pub async fn update_weekly_summary(
         plans_and_priorities: input.plans_and_priorities,
         challenges_or_roadblocks: input.challenges_or_roadblocks,
         anything_else: input.anything_else,
+        labels: input
+            .labels
+            .into_iter()
+            .map(|l| l.trim().trim_start_matches('#').to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
         last_updated: Some(now.format("%Y-%m-%d %H:%M").to_string()),
     };
 

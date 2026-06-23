@@ -124,6 +124,8 @@ pub fn weekly_file_scaffold(year: u32, week: u32, now: chrono::DateTime<FixedOff
          \n\
          ### Anything else on your mind\n\
          \n\
+         ### Labels\n\
+         \n\
          ## Weekly Notes\n",
         year = year,
         week = week,
@@ -174,6 +176,10 @@ pub struct WeeklySummary {
     pub plans_and_priorities: String,
     pub challenges_or_roadblocks: String,
     pub anything_else: String,
+    /// Labels for the week as a whole — sits as a `### Labels` subsection
+    /// at the end of the Weekly Summary section, rendered as `#tag1 #tag2`.
+    #[serde(default)]
+    pub labels: Vec<String>,
     pub last_updated: Option<String>,
 }
 
@@ -183,6 +189,7 @@ const SECTION_KEY_ACC: &str = "### Key accomplishments";
 const SECTION_PLANS: &str = "### Plans and priorities for next week";
 const SECTION_CHALLENGES: &str = "### Challenges or roadblocks";
 const SECTION_OTHER: &str = "### Anything else on your mind";
+const SECTION_LABELS: &str = "### Labels";
 const LAST_UPDATED_PREFIX: &str = "*Last updated: ";
 
 /// Parse the Weekly Summary section out of a weekly file's full markdown.
@@ -216,6 +223,21 @@ pub fn parse_weekly_summary(file_content: &str) -> WeeklySummary {
     summary.plans_and_priorities = extract_subsection(section, SECTION_PLANS);
     summary.challenges_or_roadblocks = extract_subsection(section, SECTION_CHALLENGES);
     summary.anything_else = extract_subsection(section, SECTION_OTHER);
+
+    // Labels live as a free-form `### Labels` subsection. Body is one or more
+    // `#tag` tokens (anything starting with #); whitespace between them is fine.
+    let labels_text = extract_subsection(section, SECTION_LABELS);
+    summary.labels = labels_text
+        .split_whitespace()
+        .filter_map(|tok| {
+            let stripped = tok.trim_start_matches('#').trim();
+            if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped.to_string())
+            }
+        })
+        .collect();
 
     summary
 }
@@ -252,6 +274,16 @@ fn extract_subsection(section: &str, header: &str) -> String {
 /// the scaffold uses (so the file stays diff-clean).
 pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
     let last_updated = summary.last_updated.as_deref().unwrap_or("never");
+    let labels_line = if summary.labels.is_empty() {
+        String::new()
+    } else {
+        summary
+            .labels
+            .iter()
+            .map(|l| format!("#{}", l.trim_start_matches('#')))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
     format!(
         "## Weekly Summary\n\
          *Last updated: {last_updated}*\n\
@@ -266,12 +298,16 @@ pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
          {challenges}\n\
          \n\
          ### Anything else on your mind\n\
-         {other}\n",
+         {other}\n\
+         \n\
+         ### Labels\n\
+         {labels}\n",
         last_updated = last_updated,
         key = trim_body(&summary.key_accomplishments),
         plans = trim_body(&summary.plans_and_priorities),
         challenges = trim_body(&summary.challenges_or_roadblocks),
         other = trim_body(&summary.anything_else),
+        labels = labels_line,
     )
 }
 
@@ -444,6 +480,7 @@ mod tests {
         assert!(scaffold.contains("### Plans and priorities for next week"));
         assert!(scaffold.contains("### Challenges or roadblocks"));
         assert!(scaffold.contains("### Anything else on your mind"));
+        assert!(scaffold.contains("### Labels"));
         assert!(scaffold.contains("## Weekly Notes"));
     }
 
@@ -592,6 +629,7 @@ mod tests {
             plans_and_priorities: "- three".to_string(),
             challenges_or_roadblocks: "- four".to_string(),
             anything_else: "five".to_string(),
+            labels: vec!["release".to_string(), "captains-log".to_string()],
             last_updated: Some("2026-06-22 17:00".to_string()),
         };
         let rendered = render_weekly_summary(&original);
@@ -600,7 +638,43 @@ mod tests {
         assert_eq!(parsed.plans_and_priorities, original.plans_and_priorities);
         assert_eq!(parsed.challenges_or_roadblocks, original.challenges_or_roadblocks);
         assert_eq!(parsed.anything_else, original.anything_else);
+        assert_eq!(parsed.labels, original.labels);
         assert_eq!(parsed.last_updated, original.last_updated);
+    }
+
+    #[test]
+    fn parse_summary_extracts_labels() {
+        let file = "## Weekly Summary\n*Last updated: never*\n\
+                    \n### Key accomplishments\n\
+                    \n### Plans and priorities for next week\n\
+                    \n### Challenges or roadblocks\n\
+                    \n### Anything else on your mind\n\
+                    \n### Labels\n#release #planning #captains-log\n\
+                    \n## Weekly Notes\n";
+        let s = parse_weekly_summary(file);
+        assert_eq!(s.labels, vec!["release", "planning", "captains-log"]);
+    }
+
+    #[test]
+    fn parse_summary_empty_labels_subsection() {
+        // Scaffolded file with no labels typed yet — should yield empty Vec.
+        let now = ts("2026-06-22T09:00:00-04:00");
+        let file = weekly_file_scaffold(2026, 26, now);
+        let s = parse_weekly_summary(&file);
+        assert!(s.labels.is_empty());
+    }
+
+    #[test]
+    fn render_summary_strips_extra_hash_prefixes() {
+        // If callers send labels with leading #'s (e.g. from a chip input that
+        // didn't strip them), render them with exactly one # each.
+        let original = WeeklySummary {
+            labels: vec!["##leading-hashes".to_string(), "plain".to_string()],
+            ..Default::default()
+        };
+        let rendered = render_weekly_summary(&original);
+        assert!(rendered.contains("#leading-hashes #plain"));
+        assert!(!rendered.contains("##leading-hashes"));
     }
 
     #[test]
@@ -621,6 +695,7 @@ mod tests {
             plans_and_priorities: "- testing!".to_string(),
             challenges_or_roadblocks: String::new(),
             anything_else: String::new(),
+            labels: vec![],
             last_updated: Some("2026-06-22 17:30".to_string()),
         };
 
