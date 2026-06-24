@@ -254,12 +254,17 @@ fn write_eml_file(
     let dir = std::env::temp_dir().join(EML_TEMP_SUBDIR);
     std::fs::create_dir_all(&dir)?;
 
-    // Filename includes a timestamp so successive sends don't collide and so
-    // the janitor's age-based prune is meaningful. We don't try to be cute
-    // with collision-resistant UUIDs — the millisecond resolution + the
-    // single-user nature of the app make collisions essentially impossible.
+    // Filename includes a timestamp + an atomic monotonic counter so
+    // successive sends don't collide. The counter guards specifically
+    // against parallel callers (test threads, racing UI clicks) that
+    // would otherwise share the same millisecond stamp and clobber each
+    // other's files. The janitor's age-based prune still works because
+    // file mtime is unaffected.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let stamp = now.format("%Y%m%dT%H%M%S%.3f");
-    let file_path = dir.join(format!("weekly-{stamp}.eml"));
+    let file_path = dir.join(format!("weekly-{stamp}-{seq:04}.eml"));
 
     // The subject often contains an en-dash (U+2013) from the week label —
     // strict RFC 5322 forbids non-ASCII in headers, so wrap the subject as
