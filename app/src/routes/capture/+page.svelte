@@ -4,7 +4,7 @@
   import { confirm } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
-  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
+  import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import { reportDirty } from '$lib/dirty';
 
   // Submit lifecycle — distinct from auto-save status. 'submitting' is the
@@ -278,15 +278,20 @@
       bind:value={title}
     />
 
-    <!-- Body wraps in SpellcheckTextarea so misspellings get a wavy-red
-      underline. The wrapper picks up `.sq-grow` to flex-grow like the
-      original textarea did; see :global() rules at the bottom of <style>
-      that route the look to the inner textarea. -->
+    <!-- Body is the first surface to land Phase 2.5's CodeMirror 6 editor
+      (commit landing this swap is "Step 1" of the editor rollout). The
+      editor's `value` is one-way + `onChange` push-back, so we keep the
+      same `body` state var the auto-save $effect watches — the debounce
+      flow is unchanged from when this was a textarea. Spell-check on
+      this surface is dark until the Decoration.mark plugin lands in
+      Step 3; right-click + macOS suggestions still work via the WKWebView
+      context menu fallback. -->
     <!-- svelte-ignore a11y_autofocus -->
-    <SpellcheckTextarea
+    <MarkdownEditor
       class="body-input"
       placeholder="What did you just do?"
-      bind:value={body}
+      value={body}
+      onChange={(v) => (body = v)}
       style="flex: 1; min-height: 100px;"
       autofocus
     />
@@ -363,31 +368,10 @@
     box-shadow: 0 0 0 2px var(--focus-glow);
   }
 
-  /* Body textarea now lives inside <SpellcheckTextarea>. Reach across
-   * the component boundary with :global() to give it the same chrome
-   * the unwrapped textarea had. flex: 1 makes it fill the remaining
-   * vertical space in the form column. */
-  :global(textarea.sq-textarea.body-input) {
-    width: 100%;
-    flex: 1;
-    resize: none;
-    min-height: 100px;
-    padding: var(--space-3);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    font-family: var(--font-body);
-    font-size: var(--text-body);
-    line-height: var(--text-body-lh);
-    transition: border-color var(--transition-fast);
-  }
-
-  :global(textarea.sq-textarea.body-input:focus-visible) {
-    outline: none;
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px var(--focus-glow);
-  }
+  /* Body editor (MarkdownEditor / CodeMirror 6) — chrome (background,
+   * border, focus glow) lives inside the component itself. Only flex
+   * sizing is set on the wrapper via inline `style` on the element.
+   * Phase 2.5 / Step 1. */
 
   .title-input {
     font-family: var(--font-display);
