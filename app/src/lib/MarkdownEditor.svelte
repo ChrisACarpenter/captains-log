@@ -28,16 +28,17 @@
     push changes back to the parent.
   - `onChange`: fires on every doc-changing transaction with the full
     current doc string. Plug straight into the consumer's existing $effect
-    debounce — the auto-save flow stays identical to what it was with
-    <SpellcheckTextarea>.
+    debounce — the auto-save flow stays identical to what it was with the
+    prior textarea wrappers.
   - `placeholder`, `class`, `style`, `autofocus`: pass through.
 
   ## CSS variables consumers can set via `style`
 
-      --md-font-family   default: inherit          (/journal sets monospace)
-      --md-font-size     default: inherit
-      --md-line-height   default: inherit
-      --md-min-height    default: auto             (per-surface row counts)
+      --md-font-family   default: var(--font-body)  (/journal sets monospace)
+      --md-font-size     default: var(--text-body)
+      --md-line-height   default: var(--text-body-lh)
+      --md-min-height    default: 0                 (per-surface row counts)
+      --md-padding       default: var(--space-3)    (/journal uses --space-4)
 
   ## External-value sync
 
@@ -66,6 +67,7 @@
     class: className = '',
     style = '',
     autofocus = false,
+    id = undefined,
   }: {
     value?: string;
     onChange: (next: string) => void;
@@ -73,6 +75,9 @@
     class?: string;
     style?: string;
     autofocus?: boolean;
+    /** Optional DOM id. Forwarded to the inner .cm-content element so
+     * <label for={id}> clicks focus the editor. */
+    id?: string;
   } = $props();
 
   let container: HTMLDivElement;
@@ -106,7 +111,10 @@
         // we let WebKit's editor + NSSpellChecker do the work end-to-end:
         // same engine that Apple Mail and Pages use, no IPC round-trip,
         // no streaming-Correction gap, right-click menu pre-populated.
-        EditorView.contentAttributes.of({ spellcheck: 'true' }),
+        // Forwarding `id` lets <label for={id}> clicks focus the editor.
+        EditorView.contentAttributes.of(
+          id ? { spellcheck: 'true', id } : { spellcheck: 'true' }
+        ),
         placeholder ? placeholderExt(placeholder) : [],
         // The listener calls `onChange` via the prop directly. Svelte 5's
         // destructured props read the current value at call time, so
@@ -186,9 +194,11 @@
   }
 
   /* Padding lives on .cm-scroller (not .cm-editor) so the focus ring
-   * hugs the outer border without an awkward gap. */
+   * hugs the outer border without an awkward gap. Defaults to the body
+   * `--space-3` but /journal's monospace surface overrides to --space-4
+   * to match its previous textarea-era look. */
   .md-editor :global(.cm-scroller) {
-    padding: var(--space-3);
+    padding: var(--md-padding, var(--space-3));
     overflow: auto;
     font-family: inherit;
   }

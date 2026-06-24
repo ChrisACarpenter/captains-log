@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
-  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
+  import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
@@ -331,19 +331,20 @@
       {#if editorLoading}
         <p class="muted">Loading week…</p>
       {:else}
-        <!-- Wrap the editor in SpellcheckTextarea so misspelled words get
-          a wavy-red underline. The CSS variables forward the editor's
-          monospace font + 16px padding to the backdrop so the squiggles
-          line up under the real glyphs to the pixel. -->
-        <SpellcheckTextarea
+        <!-- Phase 2.5 Step 4: CodeMirror 6 markdown editor with WebKit
+          native spell-check. CSS variables hold the editor's monospace
+          face + 14px font + 1.5 line-height + 16px padding so the raw
+          markdown surface keeps its prior textarea-era look. -->
+        <MarkdownEditor
           class="editor"
-          bind:value={content}
+          value={content}
+          onChange={(v) => (content = v)}
           placeholder="No content yet. Anything you type here saves to the weekly file."
           style="flex: 1; min-height: 200px;
-            --sq-padding: var(--space-4);
-            --sq-font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
-            --sq-font-size: 14px;
-            --sq-line-height: 1.5;"
+            --md-padding: var(--space-4);
+            --md-font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+            --md-font-size: 14px;
+            --md-line-height: 1.5;"
         />
 
 
@@ -528,32 +529,10 @@
     margin: var(--space-1) 0 0;
   }
 
-  /* Editor lives inside <SpellcheckTextarea>. Reach across the
-   * component boundary with :global() to give the inner textarea the
-   * same monospace look + flex-grow behavior the raw textarea had.
-   * Font/padding here MUST match the --sq-* CSS variables passed to
-   * the component or the squiggles will misalign. */
-  :global(textarea.sq-textarea.editor) {
-    flex: 1;
-    min-height: 200px;
-    width: 100%;
-    padding: var(--space-4);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
-    font-size: 14px;
-    line-height: 1.5;
-    resize: none;
-    transition: border-color var(--transition-fast);
-  }
-
-  :global(textarea.sq-textarea.editor:focus-visible) {
-    outline: none;
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px var(--focus-glow);
-  }
+  /* Editor chrome (background, border, focus glow, font, padding) is now
+   * owned by MarkdownEditor.svelte itself; the monospace + 14px + 16px
+   * padding overrides are forwarded via the --md-* CSS variables on the
+   * component invocation above. */
 
   /* ---- Actions row ---- */
 

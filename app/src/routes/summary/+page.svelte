@@ -4,7 +4,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { openUrl, openPath } from '@tauri-apps/plugin-opener';
   import LabelInput from '$lib/LabelInput.svelte';
-  import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
+  import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
@@ -465,43 +465,56 @@
       </header>
 
       <div class="form">
+        <!-- Phase 2.5 Step 4: each field is a CodeMirror MarkdownEditor.
+          Native WebKit spell-check + clickable Markdown links + GFM
+          parsing for free; auto-save flow stays the same because the
+          editor's onChange wires straight into the existing dirty/$effect
+          debounce. The `style="--md-min-height: ..."` numbers approximate
+          the prior `rows={3|4|5}` initial heights (~22px line-height
+          + 24px vertical padding). The editor scrolls internally when
+          content exceeds; resize: vertical on the wrapper lets the user
+          drag-grow each field, matching the textarea-era affordance. -->
         <div class="field">
           <label for="key-acc">Key accomplishments</label>
-          <SpellcheckTextarea
+          <MarkdownEditor
             id="key-acc"
-            bind:value={keyAccomplishments}
+            value={keyAccomplishments}
+            onChange={(v) => (keyAccomplishments = v)}
             placeholder="- "
-            rows={5}
+            style="--md-min-height: 134px; resize: vertical; overflow: hidden;"
           />
         </div>
 
         <div class="field">
           <label for="plans">Plans and priorities for next week</label>
-          <SpellcheckTextarea
+          <MarkdownEditor
             id="plans"
-            bind:value={plansAndPriorities}
+            value={plansAndPriorities}
+            onChange={(v) => (plansAndPriorities = v)}
             placeholder="- "
-            rows={4}
+            style="--md-min-height: 112px; resize: vertical; overflow: hidden;"
           />
         </div>
 
         <div class="field">
           <label for="challenges">Challenges or roadblocks</label>
-          <SpellcheckTextarea
+          <MarkdownEditor
             id="challenges"
-            bind:value={challengesOrRoadblocks}
+            value={challengesOrRoadblocks}
+            onChange={(v) => (challengesOrRoadblocks = v)}
             placeholder="- "
-            rows={3}
+            style="--md-min-height: 90px; resize: vertical; overflow: hidden;"
           />
         </div>
 
         <div class="field">
           <label for="else">Anything else on your mind</label>
-          <SpellcheckTextarea
+          <MarkdownEditor
             id="else"
-            bind:value={anythingElse}
+            value={anythingElse}
+            onChange={(v) => (anythingElse = v)}
             placeholder=""
-            rows={3}
+            style="--md-min-height: 90px; resize: vertical; overflow: hidden;"
           />
         </div>
 
@@ -673,29 +686,10 @@
     color: var(--text-primary);
   }
 
-  /* Textareas now live inside <SpellcheckTextarea>, so the styles must
-   * pierce the component boundary via :global(). The sq-textarea class
-   * is added by the wrapper component automatically. */
-  :global(textarea.sq-textarea) {
-    width: 100%;
-    padding: var(--space-3);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    font-family: var(--font-body);
-    font-size: var(--text-body);
-    line-height: var(--text-body-lh);
-    resize: vertical;
-    min-height: 60px;
-    transition: border-color var(--transition-fast);
-  }
-
-  :global(textarea.sq-textarea:focus-visible) {
-    outline: none;
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px var(--focus-glow);
-  }
+  /* Editor chrome (background, border, focus glow, font, line-height) is
+   * owned by MarkdownEditor.svelte itself. Per-field initial height +
+   * user-resize affordance is set inline on each MarkdownEditor's `style`
+   * via --md-min-height + `resize: vertical`. */
 
   .actions {
     display: flex;

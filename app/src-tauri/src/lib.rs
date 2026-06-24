@@ -15,7 +15,6 @@ pub mod notes;
 pub mod reminders;
 pub mod sent_log;
 pub mod settings;
-pub mod spellcheck;
 pub mod storage;
 
 use std::collections::HashMap;
@@ -299,7 +298,6 @@ pub fn run() {
             commands::compose_weekly_email,
             commands::mark_weekly_summary_sent,
             commands::get_summary_hash,
-            spellcheck::check_spelling,
         ])
         .setup(|app| {
             // Seed NSUserDefaults so WKWebView's continuous spell-checker
