@@ -70,13 +70,25 @@ Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to 
 
 ## Phase 2.5 — Editor upgrade (next)
 
-Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor. Today's textareas are functional but flat — no live preview, no syntax highlighting, no inline `#` autocomplete, no `**bold**` cues. The Send-to-manager email already passes whatever the user types verbatim, so once this lands the recipient sees real formatting too.
+Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor; switches the Send-to-manager email body to HTML so recipients see real formatting and clickable links. Disk format stays raw markdown (LLM handoff in Phase 5 requires this).
 
-- [ ] **CodeMirror 6 integration** — pick the wrapper (Svelte 5 component or thin custom wrapper), wire into the three prose surfaces. New deps + a meaningful refactor of the form bindings; deserves its own focused session.
-- [ ] **Markdown syntax highlighting** — bold/italic/lists/links/code visibly distinguished while editing.
-- [ ] **Inline `#` autocomplete in body text** — natural fit as a CodeMirror extension. Could reuse the LabelInput dropdown logic for the popup UI.
-- [ ] **Spell-check coexistence** — the existing NSSpellChecker mirror-div overlay needs to be either removed (CodeMirror surfaces its own marks) or adapted to CodeMirror's decoration API.
-- [ ] **Auto-save + dirty tracking continuity** — the existing 1.5s debounce flow and `reportDirty()` calls must keep working through the new editor.
+**Design decisions** (locked 2026-06-24):
+
+- **Editor library: CodeMirror 6** in a hand-rolled ~30-line Svelte 5 wrapper. Wins on zero round-trip drift — the buffer IS the markdown file byte-for-byte. WYSIWYG alternatives (Milkdown / TipTap / Lexical) all mutate the source on save.
+- **Editor mode: source-with-syntax-highlighting** for v1 (`**bold**` markers visible, faded). Live-preview decorations (Obsidian-style cursor-outside-collapse) deferred to a follow-up after a week of real use.
+- **Email format: HTML-only `.eml`** rendered server-side via `pulldown-cmark`. `mailto:` branch deleted (RFC 6068 §5 — mailto bodies are text/plain only). All sends go through `.eml`; the existing length-based fallback split disappears. Compose pane now shows the rendered email — `<a href>` tags, real bold, styled headings.
+- **Send-side mitigation: in-app Preview modal** on `/summary` using the same `pulldown-cmark` renderer, so the user can audit the rendered form before the Mail.app round-trip. Replaces the Phase 2.6 raw-bytes audit affordance at a different layer.
+- **Spell-check: full Decoration.mark rewrite**. Retires `SpellcheckTextarea.svelte` entirely once CM6 lands on all three surfaces; squiggles become a real CodeMirror extension. Forward-compatible with eventual live-preview work even though deferred. Existing `check_spelling` Rust command stays unchanged.
+
+**Implementation order** (each step is independently testable):
+
+- [ ] **Step 1 — `MarkdownEditor.svelte` + `/capture` swap.** Add `@codemirror/{state,view,commands,language,lang-markdown}` + `@lezer/markdown`. Hand-rolled wrapper with one-way `value` prop + `onChange` callback (not `$bindable` — CM6 transactions own the doc). Replace the body `SpellcheckTextarea` on `/capture`. Prove the markdown round-trip with `xxd` on the draft file before propagating.
+- [ ] **Step 2 — Clickable links in the editor.** New `markdown-links.ts` CM6 ViewPlugin that walks the Lezer syntax tree, applies `Decoration.mark` to `Link` and `URL` nodes with Cmd-click handlers calling Tauri's `shell.open()`. Regex viewport scan for bare URLs.
+- [ ] **Step 3 — Spell-check Decoration.mark plugin.** New `spellcheck-plugin.ts` CM6 extension. Fires `check_spelling` on a 400ms debounce, maps returned `{start, length}` ranges to `Decoration.mark` with `text-decoration: underline wavy red`. Wire alongside `MarkdownEditor` on `/capture`. Validates that the new design carries the existing UX.
+- [ ] **Step 4 — Propagate to `/journal` (monospace) and `/summary` (four instances).** Keep monospace via `style` passthrough on `/journal`. Four independent EditorView mounts on `/summary` are fine — CM6 shares state + view as module-level singletons.
+- [ ] **Step 5 — HTML email via `pulldown-cmark`.** Add the crate. Rename `render_body` to `render_body_plaintext` (debug/LLM view). New `render_body_html` runs each section through `pulldown_cmark::html::push_html` and wraps in a minimal inline-CSS shell. `write_eml_file` flips `Content-Type` to `text/html`, quoted-printable encodes the body, adds `X-Unsent: 1`. Delete `MAILTO_MAX_BYTES` + the mailto branch in `compose_weekly_email`.
+- [ ] **Step 6 — Preview modal on `/summary`.** New `EmailPreview.svelte`, calls a new `render_email_preview` command (DRY — same renderer as the send path). HTML rendered inside an `iframe srcdoc` for style isolation. "Preview" button next to "Send to manager".
+- [ ] **Step 7 — Retire `SpellcheckTextarea`, smoke-test, commit.** Delete the old component once CM6 covers all three surfaces. Smoke matrix: markdown byte-identity on `/capture`, week-switch flush on `/journal`, all four sections + Preview + Send on `/summary`, real email to a Gmail + Outlook account.
 
 ## Phase 2.6 — Send weekly summary to manager ✅ (shipped 2026-06-24)
 
