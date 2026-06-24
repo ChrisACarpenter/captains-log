@@ -1,8 +1,14 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2.5 — editor upgrade (next)
+## Current phase: 2.5 — editor upgrade (active, mid-pivot)
 
-Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped on 2026-06-24 — the app now does a one-click handoff to the OS-default mail handler with per-week sent-state tracking, personalized greeting, and a content-hash-based "edited since send" gate. **Phase 2.5 (CodeMirror 6 markdown editor) is next**, then **Phase 2.7 (onboarding + Settings revisit)** before Phase 3 — both queued in order below.
+Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped on 2026-06-24. Phase 2.5 Steps 1-4 + the formatting toolbar shipped today (CodeMirror 6 source-mode editor on all three surfaces, native WebKit spell-check, 10-button formatting toolbar with Cmd+B/I/K/E + Cmd+Shift+7/8 shortcuts, clickable Markdown links).
+
+**Active pivot** (decided 2026-06-24): the source-mode editor — visible `**`, `~~`, `#`, `-`, `>` markers in the user's text — is a UX blocker for non-technical adopters (HR, artists, accountants, PMs) coming within 60 days. Pivoting from source mode to **aggressive Slack/Typora-style marker hiding** on the same CodeMirror 6 engine. Storage stays markdown on disk (5 of 6 evaluation lenses converged on that — power-user workflow, LLM bundle, Phase 5/6/7 portability, long-term maintenance, implementation realism). Display becomes true rich-text with markdown hidden as decorations.
+
+**Rollback baseline tagged at `pre-slack-wysiwyg`** (commit `ac101c8`) — clean restore point before the Architecture B build begins.
+
+**Phase 2.7 (onboarding + Settings revisit)** stays queued after Phase 2.5 completes.
 
 ---
 
@@ -68,27 +74,38 @@ Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to 
 
 **Success:** Captain's Log has replaced any other journaling system I was using. **Achieved.**
 
-## Phase 2.5 — Editor upgrade (next)
+## Phase 2.5 — Editor upgrade (active, mid-pivot)
 
-Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor; switches the Send-to-manager email body to HTML so recipients see real formatting and clickable links. Disk format stays raw markdown (LLM handoff in Phase 5 requires this).
+Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor; switches the Send-to-manager email body to HTML so recipients see real formatting and clickable links. **Disk format stays raw markdown** (decision locked across power-user workflow / LLM bundle / Phase 5/6/7 portability / long-term maintenance lenses).
 
-**Design decisions** (locked 2026-06-24):
+### Steps 1-4 + toolbar ✅ (shipped 2026-06-24)
 
-- **Editor library: CodeMirror 6** in a hand-rolled ~30-line Svelte 5 wrapper. Wins on zero round-trip drift — the buffer IS the markdown file byte-for-byte. WYSIWYG alternatives (Milkdown / TipTap / Lexical) all mutate the source on save.
-- **Editor mode: source-with-syntax-highlighting** for v1 (`**bold**` markers visible, faded). Live-preview decorations (Obsidian-style cursor-outside-collapse) deferred to a follow-up after a week of real use.
-- **Email format: HTML-only `.eml`** rendered server-side via `pulldown-cmark`. `mailto:` branch deleted (RFC 6068 §5 — mailto bodies are text/plain only). All sends go through `.eml`; the existing length-based fallback split disappears. Compose pane now shows the rendered email — `<a href>` tags, real bold, styled headings.
-- **Send-side mitigation: in-app Preview modal** on `/summary` using the same `pulldown-cmark` renderer, so the user can audit the rendered form before the Mail.app round-trip. Replaces the Phase 2.6 raw-bytes audit affordance at a different layer.
-- **Spell-check: full Decoration.mark rewrite**. Retires `SpellcheckTextarea.svelte` entirely once CM6 lands on all three surfaces; squiggles become a real CodeMirror extension. Forward-compatible with eventual live-preview work even though deferred. Existing `check_spelling` Rust command stays unchanged.
+- [x] **Step 1 — `MarkdownEditor.svelte` + `/capture` swap** (commit `fb40bda`). Added CodeMirror 6 deps (`@codemirror/{state,view,commands,language,lang-markdown}` + `@lezer/markdown`). Hand-rolled ~40-line Svelte 5 wrapper with one-way `value` prop + `onChange` callback. Body of `/capture` swapped from textarea to MarkdownEditor. Markdown round-trip verified byte-for-byte via `xxd` on the draft file.
+- [x] **Step 2 — Clickable Markdown links** (commit `05201d8`). New `markdown-links.ts` CM6 ViewPlugin that walks the Lezer syntax tree, applies `domEventHandlers.mousedown` to `Link` / `Autolink` / `URL` nodes with Cmd-click handlers calling Tauri's `openUrl()`. Capability scope extended to allow `http://*` and `https://*`. Three link forms work end-to-end: `[text](url)`, `<https://example.com>`, and GFM bare URLs.
+- [x] **Step 3 — Native WebKit spell-check on contenteditable** (commit `cfb2ce3`). Investigation arc surfaced that `tauri-apps/tauri#7705` (the textarea spell-check bug we worked around with SpellcheckTextarea) does NOT apply to contenteditable surfaces. CodeMirror's editing surface IS a contenteditable div. Setting `EditorView.contentAttributes.of({ spellcheck: 'true' })` routes the entire pipeline through WebKit + NSSpellChecker natively — same engine Apple Mail and Pages use. Squiggles paint natively, right-click suggestions pre-populated, contractions (`dont` → `don't`) caught the way users expect. Custom IPC + Decoration.mark plugin + `SpellcheckTextarea.svelte` all deleted (~400 LOC net delete).
+- [x] **Step 4 — Propagate MarkdownEditor to `/journal` (monospace) + `/summary` (four instances)** (commit `b27b263`). Monospace, 14px font, 1.5 line-height, 16px padding wired via `--md-*` CSS variables on the new MarkdownEditor invocation. `/summary` fields use `--md-min-height` to approximate prior `rows={3|4|5}` initial heights + `resize: vertical` for user-drag-grow affordance. `id` prop forwarded to `.cm-content` for `<label for={id}>` accessibility. `SpellcheckTextarea.svelte`, `spellcheck.rs`, the `check_spelling` Tauri command, and the `objc2-app-kit` NSSpellChecker feature all retired. Net delete: ~280 lines.
+- [x] **Toolbar + journal cheat sheet** (commit `6d60b58`). 10-button formatting strip above each MarkdownEditor on `/capture` and `/summary` (Heading cycle / Bold / Italic / Strikethrough / Bulleted list / Numbered list / Block quote / Link / Code / Help). Keyboard shortcuts: Cmd+B / Cmd+I / Cmd+K / Cmd+E / Cmd+Shift+7 / Cmd+Shift+8. Shared command module (`markdown-formatting.ts`) backs both toolbar onClicks and the keymap so wrap/unwrap logic lives in one place per format. New `Icon.svelte` with 10 Lucide-derived inline SVGs (no icon library dep). New `showToolbar?: boolean = true` prop on MarkdownEditor; `/journal` opts out and adds an inline cheat-sheet link to its placeholder copy.
 
-**Implementation order** (each step is independently testable):
+### Step 5+ — Architecture B pivot (active, ~10-14 days)
 
-- [ ] **Step 1 — `MarkdownEditor.svelte` + `/capture` swap.** Add `@codemirror/{state,view,commands,language,lang-markdown}` + `@lezer/markdown`. Hand-rolled wrapper with one-way `value` prop + `onChange` callback (not `$bindable` — CM6 transactions own the doc). Replace the body `SpellcheckTextarea` on `/capture`. Prove the markdown round-trip with `xxd` on the draft file before propagating.
-- [ ] **Step 2 — Clickable links in the editor.** New `markdown-links.ts` CM6 ViewPlugin that walks the Lezer syntax tree, applies `Decoration.mark` to `Link` and `URL` nodes with Cmd-click handlers calling Tauri's `shell.open()`. Regex viewport scan for bare URLs.
-- [ ] **Step 3 — Spell-check Decoration.mark plugin.** New `spellcheck-plugin.ts` CM6 extension. Fires `check_spelling` on a 400ms debounce, maps returned `{start, length}` ranges to `Decoration.mark` with `text-decoration: underline wavy red`. Wire alongside `MarkdownEditor` on `/capture`. Validates that the new design carries the existing UX.
-- [ ] **Step 4 — Propagate to `/journal` (monospace) and `/summary` (four instances).** Keep monospace via `style` passthrough on `/journal`. Four independent EditorView mounts on `/summary` are fine — CM6 shares state + view as module-level singletons.
-- [ ] **Step 5 — HTML email via `pulldown-cmark`.** Add the crate. Rename `render_body` to `render_body_plaintext` (debug/LLM view). New `render_body_html` runs each section through `pulldown_cmark::html::push_html` and wraps in a minimal inline-CSS shell. `write_eml_file` flips `Content-Type` to `text/html`, quoted-printable encodes the body, adds `X-Unsent: 1`. Delete `MAILTO_MAX_BYTES` + the mailto branch in `compose_weekly_email`.
-- [ ] **Step 6 — Preview modal on `/summary`.** New `EmailPreview.svelte`, calls a new `render_email_preview` command (DRY — same renderer as the send path). HTML rendered inside an `iframe srcdoc` for style isolation. "Preview" button next to "Send to manager".
-- [ ] **Step 7 — Retire `SpellcheckTextarea`, smoke-test, commit.** Delete the old component once CM6 covers all three surfaces. Smoke matrix: markdown byte-identity on `/capture`, week-switch flush on `/journal`, all four sections + Preview + Send on `/summary`, real email to a Gmail + Outlook account.
+**Rollback line: `pre-slack-wysiwyg` (commit `ac101c8`)** — clean restore point.
+
+Source-mode editor (`**bold**` markers visible, faded) is a UX blocker for non-technical users coming within 60 days. Pivoting from source mode to **aggressive Slack/Typora-style marker hiding** while keeping CodeMirror 6 + markdown-on-disk. Markers (`**`, `*`, `_`, `~~`, `` ` ``, `#`, `-`, `1.`, `>`, `[`/`](url)`) become atomic-hidden ranges via `Decoration.replace`; user sees rendered rich text only, types markdown shortcuts but never sees the syntax in the result. Storage axis stays locked at markdown (5 of 6 evaluation lenses converged here — power-user workflow, LLM bundle, Phase 5/6/7, long-term maintenance, implementation realism); display axis goes all-the-way Slack, not partway Obsidian-style.
+
+Implementation order:
+
+- [ ] **Day 1-3** — Build the aggressive-hiding ViewPlugin in `MarkdownEditor.svelte`. Decoration.replace + atomic ranges hide all marker tokens. Selection-watcher governs the brief "cursor on the closing marker that completes a pair" reveal edge case. Ship to `/capture` only first (smallest blast radius). Toolbar + keymap stay visible and working.
+- [ ] **Day 4** — Propagate to `/summary`'s four fields. Manual QA matrix (paste from Slack, paste from VS Code, undo/redo across atomic ranges, backspace at marker boundaries, list creation/deletion, link insertion via toolbar).
+- [ ] **Day 5-7** — `/journal` rich-text redesign. Same Live Preview editor for past weeks, full rich-text editing parity with `/summary` (Chris confirmed daily past-week editing is part of his workflow). Per-view "reveal source" toggle (NOT global — global creates a mode users toggle by accident and never recover from). Wire to existing auto-save + `dirty.ts`.
+- [ ] **Day 8-10** — Edge-case hardening. Atomic-range escape on selection-drag, backspace at marker boundaries, line-level constructs (headings need `Decoration.line` for the style + `Decoration.replace` for the `# ` marker). Code fences, strikethrough, blockquote consistency. Verify `markdown-links.ts` Cmd-click still works.
+- [ ] **Day 11-12** — Polish + architecture note in `docs/`. Update CLAUDE.md. Document the storage axis (markdown, locked) vs display axis (aggressive hiding now, true-WYSIWYG-via-TipTap as a future graduation if needed).
+- [ ] **Day 13-14** — Buffer + final QA + hand-off. Use it for at least a week before declaring Phase 2.5 done.
+
+### Deferred (post-pivot, still part of Phase 2.5)
+
+- [ ] **Step 5 (post-pivot) — HTML email via `pulldown-cmark`.** Add the crate. Rename `render_body` to `render_body_plaintext` (debug/LLM view). New `render_body_html` runs each section through `pulldown_cmark::html::push_html` and wraps in a minimal inline-CSS shell. `write_eml_file` flips `Content-Type` to `text/html`, quoted-printable encodes the body, adds `X-Unsent: 1`. Delete `MAILTO_MAX_BYTES` + the mailto branch in `compose_weekly_email`.
+- [ ] **Step 6 (post-pivot) — Preview modal on `/summary`.** New `EmailPreview.svelte`, calls a new `render_email_preview` command (DRY — same renderer as the send path). HTML rendered inside an `iframe srcdoc` for style isolation. "Preview" button next to "Send to manager".
+- [ ] **Step 7 (post-pivot) — Final smoke + commit.** Smoke matrix: markdown byte-identity on `/capture`, week-switch flush on `/journal`, all four sections + Preview + Send on `/summary`, real email to a Gmail + Outlook account.
 
 ## Phase 2.6 — Send weekly summary to manager ✅ (shipped 2026-06-24)
 

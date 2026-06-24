@@ -549,3 +549,121 @@ Ran the implementation through a multi-dimension adversarial workflow twice (8 +
 ### Next session
 
 Phase 2.5 — CodeMirror 6 markdown editor. Replaces the textareas on `/summary`, the capture popup body, and `/journal`. Sequenced before the onboarding revisit so the editor refactor is in place before adding new prose surfaces in the wizard.
+
+---
+
+## 2026-06-24 (evening) — Phase 2.5 Steps 1-7 + the editor pivot
+
+Long session. Phase 2.5's first arc (CodeMirror 6 source-mode editor on all three surfaces) landed step-by-step, the formatting toolbar shipped, then a real UX reckoning forced a mid-phase architectural pivot. Closing the day with a tagged rollback line and a 10-14 day Architecture B plan ready to start tomorrow.
+
+### What landed
+
+**Step 1 — `MarkdownEditor.svelte` + `/capture` swap** (commit `fb40bda`).
+- Added `@codemirror/{state,view,commands,language,lang-markdown}` and `@lezer/markdown` deps via `npm install`. Hand-rolled ~40-line Svelte 5 wrapper with a one-way `value` prop + `onChange` callback (NOT `$bindable` — CM6 transactions own the doc; bind: would fight the transaction model and reset cursors).
+- External-value sync via $effect compares against the current doc and only dispatches when they differ — breaks the echo loop that would otherwise fire on every onChange round-trip.
+- Smoke-test surfaced a CSS quirk: `.cm-editor`'s default `min-height: auto` made it grow with content and push the popup boundaries. Fixed by defaulting `--md-min-height` to 0 so the editor can shrink below intrinsic content size inside a flex-column parent; `.cm-scroller`'s `overflow: auto` takes over with internal scroll.
+- GFM extension enabled: task lists (`[ ]`/`[x]`), strikethrough, tables, and bare-URL autolinks now parse cleanly. Still source mode — no rendered checkboxes.
+
+**Step 2 — Cmd-click Markdown links** (commit `05201d8`).
+- New `markdown-links.ts` CM6 extension. `EditorView.domEventHandlers.mousedown` checks for Cmd/Ctrl modifier, walks the Lezer syntax tree at the click position, finds the surrounding `Link` / `Autolink` / `URL` node, extracts the href, hands to `tauri-plugin-opener::openUrl`.
+- Capability scope extended: `opener:allow-open-url` now allows `http://*` and `https://*` alongside `mailto:*` and `x-apple.systempreferences:*`. URL safety lives at the IPC boundary — anything outside the allow-list gets rejected by the opener plugin.
+- Three link forms work end-to-end: `[text](url)`, `<https://example.com>`, GFM bare URLs.
+
+**Step 3 — The spell-check architecture investigation** (commit `cfb2ce3`).
+The most twisty arc of the day. Started by porting the textarea-era mirror-div spellcheck (`SpellcheckTextarea.svelte`) over CodeMirror's `.cm-content` via Decoration.mark. Built `spellcheck-cm.ts` with a StateField + ViewPlugin that fires `check_spelling` IPC on a 400ms debounce, mapped returned `{start, length}` ranges to `Decoration.mark` with wavy-red text-decoration. Worked for `teh wrold` — Chris reported `dont`, `wont`, `cant` weren't getting flagged.
+
+Investigation workflow surfaced that **NSSpellChecker's `checkSpellingOfString:startingAt:` only emits the `Spelling` channel.** Missing-apostrophe contractions are routed through `NSTextCheckingTypeCorrection` (one-at-a-time per call by design — it's the inline autocorrect pipeline, not a batch document checker). Switched to `checkString:range:types:` with `Spelling | Correction | Grammar`. Wrote a `spellcheck_probe.rs` example binary to call NSSpellChecker directly with test strings and dump returned ranges + types — revealed that even with the broader mask, NSSpellChecker only returns one Correction at a time UNLESS there's also a Spelling result alongside (some heuristic where the engine "decides" the user is making real mistakes when at least one Spelling fires).
+
+Architecture moment: synthesis surfaced that the whole custom IPC + Decoration.mark plugin was the wrong layer. CodeMirror's editing surface IS a contenteditable div. WebKit's spell-check on contenteditable WORKS — `tauri-apps/tauri#7705` only applies to textareas. Verified by setting `EditorView.contentAttributes.of({ spellcheck: 'true' })` and ripping out the IPC. Native squiggles painted, right-click suggestions pre-populated, contractions caught the way the user expects — same NSSpellChecker that Apple Mail and Pages use.
+
+Net deletes for Step 3: `spellcheck-cm.ts` (~150 LOC), `spellcheck_probe.rs` (~120 LOC), the `.cm-misspelled` CSS, the diagnostic eprintln, the entire custom IPC + Decoration.mark plugin. `SpellcheckTextarea.svelte`, `spellcheck.rs`, and `objc2-app-kit` stay alive ONLY because `/summary` and `/journal` haven't migrated to CodeMirror yet. They get retired in Step 4.
+
+**Step 4 — Migration + the big delete** (commit `b27b263`).
+Propagated `MarkdownEditor` to `/journal` (monospace, 14px, 1.5 line-height, 16px padding via `--md-*` CSS variables) and `/summary` (four instances with `--md-min-height` approximating prior `rows={3|4|5}` defaults + `resize: vertical` for user-drag-grow). Added an `id` prop forwarded to `.cm-content` via `contentAttributes` so `<label for={id}>` clicks focus the editor.
+
+The deletes: `app/src/lib/SpellcheckTextarea.svelte` (~220 LOC), `app/src-tauri/src/spellcheck.rs` (~125 LOC), the `check_spelling` Tauri command registration, the `pub mod spellcheck;` declaration, the `objc2-app-kit` dep with its `NSSpellChecker` feature in `Cargo.toml`. Kept `seed_spellcheck_defaults()` in `lib.rs` (uses `objc2-foundation`'s NSUserDefaults — load-bearing for WebKit's continuous spell-checker globally).
+
+Net: -459 lines across 8 files. All three surfaces now use the same `MarkdownEditor.svelte` with native WebKit spell-check.
+
+**Toolbar + journal cheat sheet** (commit `6d60b58`).
+10-button formatting strip above each MarkdownEditor on `/capture` and `/summary`: Heading (cycle H1→H2→H3→none) / Bold / Italic / Strikethrough / Bulleted list / Numbered list / Block quote / Link / Code / Help. Keyboard shortcuts (all free in CM6 defaultKeymap): Cmd+B / Cmd+I / Cmd+K / Cmd+E / Cmd+Shift+7 / Cmd+Shift+8.
+
+Architecture:
+- `markdown-formatting.ts` holds the command functions (toggleBold, toggleItalic, toggleStrikethrough, toggleInlineCode, toggleBulletList, toggleNumberedList, toggleQuote, cycleHeading, insertLink). Same functions back both toolbar onClicks AND the keymap — wrap/unwrap logic in exactly one place per format. The numbered-list, bullet-list, quote, and heading commands all skip blank lines so paragraph-style multi-line selections don't get empty `- ` / `> ` / `# ` stamps in the gaps.
+- `MarkdownToolbar.svelte` is the visual strip — rendered inside `MarkdownEditor.svelte`, above the `.md-editor` wrapper, so the strip stays fixed when `/summary`'s `resize: vertical` handle is dragged.
+- `Icon.svelte` is a tiny inline-SVG component with 10 Lucide-derived paths. No icon library dep (8 icons didn't earn one).
+- MarkdownEditor gains a `showToolbar?: boolean = true` prop. Default on; `/journal` passes false. No consumer changes for `/summary` or `/capture`.
+
+`/journal` cheat-sheet link added to the existing placeholder copy ("New to markdown? Open the cheat sheet."), opened via Tauri's opener plugin against the already-allowed `https://*` scope.
+
+Adversarial review workflow (5 dimensions, parallel verify): zero confirmed findings. One rejected nice-to-have surfaced the blank-line code asymmetry in the line-prefix commands, which got fixed here as a hygiene win.
+
+### The marker-color experiments — and the architectural reckoning
+
+After the toolbar shipped, Chris asked to tint markdown markers (`**`, `~~`, `#`, `-`, `>`, etc.) with the brand maroon (the Discard button color) so non-markdown users could pick them out of prose at a glance. Initial implementation: a custom HighlightStyle for `tags.processingInstruction` with `color: var(--brand-maroon)`.
+
+Three bugs followed in quick succession:
+
+1. **Bold stopped rendering bold.** Diagnosis: ABeeZee (the brand body face) only ships at weight 400. The default `font-weight: bold` on the strong tag had no real glyphs to use, and WebKit's faux-bold synthesis isn't visible. Fix: explicit `font-family: system-ui, ...` override for `tags.strong` so bold spans switch to SF Pro mid-paragraph. Subtle in face, unmistakable in stroke weight.
+
+2. **Italic, strikethrough, link underlines all vanished.** Diagnosis: I had registered `defaultHighlightStyle` with `{ fallback: true }`. CodeMirror's `getHighlighters` IGNORES the fallback once any non-fallback highlighter is registered. My custom marker style was the non-fallback; it silently killed every default rule. Fix: register both as PRIMARY (no fallback option) — CM6 docs guarantee "the styling applied is the union of the classes they emit."
+
+3. **The maroon was unreadable on the dark theme.** `#6c1e38` is a dark burgundy, designed as a button BACKGROUND with cream text on top. As text color on the dark editor surface it disappeared. Added a theme-aware `--md-marker-color` token — dark theme uses a brightened rose (`#e07a9a`), light theme uses the actual brand maroon.
+
+After all three fixes, Chris stepped back and asked the question that mattered: *"is having visible markdown in these fields even the right direction?"* HR, artists, accountants, PMs are the colleagues who'll use this in months. None of them have seen `**bold**` in their lives. Having markers visible in any form — even tastefully tinted — would be a turnoff before they got past their first paragraph.
+
+Reverted the marker color + code monospace + atom (task) tinting + quote line decoration experiments. Kept only the bold + heading font-family swap (it's a functional fix for ABeeZee's missing bold weight, not a styling experiment). Tagged the clean state as `pre-slack-wysiwyg` (commit `ac101c8`).
+
+### The multi-lens architectural workflow
+
+With token cost explicitly off the table ("we have the tokens to burn"), spun up a comprehensive workflow:
+- 3 parallel research streams: codebase survey, Slack/Typora/iA Writer editor-pattern research, storage axis (markdown vs JSON vs sidecar)
+- 5 candidate architectures: A (CM6 + Live Preview), B (CM6 + aggressive Slack/Typora hiding), C (TipTap with markdown storage), D (TipTap with JSON storage), E (TipTap with JSON + .md sidecar)
+- 6 evaluation lenses scored each architecture 1-10: non-technical user / long-term maintenance / Phase 5 LLM handoff / portability / implementation realism / Chris-as-power-user
+
+Lens vote:
+| Lens | Winner |
+|---|---|
+| Non-technical user | D (TipTap + JSON) |
+| Long-term maintenance | **A** |
+| Phase 5 LLM handoff | A & B (tie) |
+| Portability + escape hatch | A & B (tie) |
+| Implementation realism | **A** |
+| Chris-as-power-user | **A** |
+
+5 of 6 lenses converged on the markdown-storage axis. Synthesis: *"This is not a tie — five lenses to one, with the dissenting lens speaking for a user population that doesn't exist yet."*
+
+Three of Chris's answers to the synthesis questions shifted the display axis recommendation from A (Obsidian-style active-line markers) to B (aggressive Slack/Typora hiding):
+- Non-tech colleague adoption: **imminent (<60 days)** — turns the dissenting lens from hypothetical into load-bearing
+- Daily `/journal` editing: **yes** — `/journal` needs full rich-text editing parity with `/summary`
+- Markdown storage: **as long as Slack-grade UX is achievable on it** — confirmed yes, B preserves it
+
+Locked the call: **Architecture B — CodeMirror 6 + aggressive Slack-style marker hiding + markdown on disk.** Storage stays portable; display goes all-the-way. Estimated ~10-14 days of focused work with the last 20% (atomic-range escape, selection-drag across hidden marks, line-level constructs like headings) explicitly flagged as where 80% of risk lives.
+
+### Tomorrow
+
+Architecture B begins. Day 1-3 chunk: aggressive-hiding ViewPlugin in `MarkdownEditor.svelte` shipped to `/capture` only, behind no flag (the source-mode default gets replaced). Toolbar + keymap stay visible and working. Chris committed to thorough self-testing — type-check, cargo check, read-the-diff-cold, simulate the user flow step-by-step, adversarial edge-case pass (selection-drag, backspace at boundaries, atomic-range escape, undo across decoration boundaries), then dev-run + eyeball before handing off.
+
+### Commits today
+
+- `fb40bda` Phase 2.5 Step 1: CodeMirror 6 markdown editor on /capture body
+- `05201d8` Phase 2.5 Step 2: Cmd-click follows Markdown links via Tauri opener
+- `cfb2ce3` Phase 2.5 Step 3: native WebKit spell-check on /capture editor
+- `4c24823` Fix flaky .eml filename race in tests
+- `b27b263` Phase 2.5 Step 4: CodeMirror on /journal + /summary; retire SpellcheckTextarea + spellcheck.rs IPC
+- `6d60b58` Phase 2.5 toolbar: formatting buttons + keymap + journal cheat sheet
+- `ac101c8` Revert source-mode marker styling experiments — pre-Slack-WYSIWYG baseline (TAGGED `pre-slack-wysiwyg`)
+
+### Test totals at end of day
+
+- Backend: **112** unit tests passing (unchanged — Step 3-4 deleted tests with the spellcheck module but Step 4's net diff held the suite at 112)
+- Frontend: `svelte-check` clean (177 files, 0 errors, 0 warnings)
+
+### Key lessons / things to remember
+
+- `tauri-apps/tauri#7705` is **textarea-specific**, not contenteditable. CodeMirror's editing surface is a contenteditable div → native WebKit spell-check works without custom IPC.
+- NSSpellChecker's `Correction` channel is single-issue-per-call by design (inline autocorrect pipeline) — `checkString:range:types:` only emits multiple Correction results when a Spelling result fires alongside. WKWebView's right-click menu only consults the Spelling channel.
+- `defaultHighlightStyle` registered with `{ fallback: true }` is IGNORED entirely if any non-fallback highlighter is registered. Always register defaultHighlightStyle as a PRIMARY when adding custom styles on top, otherwise italic/strikethrough/link-underlines silently vanish.
+- ABeeZee (the brand body face) has no bold weight. Any `font-weight: bold` rule on ABeeZee text falls through to WebKit faux-bold which is not visibly distinct. Explicit `font-family: system-ui` override for bold spans is the cleanest fix; brand consistency suffers slightly, weight visibility wins.
+- For Tauri opener capability scoping: `$TEMP` resolves to `std::env::temp_dir()` (confirmed by reading Tauri's path::parse source). Path patterns support `**` glob recursion.
+- The two-axis framing (storage vs display) is the right way to think about editor architecture decisions. They combine freely. Bundling them in "WYSIWYG = JSON storage" loses the design space.
