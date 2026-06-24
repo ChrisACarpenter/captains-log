@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import { openUrl, openPath } from '@tauri-apps/plugin-opener';
   import LabelInput from '$lib/LabelInput.svelte';
   import SpellcheckTextarea from '$lib/SpellcheckTextarea.svelte';
   import { reportDirty } from '$lib/dirty';
@@ -16,6 +17,18 @@
     labels: string[];
     lastUpdated: string | null;
   };
+
+  type SentRecord = {
+    sentAt: string;       // RFC 3339
+    contentHash: string;  // SHA-256 hex of canonical summary
+    sentTo: string;
+  };
+
+  // compose_weekly_email returns an externally-tagged enum: either an opener
+  // URL (mailto:) or a path (.eml). Frontend dispatches by `kind`.
+  type ComposeResult =
+    | { kind: 'mailto'; value: string }
+    | { kind: 'eml'; value: string };
 
   // Auto-save status. 'idle' = settled, no unsaved edits and no recent save
   // to advertise. 'dirty' = typed something, debounce timer pending. 'saving'
@@ -51,6 +64,23 @@
     anythingElse: '',
     labelsJson: '[]'
   });
+
+  // Send-to-manager state (Phase 2.6). All four pieces are loaded once on
+  // mount and updated after each successful save.
+  //   - managerEmail drives "can we send at all".
+  //   - sentRecord is the latest entry in .metadata/sent-log.json for this
+  //     week (or null if this week has never been sent).
+  //   - currentHash is the SHA-256 of the WeeklySummary as it sits on disk
+  //     RIGHT NOW (after the most recent save), used to detect "edited
+  //     since last send" by comparing against sentRecord.contentHash.
+  //   - isSending is the in-flight flag while compose → opener → mark is
+  //     happening; gates the Send button against double-clicks.
+  let managerEmail = $state<string | null>(null);
+  let sentRecord = $state<SentRecord | null>(null);
+  let currentHash = $state('');
+  let isSending = $state(false);
+  let sendError = $state('');
+  let showConfirmModal = $state(false);
 
   const isDirty = $derived(
     !loading &&
@@ -132,6 +162,22 @@
         anythingElse,
         labelsJson: JSON.stringify(labels)
       };
+      // Load send-to-manager state in parallel. Failures here don't block
+      // the summary itself — Send button just stays disabled.
+      const [settings, record, hash] = await Promise.all([
+        invoke<{ managerEmail: string | null }>('get_settings'),
+        invoke<SentRecord | null>('get_sent_record', {
+          year: yearWeek.year,
+          week: yearWeek.week
+        }),
+        invoke<string>('get_summary_hash', {
+          year: yearWeek.year,
+          week: yearWeek.week
+        })
+      ]);
+      managerEmail = settings.managerEmail;
+      sentRecord = record;
+      currentHash = hash;
     } catch (err) {
       loadError = String(err);
     } finally {
@@ -192,6 +238,22 @@
       };
       lastSavedAt = new Date();
       saveStatus = 'saved';
+      // Recompute the content hash off the freshly-saved file. This is what
+      // the Send button's "edited since last send" gate compares against
+      // sentRecord.contentHash. Refreshing here keeps the gate accurate
+      // immediately after a save (no delay before Send re-enables).
+      if (yearWeek) {
+        try {
+          currentHash = await invoke<string>('get_summary_hash', {
+            year: yearWeek.year,
+            week: yearWeek.week
+          });
+        } catch {
+          // If the hash refresh fails, leave currentHash stale — worst case
+          // the Send button stays disabled until the next save. Better than
+          // a phantom "Send updated version" that uses a hash we don't trust.
+        }
+      }
     } catch (err) {
       saveErrorMessage = String(err);
       saveStatus = 'error';
@@ -222,12 +284,157 @@
   });
 
   function handleKeydown(e: KeyboardEvent) {
+    // When the Send-confirmation modal is open, the window-level handler
+    // gets two responsibilities: dismiss on Escape, and swallow Cmd-S /
+    // Cmd-Enter so a stray hotkey can't trigger a save while the user is
+    // mid-confirm. (Without this Escape branch the modal had no keyboard
+    // dismiss — focus stays on the Send button when the modal opens, so
+    // Escapes bubble to window and we have to catch them here.)
+    if (showConfirmModal) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        dismissConfirm();
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'Enter')) {
+        e.preventDefault();
+      }
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
       void saveNow();
     } else if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
       e.preventDefault();
       void saveNow();
+    }
+  }
+
+  // ---------- Send to manager ----------
+  //
+  // Five layers gate the Send button. The order matters for what tooltip
+  // we show, so they're evaluated separately rather than collapsed into a
+  // single boolean.
+
+  const hasManagerEmail = $derived((managerEmail ?? '').trim() !== '');
+
+  // True when sent-log has a record for this week AND its content hash
+  // matches what's currently on disk. This is the "nothing has changed
+  // since the last send" state — the button stays disabled.
+  const alreadySentUnchanged = $derived(
+    sentRecord !== null &&
+      currentHash !== '' &&
+      sentRecord.contentHash === currentHash
+  );
+
+  // True when there's a sent record but the hash has drifted — user edited
+  // and saved the summary after sending. Button re-enables with a different
+  // label ("Send updated version") so the user knows this won't be the
+  // first send.
+  const editedAfterSend = $derived(
+    sentRecord !== null &&
+      currentHash !== '' &&
+      sentRecord.contentHash !== currentHash
+  );
+
+  const sendDisabled = $derived(
+    !hasManagerEmail ||
+      isDirty ||
+      saveStatus === 'saving' ||
+      alreadySentUnchanged ||
+      isSending
+  );
+
+  const sendButtonLabel = $derived.by(() => {
+    if (isSending) return 'Opening mail app…';
+    if (editedAfterSend) return 'Send updated version';
+    return 'Send to manager';
+  });
+
+  // Tooltip explains why the button is disabled (or, when enabled, what it
+  // will do). Spelled-out reasons help the user know what to do next rather
+  // than face a grayed-out button with no explanation.
+  const sendTooltip = $derived.by(() => {
+    if (!hasManagerEmail) return 'Set a manager email in Settings to enable this.';
+    if (isDirty) return 'Save your changes first.';
+    if (saveStatus === 'saving') return 'Waiting for save to finish…';
+    if (alreadySentUnchanged && sentRecord) {
+      return `Sent ${sentRecord.sentTo} on ${formatSentAt(sentRecord.sentAt)}.`;
+    }
+    if (isSending) return 'Opening your mail app…';
+    return `Opens a draft addressed to ${managerEmail} in your default mail app.`;
+  });
+
+  // Subtle in-row text shown next to the Send button when the week has been
+  // sent at least once. Distinct from the saveStatus indicator (which is
+  // about disk writes) — this one is about email lifecycle.
+  const sentStatusText = $derived.by(() => {
+    if (!sentRecord) return '';
+    if (editedAfterSend) {
+      return `Last sent ${formatSentAt(sentRecord.sentAt)} (edited since)`;
+    }
+    return `Sent ${formatSentAt(sentRecord.sentAt)}`;
+  });
+
+  // Lowercases ONLY the first character so weekLabel reads naturally inline
+  // ("for the week of June 22…") without flattening the month names (Chris
+  // flagged that `weekLabel.toLowerCase()` was making June lowercase too).
+  function inlineLabel(label: string): string {
+    if (label.length === 0) return label;
+    return label.charAt(0).toLowerCase() + label.slice(1);
+  }
+
+  function formatSentAt(rfc3339: string): string {
+    const d = new Date(rfc3339);
+    if (Number.isNaN(d.getTime())) return rfc3339;
+    // "Jun 24, 4:12 PM" — locale-agnostic enough for the audit-trail use case.
+    return d.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  function onSendClick() {
+    if (sendDisabled) return;
+    sendError = '';
+    showConfirmModal = true;
+  }
+
+  function dismissConfirm() {
+    if (isSending) return;
+    showConfirmModal = false;
+  }
+
+  /// Run the full send flow: compose → open with the right opener variant
+  /// → stamp the sent-log entry. Closes the modal on success or surfaces
+  /// the error via `sendError` on failure (modal stays open so the user
+  /// can retry).
+  async function confirmSend() {
+    if (!yearWeek || !hasManagerEmail) return;
+    isSending = true;
+    sendError = '';
+    try {
+      const result = await invoke<ComposeResult>('compose_weekly_email', {
+        year: yearWeek.year,
+        week: yearWeek.week
+      });
+      if (result.kind === 'mailto') {
+        await openUrl(result.value);
+      } else {
+        await openPath(result.value);
+      }
+      const record = await invoke<SentRecord>('mark_weekly_summary_sent', {
+        year: yearWeek.year,
+        week: yearWeek.week,
+        contentHash: currentHash,
+        sentTo: (managerEmail ?? '').trim()
+      });
+      sentRecord = record;
+      showConfirmModal = false;
+    } catch (err) {
+      sendError = String(err);
+    } finally {
+      isSending = false;
     }
   }
 </script>
@@ -334,10 +541,84 @@
           >
             {saveStatus === 'saving' ? 'Saving…' : 'Save'}
           </button>
+          <!-- Send to manager (Phase 2.6). Sits to the right of Save. Marble
+            (secondary) so it doesn't compete with the primary Save action.
+            Tooltip is the long form of "why disabled" / "what this does";
+            sentStatusText below the row carries the at-a-glance lifecycle. -->
+          <button
+            class="btn btn-marble btn-send"
+            onclick={onSendClick}
+            disabled={sendDisabled}
+            title={sendTooltip}
+          >
+            {sendButtonLabel}
+          </button>
         </div>
+
+        {#if sentStatusText}
+          <p class="sent-status" class:is-stale={editedAfterSend}>
+            {sentStatusText}
+          </p>
+        {/if}
       </div>
     </section>
   </main>
+
+  {#if showConfirmModal}
+    <!-- Confirmation modal for the Send-to-manager flow. Backdrop click
+       dismisses; Escape dismiss is handled by handleKeydown above (focus
+       stays on the Send button when the modal opens, so window-level
+       capture is the only reliable place to catch Escape). The primary
+       Open button calls confirmSend. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events — Escape is handled
+       at window level by handleKeydown (focus stays on the Send button when
+       the modal opens, so a backdrop-scoped keydown handler never fires).
+       The backdrop's click dismissal is a mouse-only convenience on top of
+       Cancel + Escape, not the primary close affordance. -->
+    <div
+      class="modal-backdrop"
+      onclick={dismissConfirm}
+      role="presentation"
+    >
+      <div
+        class="modal"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-labelledby="confirm-title"
+        onclick={(e) => e.stopPropagation()}
+      >
+        <h2 id="confirm-title">Send weekly summary?</h2>
+        <p>
+          This will open your default mail app with a draft addressed to
+          <strong>{managerEmail}</strong> for the {inlineLabel(weekLabel)}.
+          You'll review and send it from there — Captain's Log never sends mail on
+          its own.
+        </p>
+        {#if editedAfterSend && sentRecord}
+          <p class="modal-aside">
+            Heads up: you previously sent this week on {formatSentAt(sentRecord.sentAt)}.
+            This opens a new draft with the updated content.
+          </p>
+        {/if}
+        {#if sendError}
+          <p class="status status-error">Couldn't open mail app: {sendError}</p>
+        {/if}
+        <div class="modal-actions">
+          <button class="btn btn-marble" onclick={dismissConfirm} disabled={isSending}>
+            Cancel
+          </button>
+          <button
+            class="btn btn-emerald"
+            onclick={() => void confirmSend()}
+            disabled={isSending}
+          >
+            {isSending ? 'Opening…' : 'Open draft'}
+          </button>
+        </div>
+      </div>
+    </div>
+  {/if}
 {/if}
 
 <style>
@@ -425,6 +706,89 @@
 
   .btn-save {
     margin-left: auto;
+  }
+
+  /* Send button sits flush against Save with a small gap. No left-margin
+   * adjustment — Save's `margin-left: auto` already pushes both buttons
+   * to the right side of the actions row. */
+  .btn-send:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+
+  /* Sent-state lifecycle line — appears below the actions row when this
+   * week has been sent at least once. .is-stale modifier marks the
+   * "edited since last send" state with a warm orange to draw attention
+   * that re-sending will be a different message. */
+  .sent-status {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-caption);
+    line-height: var(--text-caption-lh);
+    color: var(--text-muted);
+    font-style: italic;
+    text-align: right;
+  }
+
+  .sent-status.is-stale {
+    color: var(--accent-primary);
+  }
+
+  /* ---- Send confirmation modal ---- */
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    padding: var(--space-4);
+  }
+
+  .modal {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    max-width: 480px;
+    width: 100%;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  }
+
+  .modal h2 {
+    margin: 0 0 var(--space-3);
+    font-family: var(--font-display);
+    font-size: var(--text-display-sm);
+    line-height: var(--text-display-sm-lh);
+  }
+
+  .modal p {
+    margin: 0 0 var(--space-3);
+    color: var(--text-secondary);
+    line-height: var(--text-body-lh);
+  }
+
+  .modal p strong {
+    color: var(--text-primary);
+    font-weight: normal;
+    font-family: var(--font-display);
+  }
+
+  .modal-aside {
+    margin-top: var(--space-3);
+    padding: var(--space-3);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--accent-primary);
+    color: var(--text-secondary) !important;
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: flex-end;
+    margin-top: var(--space-5);
   }
 
   /* Auto-save indicator — small italic text between Done and Save. State is

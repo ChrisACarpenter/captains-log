@@ -29,6 +29,23 @@ image = { version = "0.25.10", default-features = false, features = ["png"] }
 tauri-plugin-dialog = "2.7.1"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-window-state = "2"
+# Used by sent_log::hash_weekly_summary to detect whether a previously-sent
+# week has been edited since it was sent. SHA-256 is overkill for tamper
+# resistance but it's the boring, well-tested choice — and detection
+# correctness is the whole point of the field.
+sha2 = "0.10"
+# URL percent-encoding for mailto: subject/body strings. We avoid hand-rolling
+# the escape table because mailto: is fussy about which characters are safe
+# (spaces must be %20, not +; reserved chars like '&', '?', '#', '/' must all
+# be encoded inside the query component).
+urlencoding = "2.1"
+# RFC 2047 encoded-word support for the .eml subject header. The user-visible
+# week label uses an en-dash (U+2013) and full month names, both UTF-8, but
+# RFC 5322 headers are strictly ASCII — strict parsers reject UTF-8 subjects.
+# We base64-wrap the subject as `=?UTF-8?B?<b64>?=` when it contains non-ASCII.
+# Transitively present already (via tauri's dep tree); declared explicitly so
+# `use base64::*` resolves.
+base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Modern macOS notification API — wraps UNUserNotificationCenter and gives us

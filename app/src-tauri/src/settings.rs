@@ -144,6 +144,19 @@ pub struct JournalSettings {
     pub version: u32,
     pub user_name: Option<String>,
     pub reminder: ReminderSettings,
+    /// Manager's email address — used by the "Send weekly summary to manager"
+    /// flow on /summary. Optional; an empty/missing value just disables the
+    /// Send button. `#[serde(default)]` so older settings.json files written
+    /// before this field existed still parse cleanly.
+    #[serde(default)]
+    pub manager_email: Option<String>,
+    /// Manager's first name (or whatever the user prefers to address them as).
+    /// Used purely to personalize the email greeting ("Hello {name},"); the
+    /// send still works without it (greeting falls back to a plain "Hello,").
+    /// Kept separate from manager_email because the email is the routing
+    /// information and the name is presentation.
+    #[serde(default)]
+    pub manager_name: Option<String>,
 }
 
 impl Default for JournalSettings {
@@ -152,6 +165,8 @@ impl Default for JournalSettings {
             version: CURRENT_VERSION,
             user_name: None,
             reminder: ReminderSettings::default(),
+            manager_email: None,
+            manager_name: None,
         }
     }
 }
@@ -276,6 +291,8 @@ mod tests {
                 hour: 16,
                 minute: 30,
             },
+            manager_email: Some("chris.manager@prodigygame.com".to_string()),
+            manager_name: Some("Pat".to_string()),
         };
         original.save(&backend).await.unwrap();
 
@@ -283,6 +300,36 @@ mod tests {
         assert_eq!(loaded.user_name, Some("Chris".to_string()));
         assert!(loaded.reminder.enabled);
         assert_eq!(loaded.reminder.minute, 30);
+        assert_eq!(
+            loaded.manager_email,
+            Some("chris.manager@prodigygame.com".to_string())
+        );
+        assert_eq!(loaded.manager_name, Some("Pat".to_string()));
+    }
+
+    #[tokio::test]
+    async fn journal_settings_legacy_without_manager_email_parses() {
+        // Simulate a settings.json written before the managerEmail field
+        // existed. The #[serde(default)] attribute should fill it in as None
+        // rather than erroring on the missing field.
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let legacy_json = r#"{
+          "version": 1,
+          "userName": "Chris",
+          "reminder": { "enabled": false, "dayOfWeek": 4, "hour": 16, "minute": 0 }
+        }"#;
+        // Write directly through the backend's metadata writer to bypass the
+        // serializer (which would always emit managerEmail: null).
+        backend
+            .write_metadata(JOURNAL_SETTINGS_FILENAME, legacy_json)
+            .await
+            .unwrap();
+
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert_eq!(loaded.manager_email, None);
+        assert_eq!(loaded.manager_name, None);
+        assert_eq!(loaded.user_name, Some("Chris".to_string()));
     }
 
     #[test]

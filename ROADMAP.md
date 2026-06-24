@@ -73,6 +73,30 @@ Phase 1 MVP is complete. Phase 2's daily-driver polish closed today with the jou
 
 **Success:** Captain's Log has replaced any other journaling system I was using. **Achieved.**
 
+## Phase 2.6 — Send weekly summary to manager
+
+Active. Adds a one-click "send my weekly summary to my manager" flow that uses the OS-default mail handler (so Mail.app or whichever Gmail-aware client is set as the user's `mailto:` handler) and lands a real message in the user's real Sent folder — no SMTP credentials, no OAuth dance, no mail server.
+
+- [ ] **Manager email field in Settings** — new `managerEmail: Option<String>` on `JournalSettings`, persists to `.metadata/settings.json` alongside `userName` + reminder.
+- [ ] **Sent-log sidecar** — `.metadata/sent-log.json` keyed by ISO year-week: `{ sentAt, contentHash, sentTo }`. One entry per week (no history array).
+- [ ] **`hash_weekly_summary` helper** — SHA-256 of the canonicalized four summary fields + labels. Backend-only so the same value gates the UI and is stamped at send time.
+- [ ] **`compose_weekly_email` command** — builds a `mailto:` URL by default; if the URL-encoded length would exceed ~1800 chars, writes an `.eml` file to a temp dir and returns its path. Subject: `"Weekly update — week of {label}"`. Body: the four sections + labels line.
+- [ ] **`get_sent_record` + `mark_weekly_summary_sent` commands** — read/write the sent log.
+- [ ] **Capability scope** — extend `opener:allow-open-url` to accept `mailto:*`; add `opener:allow-open-path` scoped to `$TEMP/captainslog/*.eml`.
+- [ ] **Send button on `/summary`** — sits next to the green Save button. Gated on: manager email is set, isDirty is false, no matching sent-record exists (or hash differs after edit). Tooltip explains the disabled reason.
+- [ ] **Confirmation modal** — explains where the draft will open + who it's addressed to before opening the mail client.
+- [ ] **Sent state UI** — shows "Sent {when}" when the button is disabled by a matching sent-record; "Send updated version" when the content hash differs from the last send.
+- [ ] **`.eml` temp janitor** — startup task prunes `$TEMP/captainslog/*.eml` files older than 24h.
+
+## Phase 2.7 — Onboarding + Settings revisit
+
+Before Phase 3. The first-run wizard captures the bare minimum (name, journal location, reminder). After 2.6 the data model grows enough — and the Settings screen is long enough — that both deserve a polish pass.
+
+- [ ] **"Tell me about you" wizard step** — name, Bamboo title (with the word *Bamboo* linking to Prodigy's BambooHR site), Jira project keys (comma-separated, e.g. `MAGE`, multiple allowed).
+- [ ] **"Tell me about your manager" wizard step** — manager name + email. Manager email reuses the field added in 2.6.
+- [ ] **Settings layout** — convert the single long-scroll form into tabs or section breaks (Your details / Manager / Journal location / Reminder / Theme). Adding 3+ new fields without grouping is the trigger.
+- [ ] **Persistence** — Bamboo title + Jira project keys join `JournalSettings`; same `.metadata/settings.json`.
+
 ## Phase 3 — Search & Navigation
 
 - [ ] Full-text search across all weekly files

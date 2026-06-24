@@ -16,6 +16,7 @@ use chrono::Local;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::email::{compose_weekly_email as compose, ComposeResult};
 use crate::labels::{record_note_labels, LabelEntry, LabelIndex};
 use crate::notes::{
     append_note, iso_year_week, parse_weekly_summary, replace_weekly_summary_in_file,
@@ -23,6 +24,9 @@ use crate::notes::{
 };
 use crate::reminders::{
     request_notification_authorization, restart_reminder_task, ReminderHandle,
+};
+use crate::sent_log::{
+    get_sent_record as load_sent_record, hash_weekly_summary, upsert_sent_record, SentRecord,
 };
 use crate::{DirtyEntry, DirtyRegistry};
 use crate::settings::{
@@ -273,6 +277,10 @@ pub struct SettingsBundle {
     pub reminder: ReminderSettings,
     /// Active theme — defaults to Dark, persisted in app-settings.json.
     pub theme: Theme,
+    /// Manager's email — used by the "Send weekly summary to manager" flow.
+    pub manager_email: Option<String>,
+    /// Manager's display name — used to personalize the email greeting.
+    pub manager_name: Option<String>,
 }
 
 #[tauri::command]
@@ -305,6 +313,8 @@ pub async fn get_settings(
         user_name: journal_settings.user_name,
         reminder: journal_settings.reminder,
         theme,
+        manager_email: journal_settings.manager_email,
+        manager_name: journal_settings.manager_name,
     })
 }
 
@@ -328,6 +338,13 @@ pub struct UpdateSettingsInput {
     pub journal_root: PathBuf,
     pub reminder: ReminderSettings,
     pub theme: Theme,
+    /// Manager email — `None` (or empty after trim) disables the Send button.
+    /// `#[serde(default)]` lets older frontends omit the field without erroring.
+    #[serde(default)]
+    pub manager_email: Option<String>,
+    /// Manager display name — purely cosmetic (greeting in the email).
+    #[serde(default)]
+    pub manager_name: Option<String>,
 }
 
 /// Writes both settings files. If the user picked a journal root different
@@ -356,11 +373,15 @@ pub async fn complete_first_run(
 
     // 2. Save journal-level settings into the CHOSEN root (which may differ
     //    from the storage instance's root if the user picked a non-default).
+    //    First-run wizard doesn't collect manager email/name today (those
+    //    come in Phase 2.7's onboarding revisit); leave both None.
     let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
     let journal_settings = JournalSettings {
         version: CURRENT_VERSION,
         user_name: input.user_name.clone(),
         reminder: input.reminder.clone(),
+        manager_email: None,
+        manager_name: None,
     };
     journal_settings
         .save(&chosen_storage)
@@ -429,12 +450,26 @@ pub async fn update_settings(
         .map_err(|e| e.to_string())?;
 
     // 2. Journal-level (write to the chosen root so a root change still lands
-    //    the new prefs at the right place).
+    //    the new prefs at the right place). Manager email is trimmed; an
+    //    empty string after trimming persists as None so the Send button's
+    //    "is this set?" check stays simple.
     let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
+    let manager_email = input
+        .manager_email
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let manager_name = input
+        .manager_name
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     let journal_settings = JournalSettings {
         version: CURRENT_VERSION,
         user_name: input.user_name.clone(),
         reminder: input.reminder.clone(),
+        manager_email,
+        manager_name,
     };
     journal_settings
         .save(&chosen_storage)
@@ -568,4 +603,230 @@ pub async fn clear_capture_draft(
         .delete_metadata(CAPTURE_DRAFT_FILE)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Send weekly summary to manager (Phase 2.6)
+// ---------------------------------------------------------------------------
+//
+// The frontend's "Send to manager" button drives three commands in sequence:
+//
+//   1. get_sent_record(year, week) on page load — feeds the disabled/enabled
+//      decision (already sent for this week + same content hash → disabled).
+//   2. compose_weekly_email(year, week) on click + confirm — returns either
+//      a mailto: URL or an .eml file path; frontend hands it to opener.
+//   3. mark_weekly_summary_sent(year, week, contentHash, sentTo) after the
+//      open returns Ok — stamps sent-log.json so the next load knows.
+//
+// No live link to lib::run is needed; everything reads/writes through the
+// same storage backend the rest of the app already uses.
+
+/// Return the sent-log entry for (year, week), or `None` if this week has
+/// never been sent. Cheap — re-reads `sent-log.json` each call (the file is
+/// tiny; in-memory caching would just add invalidation bugs).
+#[tauri::command]
+pub async fn get_sent_record(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+) -> Result<Option<SentRecord>, String> {
+    let storage = storage_state.read().await;
+    load_sent_record(&*storage, year, week)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Compose the email for (year, week) into either a `mailto:` URL or an
+/// `.eml` file (length-based fallback). Reads the current Weekly Summary
+/// off disk every time so we never compose stale text — frontend gates the
+/// button on `isDirty` to prevent the user from sending unsaved edits.
+///
+/// Errors:
+///   - `"no manager email set"` if the journal settings have no manager
+///     email (or it's empty after trim). UI gates on this too; backend
+///     check is defense-in-depth.
+///   - I/O / serde errors as strings.
+#[tauri::command]
+pub async fn compose_weekly_email(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+) -> Result<ComposeResult, String> {
+    let storage = storage_state.read().await;
+
+    let journal_settings = JournalSettings::load(&*storage)
+        .await
+        .map_err(|e| e.to_string())?;
+    let recipient = journal_settings
+        .manager_email
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "no manager email set".to_string())?;
+    let manager_name = journal_settings
+        .manager_name
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let raw = storage
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+    let summary = match raw {
+        Some(c) => parse_weekly_summary(&c),
+        None => return Err(format!("no weekly summary saved for {year}-W{week:02}")),
+    };
+
+    // Check the sent-log: if a record for this week already exists, this is
+    // a resend (gating ensures the content hash differs from the recorded one,
+    // so we wouldn't even be here unless the user edited and saved). Resends
+    // use a different subject line so the manager's mail thread shows it's
+    // an updated version of an earlier message.
+    let is_resend = load_sent_record(&*storage, year, week)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_some();
+
+    let week_label = format_week_label(year, week);
+    let now = Local::now().fixed_offset();
+    let params = crate::email::ComposeParams {
+        summary: &summary,
+        week_label: &week_label,
+        recipient: &recipient,
+        manager_name: manager_name.as_deref(),
+        is_resend,
+        now,
+    };
+    compose(params).map_err(|e| e.to_string())
+}
+
+/// Stamp the sent-log entry for (year, week) after the user successfully
+/// hands off the email to their mail client. The frontend supplies the
+/// content hash it observed at compose time so we never compute it
+/// differently between the two calls.
+#[tauri::command]
+pub async fn mark_weekly_summary_sent(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+    content_hash: String,
+    sent_to: String,
+) -> Result<SentRecord, String> {
+    let storage = storage_state.read().await;
+    let now = Local::now().fixed_offset();
+    let record = SentRecord {
+        sent_at: now.to_rfc3339(),
+        content_hash,
+        sent_to,
+    };
+    upsert_sent_record(&*storage, year, week, record.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(record)
+}
+
+/// Compute the SHA-256 hash of the current saved Weekly Summary for
+/// (year, week). Used by the frontend to drive the Send-button gating
+/// (compare against the hash stored in the sent-log entry to detect
+/// "edited since last send"). Returns an empty string if no summary
+/// exists yet.
+#[tauri::command]
+pub async fn get_summary_hash(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+) -> Result<String, String> {
+    let storage = storage_state.read().await;
+    let raw = storage
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(match raw {
+        Some(c) => hash_weekly_summary(&parse_weekly_summary(&c)),
+        None => String::new(),
+    })
+}
+
+/// Format `(year, week)` as the human-readable label used in email subjects,
+/// the email body intro line, and the confirmation modal: e.g.
+/// `"week of June 22 – June 28, 2026"`. Lowercase leading "week" so the
+/// string drops cleanly into sentences ("Weekly update - week of ...",
+/// "for the week of ..."); the /summary heading uses its own capitalized
+/// variant ("Week of June 22 – June 28, 2026") computed by the frontend.
+///
+/// ## Stay in sync with the frontend
+///
+/// The frontend computes its own `weekLabel` in `/summary` for display in
+/// the page heading and confirmation modal (via `inlineLabel()` to drop
+/// the leading capital). The two strings MUST match character-for-character
+/// when lowercased on the leading `W` — otherwise the user sees one rendering
+/// in the modal ("for the week of June 22 – June 28, 2026") and a different
+/// rendering in the actual email subject they hand off to their mail client.
+/// Format conventions kept in lockstep:
+///
+///   - Full month name (`%B` → "June", not abbreviated "Jun")
+///   - En-dash (U+2013, " – ") between start and end dates, not ASCII "-"
+///   - No zero-padding on day numbers (`%-d` → "22", not "22")
+///   - Cross-year weeks repeat the year on both sides
+///
+/// If either side changes, the matching test in /summary's weekLabel logic
+/// AND `week_label_matches_frontend_format` here must be updated together.
+fn format_week_label(year: u32, week: u32) -> String {
+    use chrono::{Datelike, Duration, NaiveDate};
+    // ISO week 1 is the week containing Jan 4. Walk back to that week's
+    // Monday, then offset by (week-1) weeks.
+    let Some(jan4) = NaiveDate::from_ymd_opt(year as i32, 1, 4) else {
+        return format!("{year}-W{week:02}");
+    };
+    let dow_from_monday = jan4.weekday().num_days_from_monday();
+    let monday_of_week1 = jan4 - Duration::days(dow_from_monday as i64);
+    let monday = monday_of_week1 + Duration::weeks((week as i64).saturating_sub(1));
+    let sunday = monday + Duration::days(6);
+
+    // "June 22" — %B is the full month name, %-d strips zero-padding.
+    let fmt = |d: NaiveDate| d.format("%B %-d").to_string();
+
+    if monday.year() == sunday.year() {
+        format!(
+            "week of {} \u{2013} {}, {}",
+            fmt(monday),
+            fmt(sunday),
+            monday.year()
+        )
+    } else {
+        format!(
+            "week of {}, {} \u{2013} {}, {}",
+            fmt(monday),
+            monday.year(),
+            fmt(sunday),
+            sunday.year()
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn week_label_matches_frontend_format() {
+        // The frontend computes weekLabel for the heading + modal with full
+        // month names + en-dash. The backend must produce a string that's
+        // identical to inlineLabel(frontend) so the modal and the email
+        // subject read the same week.
+        let s = format_week_label(2026, 26);
+        assert!(s.starts_with("week of June "), "got {s:?}");
+        assert!(s.ends_with(", 2026"), "got {s:?}");
+        assert!(s.contains(" \u{2013} "), "expected en-dash separator, got {s:?}");
+    }
+
+    #[test]
+    fn week_label_w01_is_january() {
+        let s = format_week_label(2026, 1);
+        // W01 always contains Jan 4; the Monday could be late Dec of the
+        // previous year, hence the cross-year branch. Either way the label
+        // mentions "January" (full month name now).
+        assert!(s.contains("January"), "expected January in {s}");
+    }
 }

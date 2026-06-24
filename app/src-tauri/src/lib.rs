@@ -9,9 +9,11 @@
 //   commands  — Tauri command handlers exposed to the frontend
 
 pub mod commands;
+pub mod email;
 pub mod labels;
 pub mod notes;
 pub mod reminders;
+pub mod sent_log;
 pub mod settings;
 pub mod spellcheck;
 pub mod storage;
@@ -293,6 +295,10 @@ pub fn run() {
             commands::load_capture_draft,
             commands::save_capture_draft,
             commands::clear_capture_draft,
+            commands::get_sent_record,
+            commands::compose_weekly_email,
+            commands::mark_weekly_summary_sent,
+            commands::get_summary_hash,
             spellcheck::check_spelling,
         ])
         .setup(|app| {
@@ -301,6 +307,12 @@ pub fn run() {
             // Edit menu (installed below), spellcheck="true" on the
             // textareas is a no-op. Idempotent — runs every launch.
             seed_spellcheck_defaults();
+
+            // Sweep stale .eml files from the Send-to-manager fallback path.
+            // Fire-and-forget; failures are logged but never block startup
+            // (the janitor's worst-case cost is leaving a few KB of temp
+            // drafts behind, not anything user-visible).
+            email::prune_old_eml_files();
 
             // Cross-window dirty registry — read at quit time by try_quit.
             app.manage(DirtyRegistry::default());

@@ -21,6 +21,8 @@
     userName: string | null;
     reminder: ReminderSettings;
     theme: Theme;
+    managerEmail: string | null;
+    managerName: string | null;
   };
 
   const DAYS = [
@@ -47,6 +49,17 @@
   let reminderEnabled = $state(false);
   let reminderDay = $state(4);
   let reminderTime = $state('16:00');
+  let managerEmailInput = $state('');
+  let managerNameInput = $state('');
+
+  // Light client-side check: looks_like_an_email, not the full RFC 5322
+  // monster. Empty is fine (it disables the Send button); only a non-empty
+  // value that fails the shape gets the warning. Backend re-trims and persists.
+  const managerEmailLooksValid = $derived.by(() => {
+    const v = managerEmailInput.trim();
+    if (v === '') return true;
+    return /.+@.+\..+/.test(v);
+  });
 
   onMount(async () => {
     try {
@@ -59,6 +72,8 @@
       reminderEnabled = s.reminder.enabled;
       reminderDay = s.reminder.dayOfWeek;
       reminderTime = `${String(s.reminder.hour).padStart(2, '0')}:${String(s.reminder.minute).padStart(2, '0')}`;
+      managerEmailInput = s.managerEmail ?? '';
+      managerNameInput = s.managerName ?? '';
     } catch (err) {
       loadError = String(err);
     } finally {
@@ -117,7 +132,9 @@
             hour: Number.parseInt(hourStr, 10),
             minute: Number.parseInt(minuteStr, 10)
           },
-          theme: currentTheme
+          theme: currentTheme,
+          managerEmail: managerEmailInput.trim() || null,
+          managerName: managerNameInput.trim() || null
         }
       });
       // Storage, reminder, and theme all hot-swap in-process — no restart needed.
@@ -171,6 +188,48 @@
             bind:value={nameInput}
           />
           <p class="hint">Used in the reminder notification body.</p>
+        </div>
+
+        <!-- Manager name -->
+        <div class="field">
+          <label for="manager-name">Manager name</label>
+          <input
+            id="manager-name"
+            class="text-input"
+            type="text"
+            placeholder="Arthur"
+            spellcheck="false"
+            autocomplete="off"
+            bind:value={managerNameInput}
+          />
+          <p class="hint">
+            Used as the greeting in the email ("Hello Arthur,"). Leave blank for a plain
+            "Hello,".
+          </p>
+        </div>
+
+        <!-- Manager email -->
+        <div class="field">
+          <label for="manager-email">Manager email</label>
+          <input
+            id="manager-email"
+            class="text-input"
+            type="email"
+            placeholder="manager@prodigygame.com"
+            spellcheck="false"
+            autocomplete="email"
+            bind:value={managerEmailInput}
+          />
+          {#if !managerEmailLooksValid}
+            <p class="hint hint-warning">
+              That doesn't look like an email address. Save anyway if it's intentional.
+            </p>
+          {:else}
+            <p class="hint">
+              Used by the <strong>Send to manager</strong> button on the weekly summary.
+              Leave blank to disable that button.
+            </p>
+          {/if}
         </div>
 
         <!-- Journal location -->
@@ -346,6 +405,16 @@
     font-size: var(--text-caption);
     line-height: var(--text-caption-lh);
     color: var(--text-secondary);
+  }
+
+  .hint-warning {
+    color: var(--accent-pink);
+  }
+
+  .hint strong {
+    color: var(--text-primary);
+    font-weight: normal;
+    font-family: var(--font-display);
   }
 
   .persistent-hint {
