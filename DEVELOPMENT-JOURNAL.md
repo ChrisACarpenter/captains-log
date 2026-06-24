@@ -433,3 +433,119 @@ Roughly 40, headlines:
 - Backend: **75/75** unit tests passing
 - Frontend: `svelte-check` clean (160 files, 0 errors)
 - Production .app: builds cleanly with proper codesign + Info.plist; verified end-to-end notification flow with action buttons
+
+---
+
+## 2026-06-23 (continued) — Phase 2 close-out: auto-save, journal browser, spell-check squiggles
+
+Picked up where the prior sprint entry left off — the three auto-save phases, then the journal browser that turns "view past notes" from "open the .md in another app" into a first-class navigator. Closed with the spell-check polish so squiggles actually render under misspelled words inside Tauri's WKWebView.
+
+### What landed
+
+**Auto-save trio**
+
+- **Phase 1 — Weekly Summary auto-save.** 1.5s debounce after typing → `update_weekly_summary` fires (same command the manual Save uses). Inline status indicator: `Saving…` / `Saved 2:34 PM` / `Unsaved changes` / `Couldn't save — retry?`. Manual Save still works as a force-immediate. After successful auto-save the summary leaves the `DirtyRegistry` so the quit prompt no longer flags it.
+- **Phase 2 — Capture popup draft persistence.** Drafts at `<journal>/.metadata/capture-draft.json`. New `StorageBackend::delete_metadata` trait method to support the "draft becomes a real note → clean up the draft" pathway. Three new commands: `load_capture_draft` / `save_capture_draft` / `clear_capture_draft`. Subtle italic "Draft saved 2:34 PM" status below the actions row. Bonus item Chris asked for mid-sprint: a Ruby **Discard** button with `confirm()` modal that cancels pending saves, deletes the draft, and hides the popup. `dialog:allow-confirm` capability added.
+- **Phase 3 — Strip the red-X prompts.** With auto-save covering both surfaces, the unsaved-work prompt was theatre. Red X on either window now hides silently. Cmd+Q / tray Quit keeps the `DirtyRegistry`-driven guard as a backstop for the rare debounce-gap case.
+
+**Journal browser**
+
+- `/journal` route with a year/week tree sidebar (newest first, current year auto-expanded, current week marked with an orange dot, selected week highlighted in maroon).
+- Raw markdown editor on the right. Loads `read_week(year, week)`, writes via new `write_week` command. Same 1.5s debounce auto-save as /summary. New `list_years` / `list_weeks` commands feed the sidebar.
+- Switching weeks flushes any pending edits to the previously-selected week BEFORE loading the new one — otherwise a debounce firing after the switch would write the wrong content.
+- Save-race guard captures `selectedYearWeek` BEFORE the invoke await so a mid-save week change re-baselines correctly.
+
+**Spell-check (visual feedback)**
+
+The Edit-menu fix was straightforward: install a real macOS app menu including standard Undo/Redo + Cut/Copy/Paste/Select All. AppKit's responder chain needs the Edit menu present for the right-click "Show Spelling and Grammar" affordance to surface in editable controls. Also seed `WebContinuousSpellCheckingEnabled` / `WebGrammarCheckingEnabled` / `NSAllowContinuousSpellChecking` via NSUserDefaults at app launch — WKWebView checks these on each editable focus and they default to `false` in a fresh bundle.
+
+Squiggles required more work. WKWebView in Tauri silently doesn't paint the red wavy underline (upstream bug `tauri-apps/tauri#7705`). Solution after a 4-dimension synthesis workflow: draw squiggles ourselves.
+
+- New `check_spelling` Tauri command hops to the main thread via `app.run_on_main_thread()` + `tokio::sync::oneshot`, calls `NSSpellChecker::sharedSpellChecker().checkSpellingOfString_startingAt(...)` in a loop, returns `Vec<{start, length}>` in UTF-16 code units (matches JS string indexing, so emoji-safe).
+- New `<SpellcheckTextarea>` Svelte 5 component is a drop-in textarea wrapper. Mirrors the textarea content into a positioned backdrop `<div>` behind it. Misspelled spans get `<mark class="sq">` with `text-decoration: underline wavy red`. Mirror text is transparent — the real textarea's text sits on top; the squiggles peek through from behind. 400ms debounced check (separate from the 1.5s autosave cadence), monotonic `requestSeq` to drop stale results, `syncScroll()` to keep the backdrop aligned during scrolling, trailing-newline fix to avoid last-line drift. CSS custom properties (`--sq-padding`, `--sq-font-family`, etc.) let each consumer match its own typography — the journal editor uses monospace via these.
+- Wired into /summary (4 textareas), /capture body, /journal editor.
+
+**Home page polish**
+
+Small but visible: buttons reordered to Weekly Summary / Browse Journal / Settings, "Browse Journal" got its Capital J, Prodigy mark wordmark added as a centered footer. Pulled the source PNG from the RPG game's experiments folder.
+
+### What was tougher than expected
+
+- **Spell-check squiggles.** First tried passing `spellcheck="true"` and assuming the native checker would do the rest — that part DID light up the right-click menu, but visual underlines stayed missing. Five hours of investigation across NSSpellChecker semantics, NSUserDefaults priming, WKWebView's quirks, and finally the mirror-div technique. The workflow agents nailed the synthesis: pick NSSpellChecker (best dictionary quality, zero bundle cost), bridge via objc2-app-kit feature gate (small compile-time hit), draw squiggles on a transparent mirror layer. End result is barely noticeable from native squiggles in normal use, with the bonus that right-click "Show Spelling and Grammar" still works because the underlying textarea kept `spellcheck="true"`.
+
+### What's still rough
+
+- **Raw markdown only.** Bold/italic/lists don't render — you type and see the markdown source. Phase 2.5 is exactly this gap.
+- **No inline `#` autocomplete in body text.** Carries over from Phase 2 wishlist. Also Phase 2.5.
+
+### Test totals at end of day
+
+- Backend: **75 → 75** (no new Rust tests this day; all changes were either pure-frontend or wired through existing commands)
+- Frontend: `svelte-check` clean (163 files, 0 errors, 0 warnings after a couple of a11y nudges on the new modal)
+
+---
+
+## 2026-06-24 — Phase 2.6: send weekly summary to manager
+
+Single-day feature: a `Send to manager` button on `/summary` that hands a draft to the user's default mail handler. No SMTP credentials, no OAuth — the user reviews and sends the draft from their real mail identity so threading and the Sent folder work normally. Commit `86d804b`.
+
+### Why this shape
+
+Two upfront design workflows, both fanned out into parallel research streams:
+
+1. **Email-sending mechanism survey** — `mailto:` deep-link via tauri-plugin-opener vs SMTP via the `lettre` crate vs AppleScript driving Mail.app. SMTP requires storing an app password (and Google killed legacy password auth in mid-2025, so it's a dead end on a 1–2 year horizon for Gmail/Workspace). AppleScript locks the app to Mail.app users and demands an Info.plist with `NSAppleEventsUsageDescription` + an Automation entitlement + a TCC prompt. `mailto:` is already 95% wired (the opener plugin's in the dep tree), keeps credentials with the OS, and lets the user review the message before sending. The one real footgun — macOS LaunchServices truncates mailto URLs around ~2 KB — is mitigated cleanly by writing an `.eml` to a temp dir when the encoded URL would exceed 1800 bytes and opening THAT via `opener::open_path` instead. Same UX, no length cliff.
+2. **Architecture design** — sent-state per week as a sidecar at `.metadata/sent-log.json` keyed by ISO year-week, with a content-hash field so "edited since send" is detectable. One entry per week (overwrite on resend). Hash includes the four summary fields + labels, length-prefixed.
+
+### What landed
+
+- **Settings**: new `managerEmail` + `managerName` on `JournalSettings`, persisted to `.metadata/settings.json`. Settings UI gets a Manager email field (with a soft "doesn't look like an email" warning that doesn't block save) and a Manager name field (used purely for greeting personalization).
+- **Sent-log sidecar**: `.metadata/sent-log.json` keyed by `"YYYY-Www"`. Each entry `{ sentAt, contentHash, sentTo }`. Read-and-overwrite on every send.
+- **Email module**: `compose_weekly_email(ComposeParams)` returns either `Mailto(String)` or `Eml(PathBuf)` based on encoded URL length. Body opens with `Hello {managerName},` (or `Hello,`), then an intro line that links to the public Captain's Log repo so the manager can poke around. Four `##` markdown headings follow; empty sections are dropped. Subject is `Weekly update - week of …` on first send, `Update to weekly update - …` on resend (detected by an existing sent-log record at compose time).
+- **Commands**: `get_sent_record`, `compose_weekly_email`, `mark_weekly_summary_sent`, `get_summary_hash`. The frontend calls `get_summary_hash` after every save so the gate-comparison stays fresh against the disk.
+- **Send button on /summary**: marble (secondary) button to the right of green Save. Disabled tooltip explains the reason: "Set a manager email in Settings" / "Save your changes first" / "Sent {to} on {date}". On a known-edited week the label flips to "Send updated version" and a small orange-tinted line below the row reads "Last sent Jun 24, 4:12 PM (edited since)".
+- **Confirmation modal**: previews addressee + week label before opening the draft. Escape and backdrop click dismiss; Cmd-S / Cmd-Enter are swallowed while the modal is open so a stray hotkey can't fire a save mid-confirm.
+- **Capability scope**: `opener:allow-open-url` extended with `{ url: "mailto:*" }`. New `opener:allow-open-path` scoped to `$TEMP/captainslog/**`. Verified `$TEMP` resolves to `std::env::temp_dir()` via Tauri's path resolver source.
+- **`.eml` temp janitor**: fire-and-forget on app start, prunes anything in `$TEMP/captainslog/` older than 24h. Errors logged; never blocks startup.
+
+### Two adversarial review rounds
+
+Ran the implementation through a multi-dimension adversarial workflow twice (8 + 4 candidate findings → 2 + 1 confirmed real after refute-pass).
+
+**Round 1 confirmed two real bugs in the initial implementation:**
+
+- `hash_weekly_summary` joined fields with a single `\n` separator. Multi-line textareas (bulleted lists everywhere) meant moving a bullet from Key Accomplishments into Plans could produce a byte-identical hash → Send button would refuse to re-send the legitimately-edited summary. Fixed by length-prefixing each field + each label individually. Added a regression test that hits this exact "move a line between sections" case.
+- Escape didn't dismiss the confirmation modal even though the comment claimed it did. Focus stays on the Send button when the modal opens, so Escape keydowns went straight to `<svelte:window>` and were never caught. Fixed by routing Escape through `handleKeydown` gated on `showConfirmModal`.
+
+**Round 2 (after Chris's refinement requests):**
+
+- The frontend modal and the email subject used different formats for the same week — "Week of June 22 – June 28, 2026" in the modal vs "week of Jun 22 - Jun 28, 2026" in the subject. Two formatters, one source of truth violated by docstring claiming they mirrored. Aligned the backend to the frontend (full month names + en-dash). Side effect: the en-dash now triggers RFC 2047 encoded-word wrapping for the `.eml` subject (`=?UTF-8?B?…?=`) so strict mail parsers don't choke on non-ASCII headers. Used the `base64` crate (already transitive in the dep tree) so adding the encode path was 4 lines.
+
+### Chris's refinements (post-smoke-test, pre-commit)
+
+- Capitalize months in the modal copy (`weekLabel.toLowerCase()` was flattening "June" → "june"). Replaced with an `inlineLabel()` helper that only lowercases the leading "W".
+- Add a manager NAME field (separate from email). Use it as the greeting.
+- Subject for resends should signal that this is a revision. Settled on "Update to weekly update - week of …" per his suggestion.
+- Email body should open with a greeting + a one-line explanation linking back to the repo. Markdown formatting (when Phase 2.5's CodeMirror lands) should flow into the email verbatim — confirmed by a `markdown_in_summary_passes_through_verbatim` test that uses urlencoding decode to verify literal `**bold**` survives the mailto round-trip.
+
+### What was tougher than expected
+
+- **Hash boundary collisions.** Standard `\n` separator failed silently for exactly the workflow this app is built for (move a bullet between sections). The original commit's regression test only used non-newline strings, so it passed while the bug was still live. Adversarial review caught it. Length-prefixing is unglamorous but boundary-safe; the same fix applies to comma-joined labels (a label containing a comma would otherwise collide with two labels).
+- **Backend ⇄ frontend label drift.** The two formatters started identical and drifted in two separate commits, each one looking innocuous in isolation. Docstring even claimed they were kept in sync. The fix wasn't the engineering — it was making the contract explicit in the comment so the next drift forces a test failure.
+
+### What's still rough
+
+- **`.eml` fallback hasn't been smoke-tested with a real long-body week.** All tests pass synthetically; needs a real 5+KB summary at some point.
+- **No "did the mail app actually open?" check.** Adversarial review surfaced this and we rejected it as too theoretical for a single-user macOS desktop app. If the heuristic turns out wrong, swap to a post-handoff confirmation step.
+
+### Commits
+
+- `86d804b` Phase 2.6: send weekly summary to manager via default mail app
+
+### Test totals at end of day
+
+- Backend: **75 → 112** (37 new tests across `email::tests` + `sent_log::tests` + `commands::tests::week_label_*` + `settings::tests::journal_settings_legacy_without_manager_email_parses` etc.)
+- Frontend: `svelte-check` clean (163 files, 0 errors, 0 warnings)
+
+### Next session
+
+Phase 2.5 — CodeMirror 6 markdown editor. Replaces the textareas on `/summary`, the capture popup body, and `/journal`. Sequenced before the onboarding revisit so the editor refactor is in place before adding new prose surfaces in the wizard.

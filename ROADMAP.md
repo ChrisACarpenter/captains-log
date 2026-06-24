@@ -1,8 +1,8 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2 — Polish ✅ (functionally complete)
+## Current phase: 2.5 — editor upgrade (next)
 
-Phase 1 MVP is complete. Phase 2's daily-driver polish closed today with the journal browser + view/edit past notes + spell-check across all prose surfaces. Captain's Log is now a usable daily-driver journaling app: capture in the popup, write weekly summaries, browse and edit any past week. Deferred to **Phase 2.5: editor upgrade** — migration to CodeMirror 6 (rich-text rendering for markdown) and inline `#` autocomplete in note bodies. That refactor is sizeable enough to warrant its own focused session.
+Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped on 2026-06-24 — the app now does a one-click handoff to the OS-default mail handler with per-week sent-state tracking, personalized greeting, and a content-hash-based "edited since send" gate. **Phase 2.5 (CodeMirror 6 markdown editor) is next**, then **Phase 2.7 (onboarding + Settings revisit)** before Phase 3 — both queued in order below.
 
 ---
 
@@ -66,34 +66,42 @@ Phase 1 MVP is complete. Phase 2's daily-driver polish closed today with the jou
 - [x] **Open and edit past Notes** — same `/journal` route. The textarea is the entire weekly file's raw markdown; edits write back via `write_week`. (Structured per-Note editing is a future polish item; raw markdown is the minimum viable.)
 - [x] **macOS spell-check** — `spellcheck="true"` on every prose surface (capture title + body, all 4 summary textareas, journal editor); `spellcheck="false"` on name + path inputs to silence noise on proper nouns and filesystem paths.
 
-### Deferred to Phase 2.5 — editor upgrade
-
-- [ ] **Markdown editor with rich text rendering** (CodeMirror 6 or similar) — replaces the textareas on `/summary`, capture popup body, and `/journal`. New deps + meaningful refactor; deserves its own session.
-- [ ] **Inline `#` autocomplete in body text** — natural fit as a CodeMirror extension once that lands. Could reuse the LabelInput dropdown logic for the popup UI.
-
 **Success:** Captain's Log has replaced any other journaling system I was using. **Achieved.**
 
-## Phase 2.6 — Send weekly summary to manager
+## Phase 2.5 — Editor upgrade (next)
 
-Active. Adds a one-click "send my weekly summary to my manager" flow that uses the OS-default mail handler (so Mail.app or whichever Gmail-aware client is set as the user's `mailto:` handler) and lands a real message in the user's real Sent folder — no SMTP credentials, no OAuth dance, no mail server.
+Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor. Today's textareas are functional but flat — no live preview, no syntax highlighting, no inline `#` autocomplete, no `**bold**` cues. The Send-to-manager email already passes whatever the user types verbatim, so once this lands the recipient sees real formatting too.
 
-- [ ] **Manager email field in Settings** — new `managerEmail: Option<String>` on `JournalSettings`, persists to `.metadata/settings.json` alongside `userName` + reminder.
-- [ ] **Sent-log sidecar** — `.metadata/sent-log.json` keyed by ISO year-week: `{ sentAt, contentHash, sentTo }`. One entry per week (no history array).
-- [ ] **`hash_weekly_summary` helper** — SHA-256 of the canonicalized four summary fields + labels. Backend-only so the same value gates the UI and is stamped at send time.
-- [ ] **`compose_weekly_email` command** — builds a `mailto:` URL by default; if the URL-encoded length would exceed ~1800 chars, writes an `.eml` file to a temp dir and returns its path. Subject: `"Weekly update — week of {label}"`. Body: the four sections + labels line.
-- [ ] **`get_sent_record` + `mark_weekly_summary_sent` commands** — read/write the sent log.
-- [ ] **Capability scope** — extend `opener:allow-open-url` to accept `mailto:*`; add `opener:allow-open-path` scoped to `$TEMP/captainslog/*.eml`.
-- [ ] **Send button on `/summary`** — sits next to the green Save button. Gated on: manager email is set, isDirty is false, no matching sent-record exists (or hash differs after edit). Tooltip explains the disabled reason.
-- [ ] **Confirmation modal** — explains where the draft will open + who it's addressed to before opening the mail client.
-- [ ] **Sent state UI** — shows "Sent {when}" when the button is disabled by a matching sent-record; "Send updated version" when the content hash differs from the last send.
-- [ ] **`.eml` temp janitor** — startup task prunes `$TEMP/captainslog/*.eml` files older than 24h.
+- [ ] **CodeMirror 6 integration** — pick the wrapper (Svelte 5 component or thin custom wrapper), wire into the three prose surfaces. New deps + a meaningful refactor of the form bindings; deserves its own focused session.
+- [ ] **Markdown syntax highlighting** — bold/italic/lists/links/code visibly distinguished while editing.
+- [ ] **Inline `#` autocomplete in body text** — natural fit as a CodeMirror extension. Could reuse the LabelInput dropdown logic for the popup UI.
+- [ ] **Spell-check coexistence** — the existing NSSpellChecker mirror-div overlay needs to be either removed (CodeMirror surfaces its own marks) or adapted to CodeMirror's decoration API.
+- [ ] **Auto-save + dirty tracking continuity** — the existing 1.5s debounce flow and `reportDirty()` calls must keep working through the new editor.
 
-## Phase 2.7 — Onboarding + Settings revisit
+## Phase 2.6 — Send weekly summary to manager ✅ (shipped 2026-06-24)
 
-Before Phase 3. The first-run wizard captures the bare minimum (name, journal location, reminder). After 2.6 the data model grows enough — and the Settings screen is long enough — that both deserve a polish pass.
+One-click handoff to the OS-default mail handler. No SMTP credentials, no OAuth — the user reviews and sends the draft from their real mail identity, so threading and the Sent folder work normally. Commit `86d804b`.
+
+- [x] **Manager email + manager name fields in Settings** — `managerEmail` + `managerName` on `JournalSettings`, persisted to `.metadata/settings.json`. Greeting personalizes when name is set; falls back to plain "Hello,".
+- [x] **Sent-log sidecar** — `.metadata/sent-log.json` keyed by ISO year-week: `{ sentAt, contentHash, sentTo }`. One entry per week (overwrite on resend).
+- [x] **`hash_weekly_summary` helper** — SHA-256 of the canonicalized four summary fields + labels, length-prefixed per field so multi-line content can't collide across section boundaries.
+- [x] **`compose_weekly_email` command** — builds a `mailto:` URL by default; falls back to an `.eml` file in `$TEMP/captainslog/` when the percent-encoded URL would exceed ~1800 bytes. RFC 2047 encodes the `.eml` subject so the en-dash week label doesn't trip strict parsers.
+- [x] **Email body** — opens with `Hello {managerName},` (or `Hello,`) + an intro line that links to the public Captain's Log repo. Sections (key accomplishments / plans / challenges / anything else) follow as `##` markdown headings; empty sections are dropped. Labels render as `Labels: #tag1, #tag2` at the bottom.
+- [x] **Subject branching** — `Weekly update - week of …` on first send, `Update to weekly update - week of …` on resend (detected by existing sent-log entry at compose time).
+- [x] **`get_sent_record` + `mark_weekly_summary_sent` + `get_summary_hash` commands** — gate the Send button and stamp the sent-log entry after a successful handoff.
+- [x] **Capability scope** — `opener:allow-open-url` accepts `mailto:*`; `opener:allow-open-path` scoped to `$TEMP/captainslog/**`.
+- [x] **Send button on `/summary`** — next to Save. Gated on: manager email set, no unsaved edits, not already sent with matching content hash. Tooltip explains the disabled reason.
+- [x] **Confirmation modal** — previews the addressee + week label before opening the draft; Escape and backdrop click dismiss.
+- [x] **Sent state UI** — `Sent {when}` when the button is locked by a matching record; `Send updated version` with a stale-state indicator when the content hash drifts after a save.
+- [x] **`.eml` temp janitor** — startup task prunes `$TEMP/captainslog/*.eml` files older than 24h.
+- [x] **Backend ⇄ frontend label parity** — `format_week_label` matches the frontend's `weekLabel` exactly (full month names + en-dash), so the modal and the email subject read the same string.
+
+## Phase 2.7 — Onboarding + Settings revisit (after Phase 2.5)
+
+Sequenced after Phase 2.5 so the editor refactor doesn't trip over onboarding state mid-flight. The first-run wizard captures the bare minimum today (name, journal location, reminder); after 2.6 the data model grows enough — and the Settings screen is long enough — that both deserve a polish pass.
 
 - [ ] **"Tell me about you" wizard step** — name, Bamboo title (with the word *Bamboo* linking to Prodigy's BambooHR site), Jira project keys (comma-separated, e.g. `MAGE`, multiple allowed).
-- [ ] **"Tell me about your manager" wizard step** — manager name + email. Manager email reuses the field added in 2.6.
+- [ ] **"Tell me about your manager" wizard step** — manager name + email. Both fields reuse the columns added in 2.6.
 - [ ] **Settings layout** — convert the single long-scroll form into tabs or section breaks (Your details / Manager / Journal location / Reminder / Theme). Adding 3+ new fields without grouping is the trigger.
 - [ ] **Persistence** — Bamboo title + Jira project keys join `JournalSettings`; same `.metadata/settings.json`.
 
