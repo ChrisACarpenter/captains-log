@@ -37,13 +37,6 @@
   --accent-primary-text: #ff7a3a; /* For orange text on dark elevated surfaces */
   --accent-maroon: #6c1e38;
 
-  /* Markdown editor marker color — used to tint **, *, #, -, etc. in the
-   * source view so non-markdown users can pick markers out of prose. On
-   * dark theme the actual brand-maroon (#6c1e38) reads as dark-on-dark
-   * and disappears; this brighter rose stays in the same hue family
-   * (kin to the Discard button) but lifts off the bg-surface cleanly. */
-  --md-marker-color: #e07a9a;
-
   /* Lines & focus */
   --border-decorative: rgba(255, 92, 8, 0.14);
   --border-structural: rgba(246, 231, 215, 0.1);
@@ -128,11 +121,6 @@
   --text-muted: #7a5e48; /* Darkened: passes AA on cream (5.0:1) and white (5.8:1) */
 
   --accent-primary-text: #c44400; /* For orange text on light surfaces (4.6:1 on cream) */
-
-  /* Markdown markers — use the actual brand maroon on light theme; it
-   * reads cleanly as dark-on-cream and matches the Discard button
-   * exactly. Dark theme uses the lighter rose defined in :root above. */
-  --md-marker-color: var(--brand-maroon);
 
   --border-decorative: rgba(255, 92, 8, 0.18);
   --border-structural: rgba(28, 22, 18, 0.12);

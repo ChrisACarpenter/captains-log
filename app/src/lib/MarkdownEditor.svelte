@@ -67,41 +67,41 @@
   import { markdownFormattingKeymap } from './markdown-formatting';
   import MarkdownToolbar from './MarkdownToolbar.svelte';
 
-  // ## Markdown marker tinting
+  // ## Bold + heading font-family swap
   //
-  // `@lezer/markdown` tags every syntactic marker — `**`, `*`, `_`, `#`,
-  // `-`, `1.`, `>`, backticks, `[]()` — as `tags.processingInstruction`.
-  // The default highlight style colors them as faded-gray punctuation,
-  // which blends into prose at quick-read. Tinting them with the brand's
-  // ruby/maroon family (same hue as the Discard button on /capture)
-  // makes markdown source easier to skim for non-markdown users — the
-  // markers pop out as "controls" rather than disappearing into the text.
+  // ABeeZee (the brand body face) only ships at weight 400 — no real
+  // bold glyphs. The default highlight style's `font-weight: bold` on
+  // `strong` and `heading` therefore renders invisibly with ABeeZee;
+  // WebKit's faux-bold synthesis isn't aggressive enough to be seen.
+  // Override these two tags to switch font-family to system-ui (SF Pro
+  // on macOS), which has a real native bold. The mid-paragraph font
+  // change is subtle in look but unmistakable in weight — clicking
+  // Bold visibly does something. Emphasis (italic) stays default
+  // because ABeeZee's @import includes the italic axis (`ital@0;1`),
+  // so `font-style: italic` resolves to a real face.
   //
-  // Color comes from `--md-marker-color` which is theme-aware (defined
-  // in app.css): light theme uses the actual brand-maroon to match the
-  // Discard button exactly; dark theme uses a brightened rose in the
-  // same hue family so the markers stay readable on the warm dark
-  // surface (#6c1e38 is dark-on-dark on the dark theme).
+  // ## Why this is the ONLY custom style right now
   //
-  // The custom HighlightStyle is added AFTER defaultHighlightStyle in
-  // the extensions array; later highlighters win precedence for
-  // overlapping tags, so the default still styles everything else
-  // (heading text, link text, code body, strong, emphasis) untouched.
+  // The Phase 2.5 marker-color + code + task + quote treatments were
+  // tried and pulled back. Chris's pivot: lean into a rich-text-style
+  // experience on /summary + /capture (live-preview decorations or a
+  // WYSIWYG editor), keep /journal as the canonical raw-source view.
+  // That redesign is what the next-up workflow is researching; until
+  // it lands, this stays minimal — just the load-bearing bold/heading
+  // fix and nothing else cosmetic.
+  //
+  // Registered as PRIMARY (not fallback) so defaultHighlightStyle's
+  // rules for italic/strikethrough/link-underline/etc. keep applying;
+  // CM6's `getHighlighters` ignores the fallback once any primary is
+  // registered.
   const markdownMarkerStyle = HighlightStyle.define([
-    { tag: tags.processingInstruction, color: 'var(--md-marker-color)' },
-    // ABeeZee (the brand body face) only ships at weight 400 — no bold
-    // glyphs. The default highlight style's `font-weight: bold` on the
-    // strong tag therefore relied on WebKit synthesizing faux-bold,
-    // which it doesn't do visibly for webfonts. Explicitly switch the
-    // font family for strong spans to system-ui, which always has a real
-    // bold (SF Pro on macOS). The font swap is subtle visually but
-    // produces unmistakably bolder strokes — clicking the Bold button
-    // now visibly does something.
-    //
-    // Emphasis stays default — ABeeZee's @import requests the italic
-    // variant (`ital@0;1`) so font-style: italic resolves to a real face.
     {
       tag: tags.strong,
+      fontWeight: '700',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+    },
+    {
+      tag: tags.heading,
       fontWeight: '700',
       fontFamily: 'system-ui, -apple-system, sans-serif',
     },
@@ -161,11 +161,15 @@
         // per the Phase 2.5 design). Autolink parsing pairs with the
         // markdown-links plugin in Step 2 so bare URLs are Cmd-clickable.
         markdown({ extensions: [GFM] }),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-        // Override markdown marker color (** # _ - 1. > etc.) to brand
-        // maroon. Layered AFTER the default style so the override wins
-        // for `processingInstruction` tags only — everything else
-        // (heading text, link text, code body) keeps the default.
+        // Register defaultHighlightStyle as a PRIMARY highlighter (no
+        // `fallback: true`). Once another primary is registered below,
+        // the fallback path is ignored — which would silently disable
+        // italic, strikethrough, link underlines, and every code color.
+        // As primaries, both styles' classes apply additively per CM6
+        // docs ("the styling applied is the union of the classes they
+        // emit"). The order below means our override wins for tags it
+        // declares; everything else keeps the default.
+        syntaxHighlighting(defaultHighlightStyle),
         syntaxHighlighting(markdownMarkerStyle),
         EditorView.lineWrapping,
         // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
@@ -310,4 +314,5 @@
     color: var(--text-muted);
     font-style: normal;
   }
+
 </style>
