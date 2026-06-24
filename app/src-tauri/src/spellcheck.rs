@@ -83,39 +83,91 @@ pub async fn check_spelling(
 #[cfg(target_os = "macos")]
 fn check_spelling_macos(text: &str) -> Vec<SpellRange> {
     use objc2_app_kit::NSSpellChecker;
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSRange, NSString, NSTextCheckingType, NSTextCheckingTypes};
 
-    // Cap iterations defensively. A document with > 10k misspellings is
-    // not a real-world input; if we ever hit this we'd rather degrade
-    // gracefully than hang the main thread.
+    // Defensive: a document with > 10k findings is not a real-world input.
+    // Truncate rather than hang the main thread.
     const MAX_RANGES: usize = 10_000;
 
-    let mut ranges = Vec::new();
-
-    // NSSpellChecker.sharedSpellChecker returns the process-wide singleton,
-    // safe to call from the main thread where this function runs.
     let checker = NSSpellChecker::sharedSpellChecker();
     let ns_text = NSString::from_str(text);
     let text_len_utf16 = ns_text.length();
-    let mut start: usize = 0;
+    if text_len_utf16 == 0 {
+        return Vec::new();
+    }
 
-    while start < text_len_utf16 && ranges.len() < MAX_RANGES {
-        let range = checker.checkSpellingOfString_startingAt(&ns_text, start as isize);
-        if range.length == 0 {
-            break;
+    // ## Why this API and not checkSpellingOfString:startingAt:
+    //
+    // The narrower `checkSpellingOfString:startingAt:` only returns
+    // NSTextCheckingTypeSpelling-class results — dictionary misses like
+    // "teh", "thatll", "awdawdawd". Apple's NSSpellChecker routes
+    // missing-apostrophe contractions ("dont" -> "don't", "im" -> "I'm")
+    // through NSTextCheckingTypeCorrection, and contextual issues like
+    // "its" vs "it's" through NSTextCheckingTypeGrammar. Neither channel
+    // is reachable through the narrow loop API.
+    //
+    // Pages, Mail, and TextEdit all use `checkString:range:types:...`
+    // with a broader type mask, which is why they flag the same words our
+    // editor was missing. We match that here.
+    //
+    // Type mask:
+    //   Spelling   — dictionary misses ("teh", "awdawdawd", "thatll")
+    //   Correction — autocorrect candidates ("dont", "im", "cant")
+    //   Grammar    — contextual issues ("its" vs "it's", agreement)
+    //
+    // Deliberately omitted: Replacement, Quote, Dash, Link, Date, Address —
+    // those are smart-substitution suggestions / data detectors, not
+    // errors. Including them would draw spurious squiggles under prose.
+    let types: NSTextCheckingTypes = (NSTextCheckingType::Spelling
+        | NSTextCheckingType::Correction
+        | NSTextCheckingType::Grammar)
+        .0;
+
+    let full_range = NSRange {
+        location: 0,
+        length: text_len_utf16,
+    };
+
+    // SAFETY: NSSpellChecker.sharedSpellChecker is documented main-thread
+    // only; we're invoked via `app.run_on_main_thread` (see
+    // `check_spelling` above). The out-params for orthography and word
+    // count are passed null because we don't need them.
+    let results = unsafe {
+        checker.checkString_range_types_options_inSpellDocumentWithTag_orthography_wordCount(
+            &ns_text,
+            full_range,
+            types,
+            None,                 // options
+            0,                    // spell-document tag (0 = no doc context)
+            None,                 // orthography out
+            std::ptr::null_mut(), // word_count out
+        )
+    };
+
+    let count = results.count();
+    let mut ranges = Vec::with_capacity(count.min(MAX_RANGES));
+    for result in results.iter().take(MAX_RANGES) {
+        let r = result.range();
+        if r.length == 0 {
+            continue;
+        }
+        // Clamp defensively in case the engine ever returns a range that
+        // extends past the string (shouldn't happen — guarding is cheap).
+        let end = r.location.saturating_add(r.length).min(text_len_utf16);
+        if end <= r.location {
+            continue;
         }
         ranges.push(SpellRange {
-            start: range.location,
-            length: range.length,
+            start: r.location,
+            length: end - r.location,
         });
-        let next = range.location.saturating_add(range.length);
-        if next <= start {
-            // Defensive: should not happen, but prevents an infinite loop
-            // if the API ever returns a non-advancing range.
-            break;
-        }
-        start = next;
     }
+
+    // The engine returns results in document order but Grammar + Correction
+    // findings can overlap on the same span. De-dup exact duplicates so the
+    // frontend doesn't double-decorate the same word.
+    ranges.sort_by_key(|r| (r.start, r.length));
+    ranges.dedup_by(|a, b| a.start == b.start && a.length == b.length);
 
     ranges
 }

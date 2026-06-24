@@ -52,7 +52,6 @@
     EditorView,
     keymap,
     placeholder as placeholderExt,
-    drawSelection,
   } from '@codemirror/view';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { markdown } from '@codemirror/lang-markdown';
@@ -95,10 +94,19 @@
         markdown({ extensions: [GFM] }),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         EditorView.lineWrapping,
-        drawSelection(),
         // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
         // (`[text](url)`), Autolink (`<url>`), and GFM bare URLs.
         markdownLinks(),
+        // Native browser spell-check via WebKit. CodeMirror's editing
+        // surface is a contenteditable div (not a textarea), and WebKit
+        // paints squiggles + delivers right-click suggestions natively on
+        // contenteditable elements even when tauri-apps/tauri#7705 hides
+        // them on <textarea>. By NOT installing a custom drawSelection
+        // (which renders its own cursor + masks WebKit's editor surface),
+        // we let WebKit's editor + NSSpellChecker do the work end-to-end:
+        // same engine that Apple Mail and Pages use, no IPC round-trip,
+        // no streaming-Correction gap, right-click menu pre-populated.
+        EditorView.contentAttributes.of({ spellcheck: 'true' }),
         placeholder ? placeholderExt(placeholder) : [],
         // The listener calls `onChange` via the prop directly. Svelte 5's
         // destructured props read the current value at call time, so
@@ -185,9 +193,12 @@
     font-family: inherit;
   }
 
-  /* Selection styling — match the rest of the app's accent colors. */
+  /* Selection styling — match the rest of the app's accent colors. The
+   * caret is Prodigy orange in both themes so it stays visible against
+   * the dark and light backgrounds (the prior --text-primary caret was
+   * almost invisible against the dark surface). */
   .md-editor :global(.cm-content) {
-    caret-color: var(--text-primary);
+    caret-color: var(--accent-primary);
   }
   .md-editor :global(.cm-selectionBackground) {
     background: var(--focus-glow) !important;
