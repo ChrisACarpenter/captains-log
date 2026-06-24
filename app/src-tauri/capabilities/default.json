@@ -13,7 +13,9 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "x-apple.systempreferences:*" },
-        { "url": "mailto:*" }
+        { "url": "mailto:*" },
+        { "url": "http://*" },
+        { "url": "https://*" }
       ]
     },
     {

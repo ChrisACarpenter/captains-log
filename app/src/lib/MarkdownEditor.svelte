@@ -58,6 +58,7 @@
   import { markdown } from '@codemirror/lang-markdown';
   import { GFM } from '@lezer/markdown';
   import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+  import { markdownLinks } from './markdown-links';
 
   let {
     value = '',
@@ -95,6 +96,9 @@
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         EditorView.lineWrapping,
         drawSelection(),
+        // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
+        // (`[text](url)`), Autolink (`<url>`), and GFM bare URLs.
+        markdownLinks(),
         placeholder ? placeholderExt(placeholder) : [],
         // The listener calls `onChange` via the prop directly. Svelte 5's
         // destructured props read the current value at call time, so
