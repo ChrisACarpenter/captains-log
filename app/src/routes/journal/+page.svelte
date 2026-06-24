@@ -2,7 +2,17 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
+
+  const MARKDOWN_CHEAT_SHEET_URL = 'https://www.markdownguide.org/cheat-sheet/';
+
+  function openCheatSheet(e: Event): void {
+    e.preventDefault();
+    openUrl(MARKDOWN_CHEAT_SHEET_URL).catch((err) => {
+      console.error('[journal] cheat-sheet opener failed:', err);
+    });
+  }
   import { reportDirty } from '$lib/dirty';
 
   type YearWeek = { year: number; week: number };
@@ -302,7 +312,10 @@
         <h1>Pick a week to read or edit</h1>
         <p class="lead">
           Past weeks open in raw markdown. Edits auto-save after 1.5s, just
-          like the weekly summary.
+          like the weekly summary. New to markdown?
+          <button type="button" class="link-button" onclick={openCheatSheet}>
+            Open the cheat sheet.
+          </button>
         </p>
         {#if currentYearWeek}
           <p class="lead">
@@ -334,11 +347,17 @@
         <!-- Phase 2.5 Step 4: CodeMirror 6 markdown editor with WebKit
           native spell-check. CSS variables hold the editor's monospace
           face + 14px font + 1.5 line-height + 16px padding so the raw
-          markdown surface keeps its prior textarea-era look. -->
+          markdown surface keeps its prior textarea-era look.
+          showToolbar={false} keeps this surface raw — /journal is the
+          markdown-source view, so the formatting toolbar (which lives
+          on /summary and /capture for non-markdown users) would be
+          off-message here. The cheat-sheet link above covers the
+          discoverability angle. -->
         <MarkdownEditor
           class="editor"
           value={content}
           onChange={(v) => (content = v)}
+          showToolbar={false}
           placeholder="No content yet. Anything you type here saves to the weekly file."
           style="flex: 1; min-height: 200px;
             --md-padding: var(--space-4);

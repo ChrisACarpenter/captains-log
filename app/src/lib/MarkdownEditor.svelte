@@ -57,8 +57,55 @@
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { markdown } from '@codemirror/lang-markdown';
   import { GFM } from '@lezer/markdown';
-  import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
+  import {
+    syntaxHighlighting,
+    defaultHighlightStyle,
+    HighlightStyle,
+  } from '@codemirror/language';
+  import { tags } from '@lezer/highlight';
   import { markdownLinks } from './markdown-links';
+  import { markdownFormattingKeymap } from './markdown-formatting';
+  import MarkdownToolbar from './MarkdownToolbar.svelte';
+
+  // ## Markdown marker tinting
+  //
+  // `@lezer/markdown` tags every syntactic marker — `**`, `*`, `_`, `#`,
+  // `-`, `1.`, `>`, backticks, `[]()` — as `tags.processingInstruction`.
+  // The default highlight style colors them as faded-gray punctuation,
+  // which blends into prose at quick-read. Tinting them with the brand's
+  // ruby/maroon family (same hue as the Discard button on /capture)
+  // makes markdown source easier to skim for non-markdown users — the
+  // markers pop out as "controls" rather than disappearing into the text.
+  //
+  // Color comes from `--md-marker-color` which is theme-aware (defined
+  // in app.css): light theme uses the actual brand-maroon to match the
+  // Discard button exactly; dark theme uses a brightened rose in the
+  // same hue family so the markers stay readable on the warm dark
+  // surface (#6c1e38 is dark-on-dark on the dark theme).
+  //
+  // The custom HighlightStyle is added AFTER defaultHighlightStyle in
+  // the extensions array; later highlighters win precedence for
+  // overlapping tags, so the default still styles everything else
+  // (heading text, link text, code body, strong, emphasis) untouched.
+  const markdownMarkerStyle = HighlightStyle.define([
+    { tag: tags.processingInstruction, color: 'var(--md-marker-color)' },
+    // ABeeZee (the brand body face) only ships at weight 400 — no bold
+    // glyphs. The default highlight style's `font-weight: bold` on the
+    // strong tag therefore relied on WebKit synthesizing faux-bold,
+    // which it doesn't do visibly for webfonts. Explicitly switch the
+    // font family for strong spans to system-ui, which always has a real
+    // bold (SF Pro on macOS). The font swap is subtle visually but
+    // produces unmistakably bolder strokes — clicking the Bold button
+    // now visibly does something.
+    //
+    // Emphasis stays default — ABeeZee's @import requests the italic
+    // variant (`ital@0;1`) so font-style: italic resolves to a real face.
+    {
+      tag: tags.strong,
+      fontWeight: '700',
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+    },
+  ]);
 
   let {
     value = '',
@@ -68,6 +115,7 @@
     style = '',
     autofocus = false,
     id = undefined,
+    showToolbar = true,
   }: {
     value?: string;
     onChange: (next: string) => void;
@@ -78,17 +126,33 @@
     /** Optional DOM id. Forwarded to the inner .cm-content element so
      * <label for={id}> clicks focus the editor. */
     id?: string;
+    /** Show the formatting toolbar above the editor (Bold / Italic /
+     *  lists / link / etc.). Defaults to true; set to false on /journal
+     *  (raw-markdown surface where the toolbar would be off-message). */
+    showToolbar?: boolean;
   } = $props();
 
   let container: HTMLDivElement;
-  let view: EditorView | undefined;
+  // Reactive ($state) so the MarkdownToolbar child sees `view` flip from
+  // undefined to the live EditorView after mount. Without $state the
+  // toolbar would render with view=undefined and never update.
+  let view = $state<EditorView | undefined>(undefined);
 
   onMount(() => {
     view = new EditorView({
       doc: value,
       extensions: [
         history(),
-        keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+        // Formatting shortcuts (Cmd+B/I/K/E + Cmd+Shift+7/8) PREPEND so
+        // they win precedence over the catch-all defaultKeymap. The same
+        // command functions back the toolbar buttons, so wrap/unwrap
+        // logic only lives in one place — `markdown-formatting.ts`.
+        keymap.of([
+          ...markdownFormattingKeymap,
+          ...defaultKeymap,
+          ...historyKeymap,
+          indentWithTab,
+        ]),
         // GFM extension turns on the lezer rules for task lists ([ ] / [x]),
         // strikethrough (~~text~~), tables, and autolinks (bare URLs become
         // first-class link nodes). This is SOURCE-mode parsing only — task
@@ -98,6 +162,11 @@
         // markdown-links plugin in Step 2 so bare URLs are Cmd-clickable.
         markdown({ extensions: [GFM] }),
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        // Override markdown marker color (** # _ - 1. > etc.) to brand
+        // maroon. Layered AFTER the default style so the override wins
+        // for `processingInstruction` tags only — everything else
+        // (heading text, link text, code body) keeps the default.
+        syntaxHighlighting(markdownMarkerStyle),
         EditorView.lineWrapping,
         // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
         // (`[text](url)`), Autolink (`<url>`), and GFM bare URLs.
@@ -148,6 +217,14 @@
   });
 </script>
 
+{#if showToolbar}
+  <!-- Toolbar lives OUTSIDE the .md-editor wrapper so the strip stays
+     fixed when the editor's `resize: vertical` handle (set by consumers
+     on /summary) is dragged. The toolbar dispatches into `view` once
+     the EditorView has mounted; clicks arriving before mount are
+     no-ops, not crashes. -->
+  <MarkdownToolbar {view} />
+{/if}
 <div bind:this={container} class="md-editor {className}" {style}></div>
 
 <style>
@@ -206,9 +283,19 @@
   /* Selection styling — match the rest of the app's accent colors. The
    * caret is Prodigy orange in both themes so it stays visible against
    * the dark and light backgrounds (the prior --text-primary caret was
-   * almost invisible against the dark surface). */
+   * almost invisible against the dark surface).
+   *
+   * font-synthesis forces the browser to faux-render bold and italic
+   * even when the active font lacks those variants. The brand body face
+   * (ABeeZee) only ships at weight 400, so CodeMirror's default `strong`
+   * tag style (font-weight: bold) has no real glyphs to swap to — WebKit
+   * is conservative about synthesizing bold for webfonts and was leaving
+   * **bold** rendering as plain weight. Explicit `weight style` here
+   * tells WebKit to always synthesize, which keeps the markdown toolbar
+   * promise: clicking Bold actually produces visibly bold text. */
   .md-editor :global(.cm-content) {
     caret-color: var(--accent-primary);
+    font-synthesis: weight style;
   }
   .md-editor :global(.cm-selectionBackground) {
     background: var(--focus-glow) !important;
