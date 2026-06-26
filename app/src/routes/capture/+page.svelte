@@ -286,6 +286,11 @@
       this surface is dark until the Decoration.mark plugin lands in
       Step 3; right-click + macOS suggestions still work via the WKWebView
       context menu fallback. -->
+    <!-- Slack-style live preview: markers (`**`, `*`, `~~`, `` ` ``, `#`,
+       `-`, `>`, `[`/`](url)`) hide as atomic ranges; the user sees rendered
+       rich text while the buffer stays canonical markdown. /capture is the
+       smallest blast-radius surface, so Phase 2.5 Architecture B ships
+       here first and propagates to /summary after a real-use validation. -->
     <!-- svelte-ignore a11y_autofocus -->
     <MarkdownEditor
       class="body-input"
@@ -294,6 +299,7 @@
       onChange={(v) => (body = v)}
       style="flex: 1; min-height: 100px;"
       autofocus
+      livePreview
     />
 
 

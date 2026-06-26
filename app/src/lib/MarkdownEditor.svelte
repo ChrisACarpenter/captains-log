@@ -54,6 +54,7 @@
     keymap,
     placeholder as placeholderExt,
   } from '@codemirror/view';
+  import { Compartment } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
   import { markdown } from '@codemirror/lang-markdown';
   import { GFM } from '@lezer/markdown';
@@ -65,7 +66,10 @@
   import { tags } from '@lezer/highlight';
   import { markdownLinks } from './markdown-links';
   import { markdownFormattingKeymap } from './markdown-formatting';
+  import { livePreview as livePreviewExt } from './live-preview';
+  import { isValidIsoDateRange } from './date-chip';
   import MarkdownToolbar from './MarkdownToolbar.svelte';
+  import DatePickerPopover from './DatePickerPopover.svelte';
 
   // ## Bold + heading font-family swap
   //
@@ -116,6 +120,7 @@
     autofocus = false,
     id = undefined,
     showToolbar = true,
+    livePreview = false,
   }: {
     value?: string;
     onChange: (next: string) => void;
@@ -130,6 +135,12 @@
      *  lists / link / etc.). Defaults to true; set to false on /journal
      *  (raw-markdown surface where the toolbar would be off-message). */
     showToolbar?: boolean;
+    /** Slack/Typora-style live preview — hides markdown markers (**, *,
+     *  ~~, #, -, >, etc.) so the user sees rendered rich text. The buffer
+     *  on disk stays canonical markdown. Defaults to false (source mode).
+     *  Phase 2.5 Architecture B opts /capture and /summary into this;
+     *  /journal stays raw-source for power-user editing. */
+    livePreview?: boolean;
   } = $props();
 
   let container: HTMLDivElement;
@@ -137,6 +148,78 @@
   // undefined to the live EditorView after mount. Without $state the
   // toolbar would render with view=undefined and never update.
   let view = $state<EditorView | undefined>(undefined);
+
+  // Per-editor compartment wrapping the livePreview extension. Lets us
+  // swap modes (Preview ↔ Source) on /journal WITHOUT remounting the
+  // whole editor — `view.dispatch({effects: livePreviewCompartment.reconfigure(...)})`
+  // installs the new extension set on the existing EditorView. Cursor
+  // position, undo history, scroll position, and selection all survive.
+  //
+  // Earlier shape used `{#key viewMode}` in /journal to force remount;
+  // that lost the cursor on every toggle. CodeMirror 6 doesn't let you
+  // add/remove extensions reactively without a Compartment, so this is
+  // the canonical way to get prop-driven extension changes.
+  const livePreviewCompartment = new Compartment();
+  // Date-chip picker state. Driven by `captainslog:date-chip-click`
+  // events bubbling up from the chip widget's DOM. The popover renders
+  // when `datePickerOpen` is true and dispatches its commit via a
+  // window-level event the date-chip extension listens for.
+  let datePickerOpen = $state(false);
+  let datePickerIso = $state('');
+  let datePickerFrom = $state(0);
+  let datePickerTo = $state(0);
+  let datePickerAnchor = $state<HTMLElement | undefined>(undefined);
+
+  function handleDateChipClick(e: Event): void {
+    const detail = (e as CustomEvent).detail as {
+      from: number;
+      to: number;
+      iso: string;
+      anchorEl: HTMLElement;
+    };
+    datePickerIso = detail.iso;
+    datePickerFrom = detail.from;
+    datePickerTo = detail.to;
+    datePickerAnchor = detail.anchorEl;
+    datePickerOpen = true;
+  }
+
+  function handleDatePickerCommit(newIso: string): void {
+    // Dispatch the doc edit DIRECTLY on this MarkdownEditor's own view
+    // — this is what guarantees the commit lands in the editor whose
+    // chip was clicked, even when multiple MarkdownEditor instances are
+    // mounted on the same page (e.g. /summary's 4 fields). Routing
+    // through a window event with view-lookup-by-content would silently
+    // misroute when two editors hold a matching ISO at the same offset.
+    //
+    // Sanity-validate the range still parses as ISO before committing
+    // — guards against the doc having been edited between when the
+    // picker opened and when the user picked (autosave reload, multi-
+    // cursor edits, programmatic dispatches).
+    if (!view) return;
+    if (!isValidIsoDateRange(view, datePickerFrom, datePickerTo)) return;
+    view.dispatch({
+      changes: {
+        from: datePickerFrom,
+        to: datePickerTo,
+        insert: newIso,
+      },
+      userEvent: 'input.type.datechip',
+    });
+  }
+
+  function handleDatePickerClose(): void {
+    datePickerOpen = false;
+    datePickerAnchor = undefined;
+  }
+
+  // Reactive counter that bumps on every cursor-move or doc-change. The
+  // MarkdownToolbar reads it as a dependency so its $derived
+  // `activeFormats` re-evaluates when the cursor moves into / out of a
+  // formatted node. Without this dep, $derived would only re-run when
+  // `view` itself changed (never, post-mount) and the toolbar's pressed-
+  // state indicators would stay stuck on whatever was at mount.
+  let updateTick = $state(0);
 
   onMount(() => {
     view = new EditorView({
@@ -175,6 +258,11 @@
         // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
         // (`[text](url)`), Autolink (`<url>`), and GFM bare URLs.
         markdownLinks(),
+        // Slack/Typora-style live preview — hide markdown markers via
+        // atomic Decoration.replace ranges so the user sees rendered rich
+        // text. Opt-in per surface (default false); when off the editor
+        // stays source-mode for /journal's raw-markdown view.
+        livePreviewCompartment.of(livePreview ? livePreviewExt() : []),
         // Native browser spell-check via WebKit. CodeMirror's editing
         // surface is a contenteditable div (not a textarea), and WebKit
         // paints squiggles + delivers right-click suggestions natively on
@@ -197,6 +285,13 @@
           if (update.docChanged) {
             onChange(update.state.doc.toString());
           }
+          // Trigger toolbar pressed-state recomputation on every cursor
+          // move and every doc change. `selectionSet` covers arrow keys,
+          // clicks, programmatic dispatches; `docChanged` covers typing
+          // (selection moves with text) and any toolbar-driven edit.
+          if (update.selectionSet || update.docChanged) {
+            updateTick++;
+          }
         }),
       ],
       parent: container,
@@ -204,9 +299,20 @@
     if (autofocus) {
       view.focus();
     }
+    // Date-chip click events bubble from the widget's button DOM through
+    // CodeMirror's container. Listen here so the popover can be opened
+    // by any chip in any editor instance independently.
+    container.addEventListener(
+      'captainslog:date-chip-click',
+      handleDateChipClick as EventListener
+    );
   });
 
   onDestroy(() => {
+    container?.removeEventListener(
+      'captainslog:date-chip-click',
+      handleDateChipClick as EventListener
+    );
     view?.destroy();
   });
 
@@ -219,6 +325,20 @@
       changes: { from: 0, to: current.length, insert: value },
     });
   });
+
+  // Reactive live-preview swap via Compartment reconfigure. When /journal
+  // toggles Preview ↔ Source (livePreview prop flips), we dispatch a
+  // reconfigure on the existing EditorView instead of remounting it.
+  // Cursor, selection, scroll position, and undo history all survive.
+  // First run after mount is a no-op (compartment already holds the
+  // matching extension from construction), but harmless.
+  $effect(() => {
+    const lp = livePreview;
+    if (!view) return;
+    view.dispatch({
+      effects: livePreviewCompartment.reconfigure(lp ? livePreviewExt() : []),
+    });
+  });
 </script>
 
 {#if showToolbar}
@@ -227,9 +347,20 @@
      on /summary) is dragged. The toolbar dispatches into `view` once
      the EditorView has mounted; clicks arriving before mount are
      no-ops, not crashes. -->
-  <MarkdownToolbar {view} />
+  <MarkdownToolbar {view} {updateTick} />
 {/if}
 <div bind:this={container} class="md-editor {className}" {style}></div>
+
+{#if datePickerOpen && datePickerAnchor}
+  <DatePickerPopover
+    iso={datePickerIso}
+    from={datePickerFrom}
+    to={datePickerTo}
+    anchorEl={datePickerAnchor}
+    onCommit={handleDatePickerCommit}
+    onClose={handleDatePickerClose}
+  />
+{/if}
 
 <style>
   /* Wrapper picks up consumer-supplied sizing (flex: 1 from /capture and
@@ -313,6 +444,176 @@
   .md-editor :global(.cm-placeholder) {
     color: var(--text-muted);
     font-style: normal;
+  }
+
+  /* Inline code chip (Slack-style). Decoration.mark from live-preview.ts
+   * applies `.cm-md-inline-code` to the entire InlineCode node. The
+   * backticks are hidden separately so visually the chip wraps only the
+   * code body. `box-decoration-break: clone` keeps the chip's background
+   * + padding + radius rendering correctly when the inline code wraps
+   * across multiple lines (otherwise the wrap would cut the chip in half
+   * with a stretched background). */
+  .md-editor :global(.cm-md-inline-code) {
+    /* inline-block (rather than inline) makes the chip an atomic inline
+     * element. Critical when a checked task wraps the chip: parent
+     * .cm-md-task-done's `text-decoration: line-through` propagates
+     * through inline descendants but NOT through atomic inline-blocks,
+     * so the strike line doesn't draw across the chip. Trade-off: the
+     * chip can no longer split across lines mid-content; box-decoration-
+     * break: clone is moot for inline-block so it's been removed. For
+     * typical inline code (function name, short snippet), atomic is the
+     * right behavior anyway. */
+    display: inline-block;
+    background: var(--bg-elevated);
+    color: var(--accent-primary);
+    padding: 0 4px;
+    border-radius: 3px;
+    border: 1px solid var(--border-structural);
+    font-size: 0.92em;
+    vertical-align: baseline;
+  }
+
+  /* Fenced code block lines. Decoration.line from live-preview.ts applies
+   * `.cm-md-fenced-line` to every line within a FencedCode block (including
+   * the lines that used to show the ``` fences — those fences are now
+   * hidden, so the top/bottom lines are empty-but-styled, giving the box
+   * a natural padding gap). `padding-left/right` overrides .cm-line's
+   * default to inset the box slightly from the editor's chrome. */
+  .md-editor :global(.cm-md-fenced-line) {
+    background: var(--bg-elevated);
+    border-left: 3px solid var(--border-structural);
+    padding-left: var(--space-3) !important;
+  }
+
+  /* Bullet glyph. Decoration.replace from live-preview.ts swaps the `-`
+   * ListMark on a BulletList line for a `•` rendered in muted color so it
+   * reads as a list marker, not a content character. Inline-block with a
+   * fixed width keeps nested bullets aligned. Numbered lists are untouched —
+   * the digits are meaningful. */
+  .md-editor :global(.cm-md-bullet) {
+    display: inline-block;
+    width: 1ch;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    font-weight: 700;
+  }
+
+  /* Task checkbox. Decoration.replace from live-preview.ts swaps the
+   * 3-char `[ ]` / `[x]` TaskMarker for this clickable square. Sizing
+   * tuned to sit on the body text baseline without disrupting line
+   * height. SVG check is hidden unless aria-checked is true. */
+  .md-editor :global(.cm-md-task) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0 4px 0 0;
+    padding: 0;
+    background: transparent;
+    border: 1.5px solid var(--border-structural);
+    border-radius: 3px;
+    color: transparent;
+    cursor: pointer;
+    vertical-align: -3px;
+    transition:
+      background var(--transition-fast),
+      border-color var(--transition-fast),
+      color var(--transition-fast);
+    outline: none;
+  }
+  .md-editor :global(.cm-md-task:hover) {
+    border-color: var(--accent-primary);
+    background: var(--bg-surface);
+  }
+  .md-editor :global(.cm-md-task:focus-visible) {
+    box-shadow: 0 0 0 2px var(--focus-glow);
+    border-color: var(--accent-primary);
+  }
+  .md-editor :global(.cm-md-task[aria-checked="true"]) {
+    background: var(--accent-primary);
+    border-color: var(--accent-primary);
+    color: var(--bg-base);
+  }
+  .md-editor :global(.cm-md-task svg) {
+    flex-shrink: 0;
+  }
+
+  /* Strikethrough + muted color over the body of a checked task. The
+   * Decoration.mark from live-preview.ts targets the range AFTER the
+   * TaskMarker (which is replaced by the checkbox widget above). The
+   * widget itself isn't text so the strikethrough wouldn't render on
+   * it anyway — the rule applies cleanly to the inline content. */
+  .md-editor :global(.cm-md-task-done) {
+    text-decoration: line-through;
+    color: var(--text-secondary);
+  }
+
+  /* Inline date chip (Confluence-style). Decoration.replace from
+   * date-chip.ts swaps any ISO date in prose for a button widget. The
+   * styling: small pill, accent-soft background, accent-primary text +
+   * calendar icon, snug padding so it sits inline with body text without
+   * disrupting line height. Hover lifts the background a notch; focus
+   * uses the standard accent ring. The button's own focus outline is
+   * suppressed in favor of the box-shadow ring (matches the toolbar's
+   * focus pattern). */
+  .md-editor :global(.cm-date-chip) {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px 1px 6px;
+    margin: 0 1px;
+    background: var(--bg-elevated);
+    color: var(--accent-primary);
+    border: 1px solid var(--border-structural);
+    border-radius: 999px;
+    font: inherit;
+    font-size: 0.92em;
+    font-weight: 500;
+    line-height: 1.4;
+    cursor: pointer;
+    vertical-align: baseline;
+    white-space: nowrap;
+    transition: background var(--transition-fast),
+      border-color var(--transition-fast);
+    /* Prevent the user-agent button outline; we draw our own ring below. */
+    outline: none;
+  }
+  .md-editor :global(.cm-date-chip:hover) {
+    background: var(--bg-surface);
+    border-color: var(--accent-primary);
+  }
+  .md-editor :global(.cm-date-chip:focus-visible) {
+    box-shadow: 0 0 0 2px var(--focus-glow);
+    border-color: var(--accent-primary);
+  }
+  .md-editor :global(.cm-date-chip svg) {
+    flex-shrink: 0;
+    opacity: 0.85;
+  }
+  .md-editor :global(.cm-date-chip-text) {
+    line-height: 1.4;
+  }
+
+  /* Blockquote lines. Decoration.line from live-preview.ts applies
+   * `.cm-md-blockquote-line` to every line within a Blockquote. The `>`
+   * markers themselves are hidden (LINE_START_MARKERS), so the result is
+   * Slack-style quoted prose: indented content with an accent-colored
+   * left bar standing in for the raw `> ` source.
+   *
+   * Structural styling (left border + indent) applies to ALL quoted lines.
+   * Content styling (italic + muted color) is scoped via `:not(.cm-md-
+   * fenced-line)` so a fenced code block nested inside a quote keeps its
+   * monospace rendering — without the guard, the quote's italic + muted
+   * color leak onto the code body and produce italic-muted monospace,
+   * which reads as "deemphasized prose" rather than "code in a quote." */
+  .md-editor :global(.cm-md-blockquote-line) {
+    border-left: 3px solid var(--accent-primary);
+    padding-left: var(--space-3) !important;
+  }
+  .md-editor :global(.cm-md-blockquote-line:not(.cm-md-fenced-line)) {
+    color: var(--text-secondary);
+    font-style: italic;
   }
 
 </style>

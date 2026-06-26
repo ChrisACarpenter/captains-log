@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
 
@@ -40,10 +41,77 @@
   let content = $state('');
   let initialContent = $state('');
 
+  // ---------- view mode (Preview / Source) ----------
+
+  type ViewMode = 'preview' | 'source';
+  const VIEW_MODE_STORAGE_KEY = 'captainslog:journalViewMode';
+
+  /**
+   * Persisted across launches (Slack / Typora / VS Code convention).
+   * Seed from localStorage at module init; default to 'preview' when
+   * absent. Updated via the $effect below on every change.
+   *
+   * Why localStorage and not the Rust settings layer: this is a UI
+   * preference scoped to the journal browser only, and the Tauri webview
+   * persists localStorage across launches per-app. Reaching into the
+   * settings IPC for one toggle would be heavier than the value justifies.
+   */
+  function loadViewMode(): ViewMode {
+    try {
+      const raw = localStorage.getItem(VIEW_MODE_STORAGE_KEY);
+      if (raw === 'preview' || raw === 'source') return raw;
+    } catch {
+      // localStorage unavailable (private mode / disabled). Fall through.
+    }
+    return 'preview';
+  }
+
+  let viewMode = $state<ViewMode>(loadViewMode());
+
+  $effect(() => {
+    try {
+      localStorage.setItem(VIEW_MODE_STORAGE_KEY, viewMode);
+    } catch {
+      // Quota exceeded or storage disabled — silent failure is fine.
+    }
+  });
+
+  function setViewMode(mode: ViewMode): void {
+    viewMode = mode;
+  }
+  function toggleViewMode(): void {
+    viewMode = viewMode === 'preview' ? 'source' : 'preview';
+  }
+
   let saveStatus = $state<SaveStatus>('idle');
   let saveErrorMessage = $state('');
   let lastSavedAt = $state<Date | null>(null);
   let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  // Cross-route file invalidation. When another writer (e.g. /summary's
+  // weekly-summary save, or the menu-bar /capture popup appending a Note)
+  // mutates the SAME (year, week) markdown file we have open, the Rust
+  // side emits `weekly-file-changed`. We reconcile by re-reading from
+  // disk. When the user has unsaved edits, we set `externalUpdate` so
+  // the UI can warn instead of clobbering their work.
+  let externalUpdate = $state(false);
+  let weeklyFileUnlisten: UnlistenFn | null = null;
+
+  // Own-save event suppression. The `weekly-file-changed` event Rust
+  // emits after our own write travels a separate IPC channel from the
+  // invoke response, so ordering between the two is not guaranteed —
+  // by the time the listener callback runs, saveStatus may have already
+  // flipped from 'saving' to 'saved' and `initialContent` may have been
+  // rebaselined. A pure `saveStatus === 'saving'` gate would let our
+  // own emit through and, if the user typed during the save, falsely
+  // surface the "modified outside this view" banner.
+  //
+  // To suppress reliably we track `pendingCommit` — the exact bytes our
+  // most recent in-flight saveNow wrote. The listener treats any disk
+  // read equal to either `initialContent` (post-baseline) OR
+  // `pendingCommit` (pre-baseline) as our own emit and no-ops. The slot
+  // is cleared in saveNow's finally so it can't leak across saves.
+  let pendingCommit = $state<string | null>(null);
 
   // ---------- derived ----------
   const isDirty = $derived(
@@ -109,13 +177,18 @@
         // most recent activity. Others stay collapsed.
         expanded: year === currentYearWeek?.year
       }));
-      // Eagerly load + auto-select the current week so the editor isn't
-      // empty on first open.
+      // Eagerly load the current year's weeks into the sidebar so the
+      // current week is visible + clickable on first open. We DON'T
+      // auto-select it — selection has to be an explicit user action.
+      // Without that rule, opening /journal and typing would silently
+      // write to the current week's file even when the user didn't mean
+      // to be editing it (they came here to browse, not write — that's
+      // /summary's job). The placeholder pane in the {#if !selected}
+      // branch handles the cold-start state.
       if (currentYearWeek) {
         const currentNode = nodes.find((n) => n.year === currentYearWeek!.year);
         if (currentNode) {
           await loadYearWeeks(currentNode);
-          await selectWeek(currentYearWeek);
         }
       }
     } catch (err) {
@@ -123,10 +196,104 @@
     } finally {
       loadingTree = false;
     }
+
+    // Subscribe to the cross-route file-changed broadcast. Anything that
+    // writes to a weekly markdown file (write_week, update_weekly_summary,
+    // create_note) emits this from Rust. The listener stays mounted for
+    // the lifetime of the route and only acts when the changed (year,
+    // week) matches the one we have open.
+    weeklyFileUnlisten = await listen<{ year: number; week: number }>(
+      'weekly-file-changed',
+      async (event) => {
+        if (!selected) return;
+        if (
+          event.payload.year !== selected.year ||
+          event.payload.week !== selected.week
+        ) {
+          return;
+        }
+        // Don't gate on saveStatus here: Tauri's invoke-response and event
+        // emit travel separate IPC paths, so by the time this listener
+        // runs saveStatus may already have flipped to 'saved'. Instead,
+        // reconcileWithDisk compares disk to BOTH `initialContent` and
+        // `pendingCommit` to recognize our own emit. Suppressing on
+        // saveStatus alone caused a false-positive externalUpdate banner
+        // (and a destructive Reload button) when the user typed during
+        // their own save.
+        await reconcileWithDisk();
+      }
+    );
   });
+
+  /// Re-read the currently-selected week from disk and merge with our
+  /// in-memory `content`. Three branches:
+  ///   1. Disk == initialContent (or == pendingCommit) → silent no-op.
+  ///      The disk matches either our last-known baseline or the bytes
+  ///      our currently-in-flight save is writing — i.e. nothing has
+  ///      diverged from our perspective. This is the common case for
+  ///      our own save's emit echoing back.
+  ///   2. Disk != baseline, !isDirty → silent reload; replace content +
+  ///      baseline. The common case for "/capture appended a note,
+  ///      refresh the journal view so the user sees it."
+  ///   3. Disk != baseline, isDirty → set externalUpdate = true. The
+  ///      banner lets the user pick Reload (lose edits) or keep typing
+  ///      (next save overwrites the external change). We never silently
+  ///      destroy edits.
+  ///
+  /// Why compare to `initialContent` and not `content`: the user may
+  /// have typed during an own-save's IPC roundtrip. Their newer keystroke
+  /// makes `content` !== `initialContent`, so a `disk === content`
+  /// check would false-positive every time they type-through-save and
+  /// surface a misleading banner. The baseline + pendingCommit pair is
+  /// invariant during typing — only saveNow itself moves them.
+  async function reconcileWithDisk(): Promise<void> {
+    if (!selected) return;
+    try {
+      const diskRaw = await invoke<string | null>('read_week', {
+        year: selected.year,
+        week: selected.week
+      });
+      const disk = diskRaw ?? '';
+      if (disk === initialContent || disk === pendingCommit) {
+        externalUpdate = false;
+        return;
+      }
+      if (isDirty) {
+        externalUpdate = true;
+        return;
+      }
+      initialContent = disk;
+      content = disk;
+      externalUpdate = false;
+    } catch (err) {
+      // Reconciliation failure shouldn't surface as a save-error. Stay
+      // silent; the user can re-select the week to force a reload.
+      console.error('[journal] reconcile failed:', err);
+    }
+  }
+
+  /// Discard local edits and adopt whatever's on disk now. Wired to the
+  /// "Reload" button on the external-update banner.
+  async function reloadFromDisk(): Promise<void> {
+    if (!selected) return;
+    try {
+      const text = await invoke<string | null>('read_week', {
+        year: selected.year,
+        week: selected.week
+      });
+      initialContent = text ?? '';
+      content = initialContent;
+      externalUpdate = false;
+      saveStatus = 'idle';
+    } catch (err) {
+      editorError = String(err);
+    }
+  }
 
   onDestroy(() => {
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    weeklyFileUnlisten?.();
+    weeklyFileUnlisten = null;
   });
 
   // ---------- tree interactions ----------
@@ -165,6 +332,7 @@
     saveStatus = 'idle';
     saveErrorMessage = '';
     lastSavedAt = null;
+    externalUpdate = false;
     selected = yw;
     try {
       const text = await invoke<string | null>('read_week', {
@@ -186,7 +354,17 @@
     if (editorLoading) return;
     if (!selected) return;
     if (!isDirty) return;
-    saveStatus = 'dirty';
+    // Don't downgrade saveStatus from 'saving' to 'dirty' mid-save.
+    // The own-save suppression (pendingCommit) is a single slot, so a
+    // second saveNow firing while the first is still in flight would
+    // overwrite the in-flight slot and let the first save's own emit
+    // surface as a false-positive externalUpdate banner. Keeping
+    // saveStatus = 'saving' makes the saveNow gate (with its reschedule
+    // fallback) coalesce typing-through-save into a single follow-up
+    // save once the current one settles.
+    if (saveStatus !== 'saving') {
+      saveStatus = 'dirty';
+    }
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
       autoSaveTimer = null;
@@ -196,13 +374,29 @@
 
   async function saveNow() {
     if (!selected) return;
-    if (saveStatus === 'saving') return;
+    if (saveStatus === 'saving') {
+      // Another save is mid-invoke. The single-slot pendingCommit can't
+      // hold both the in-flight bytes AND the new edits. Reschedule
+      // ourselves so the new content saves AFTER the current save
+      // settles.
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        autoSaveTimer = null;
+        void saveNow();
+      }, AUTOSAVE_DEBOUNCE_MS);
+      return;
+    }
     if (autoSaveTimer) {
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
     }
     const committed = content;
     const committedFor = selected;
+    // Declare intent BEFORE invoke so the cross-route listener can
+    // recognize our own emit even when the event arrives before the
+    // baseline update (or before invoke even resolves). Cleared in
+    // finally regardless of outcome.
+    pendingCommit = committed;
     saveStatus = 'saving';
     saveErrorMessage = '';
     try {
@@ -222,13 +416,27 @@
     } catch (err) {
       saveErrorMessage = String(err);
       saveStatus = 'error';
+    } finally {
+      pendingCommit = null;
     }
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-      e.preventDefault();
-      void saveNow();
+    // e.key for Shift+S resolves to 'S' on most layouts; accept both cases.
+    if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+      if (e.shiftKey) {
+        // Cmd+Shift+S → toggle Preview / Source. Only meaningful when a
+        // week is open (the toggle controls the editor, which only mounts
+        // after a week is selected). Bail on the placeholder screen so the
+        // chord isn't a no-op-but-prevented browser shortcut for users
+        // who haven't picked a week yet.
+        if (!selected) return;
+        e.preventDefault();
+        toggleViewMode();
+      } else {
+        e.preventDefault();
+        void saveNow();
+      }
     }
   }
 
@@ -311,8 +519,10 @@
       <div class="placeholder">
         <h1>Pick a week to read or edit</h1>
         <p class="lead">
-          Past weeks open in raw markdown. Edits auto-save after 1.5s, just
-          like the weekly summary. New to markdown?
+          Past weeks open in rich preview. Hit
+          <kbd>⌘⇧S</kbd> or click <strong>Source</strong> to see the raw
+          markdown. Edits auto-save after 1.5s, just like the weekly summary.
+          New to markdown?
           <button type="button" class="link-button" onclick={openCheatSheet}>
             Open the cheat sheet.
           </button>
@@ -328,13 +538,45 @@
       </div>
     {:else}
       <header class="editor-header">
-        <h1>{formatWeekRange(selected)}</h1>
-        <p class="subtitle">
-          {selected.year}-W{String(selected.week).padStart(2, '0')}
-          {#if isCurrentWeek(selected)}
-            · current week
-          {/if}
-        </p>
+        <div class="editor-header-text">
+          <h1>{formatWeekRange(selected)}</h1>
+          <p class="subtitle">
+            {selected.year}-W{String(selected.week).padStart(2, '0')}
+            {#if isCurrentWeek(selected)}
+              · current week
+            {/if}
+          </p>
+        </div>
+        <!-- Segmented Preview / Source toggle. Mirrors VS Code / Typora /
+             Obsidian's mode-switch convention. Cmd+Shift+S is bound globally
+             via handleKeydown for power-user speed; this control is the
+             discoverable affordance. -->
+        <div
+          class="view-toggle"
+          role="group"
+          aria-label="Editor view mode"
+        >
+          <button
+            type="button"
+            class="view-toggle-btn"
+            class:is-active={viewMode === 'preview'}
+            aria-pressed={viewMode === 'preview'}
+            onclick={() => setViewMode('preview')}
+            title="Rich-text preview (⌘⇧S to toggle)"
+          >
+            Preview
+          </button>
+          <button
+            type="button"
+            class="view-toggle-btn"
+            class:is-active={viewMode === 'source'}
+            aria-pressed={viewMode === 'source'}
+            onclick={() => setViewMode('source')}
+            title="Raw markdown source (⌘⇧S to toggle)"
+          >
+            Source
+          </button>
+        </div>
       </header>
 
       {#if editorError}
@@ -344,26 +586,59 @@
       {#if editorLoading}
         <p class="muted">Loading week…</p>
       {:else}
-        <!-- Phase 2.5 Step 4: CodeMirror 6 markdown editor with WebKit
-          native spell-check. CSS variables hold the editor's monospace
-          face + 14px font + 1.5 line-height + 16px padding so the raw
-          markdown surface keeps its prior textarea-era look.
-          showToolbar={false} keeps this surface raw — /journal is the
-          markdown-source view, so the formatting toolbar (which lives
-          on /summary and /capture for non-markdown users) would be
-          off-message here. The cheat-sheet link above covers the
-          discoverability angle. -->
+        <!-- Phase 5: dual-mode editor.
+          - Preview mode: live-preview decorations hide markdown markers
+            (`**`, `>`, `#`, etc.) so prose renders as styled rich text.
+            Body font, 16px, default line-height. Toolbar visible — when
+            markers are hidden it's the discoverable formatting affordance,
+            same role it plays on /summary.
+          - Source mode: raw markdown. Monospace 14px / 1.5 line-height,
+            matches the prior textarea-era look. Toolbar hidden — raw
+            markers + Cmd+B/I/K shortcuts are enough; the toolbar would
+            be redundant chrome.
+
+          MarkdownEditor wraps its live-preview extension in a CM6
+          Compartment internally; flipping `livePreview` reactively swaps
+          the extension on the existing EditorView via reconfigure(), so
+          cursor position, selection, scroll, and undo history all survive
+          the toggle. Earlier shape used `{#key viewMode}` to force a
+          remount, which lost the cursor on every flip. -->
+        {#if externalUpdate}
+          <div class="external-update-banner" role="status" aria-live="polite">
+            <span class="banner-text">
+              This week was modified outside this view. Your unsaved edits
+              would overwrite it on the next save.
+            </span>
+            <button
+              type="button"
+              class="banner-action"
+              onclick={() => void reloadFromDisk()}
+            >Reload (lose my edits)</button>
+            <button
+              type="button"
+              class="banner-dismiss"
+              onclick={() => (externalUpdate = false)}
+              aria-label="Dismiss warning"
+            >×</button>
+          </div>
+        {/if}
+
         <MarkdownEditor
           class="editor"
           value={content}
           onChange={(v) => (content = v)}
-          showToolbar={false}
+          livePreview={viewMode === 'preview'}
+          showToolbar={viewMode === 'preview'}
           placeholder="No content yet. Anything you type here saves to the weekly file."
-          style="flex: 1; min-height: 200px;
-            --md-padding: var(--space-4);
-            --md-font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
-            --md-font-size: 14px;
-            --md-line-height: 1.5;"
+          style={
+            viewMode === 'preview'
+              ? 'flex: 1; min-height: 200px; --md-padding: var(--space-4);'
+              : 'flex: 1; min-height: 200px;'
+                + ' --md-padding: var(--space-4);'
+                + " --md-font-family: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;"
+                + ' --md-font-size: 14px;'
+                + ' --md-line-height: 1.5;'
+          }
         />
 
 
@@ -535,11 +810,59 @@
   }
 
   .editor-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
     margin-bottom: var(--space-4);
+  }
+
+  .editor-header-text {
+    min-width: 0;
   }
 
   .editor-header h1 {
     margin: 0;
+  }
+
+  /* ---- View toggle (Preview / Source) ---- */
+
+  .view-toggle {
+    display: inline-flex;
+    flex-shrink: 0;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-md);
+    padding: 2px;
+    gap: 2px;
+  }
+
+  .view-toggle-btn {
+    appearance: none;
+    background: transparent;
+    border: none;
+    border-radius: calc(var(--radius-md) - 2px);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--text-caption);
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+  }
+
+  .view-toggle-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .view-toggle-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--focus-glow);
+  }
+
+  .view-toggle-btn.is-active {
+    background: var(--bg-surface);
+    color: var(--accent-primary);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
   }
 
   .subtitle {
@@ -552,6 +875,54 @@
    * owned by MarkdownEditor.svelte itself; the monospace + 14px + 16px
    * padding overrides are forwarded via the --md-* CSS variables on the
    * component invocation above. */
+
+  /* ---- External-update banner ---- */
+
+  .external-update-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-warning, var(--accent-primary));
+    border-left-width: 3px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-caption);
+    line-height: var(--text-caption-lh);
+    color: var(--text-primary);
+  }
+  .external-update-banner .banner-text {
+    flex: 1;
+  }
+  .external-update-banner .banner-action {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font: inherit;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .external-update-banner .banner-action:hover {
+    background: var(--bg-surface);
+    border-color: var(--accent-primary);
+  }
+  .external-update-banner .banner-dismiss {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+  }
+  .external-update-banner .banner-dismiss:hover {
+    color: var(--text-primary);
+  }
 
   /* ---- Actions row ---- */
 

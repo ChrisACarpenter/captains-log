@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { openUrl, openPath } from '@tauri-apps/plugin-opener';
   import LabelInput from '$lib/LabelInput.svelte';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
@@ -82,6 +83,77 @@
   let sendError = $state('');
   let showConfirmModal = $state(false);
 
+  // Cross-route file invalidation. When /journal's raw-markdown editor
+  // saves the same weekly file (or /capture appends a Note), Rust emits
+  // `weekly-file-changed`. We re-fetch the structured summary so the
+  // four fields reflect whatever's on disk. With unsaved edits in this
+  // form, we set `externalUpdate` instead of overwriting them.
+  let externalUpdate = $state(false);
+  let weeklyFileUnlisten: UnlistenFn | null = null;
+
+  // Snapshot shape used to compare the FOUR fields + labels for equality.
+  // Mirrors the existing `snapshot` $state. `pendingCommit` holds the
+  // signature of an in-flight save so the listener can recognize our own
+  // emit even when it arrives after saveStatus has flipped from 'saving'
+  // to 'saved' (Tauri's invoke-response + event-emit are not strictly
+  // ordered, so a pure saveStatus gate is racy and would surface false-
+  // positive externalUpdate banners when the user types during a save).
+  type SummarySignature = {
+    keyAccomplishments: string;
+    plansAndPriorities: string;
+    challengesOrRoadblocks: string;
+    anythingElse: string;
+    labelsJson: string;
+  };
+  let pendingCommit = $state<SummarySignature | null>(null);
+
+  function summariesEqual(a: SummarySignature, b: SummarySignature): boolean {
+    return (
+      a.keyAccomplishments === b.keyAccomplishments &&
+      a.plansAndPriorities === b.plansAndPriorities &&
+      a.challengesOrRoadblocks === b.challengesOrRoadblocks &&
+      a.anythingElse === b.anythingElse &&
+      a.labelsJson === b.labelsJson
+    );
+  }
+
+  /// Mirror the normalization Rust applies on write + read:
+  ///   - Each field body is trimmed both ends (notes.rs:render_weekly_summary
+  ///     writes via trim_body / trim_end; extract_subsection trims both
+  ///     ends on read).
+  ///   - Each label is trimmed, leading '#' chars stripped, then empties
+  ///     filtered out (commands.rs update_weekly_summary + notes.rs label
+  ///     parse).
+  /// Used ONLY for the disk-vs-baseline equality check in
+  /// reconcileWithDisk — never applied to the form fields or the
+  /// in-memory snapshot, so the user's trailing whitespace and "#release"
+  /// label form survive in the editor between saves. The pre-normalize
+  /// snapshot stays pre-normalize (so isDirty correctly compares form to
+  /// what was last typed); we only normalize at compare time so a
+  /// normalization-only difference between disk (post-normalize) and
+  /// pre-normalize snapshot doesn't surface as a false "modified
+  /// externally" banner OR silently rewrite the user's fields on every
+  /// own-save echo.
+  function normalizedSig(s: SummarySignature): SummarySignature {
+    let labels: string[];
+    try {
+      labels = JSON.parse(s.labelsJson) as string[];
+    } catch {
+      labels = [];
+    }
+    return {
+      keyAccomplishments: s.keyAccomplishments.trim(),
+      plansAndPriorities: s.plansAndPriorities.trim(),
+      challengesOrRoadblocks: s.challengesOrRoadblocks.trim(),
+      anythingElse: s.anythingElse.trim(),
+      labelsJson: JSON.stringify(
+        labels
+          .map((l) => l.trim().replace(/^#+/, '').trim())
+          .filter((l) => l.length > 0)
+      )
+    };
+  }
+
   const isDirty = $derived(
     !loading &&
       (keyAccomplishments !== snapshot.keyAccomplishments ||
@@ -109,7 +181,17 @@
     if (loading) return;
     if (!isDirty) return;
 
-    saveStatus = 'dirty';
+    // Don't downgrade saveStatus from 'saving' to 'dirty' mid-save.
+    // The own-save suppression (pendingCommit) is a single slot, so a
+    // second saveNow firing while the first is still in flight would
+    // overwrite the in-flight slot and let the first save's own emit
+    // surface as a false-positive externalUpdate banner. Keeping
+    // saveStatus = 'saving' makes the saveNow `if (saveStatus ===
+    // 'saving') return;` gate (combined with the rescheduling fallback
+    // there) prevent concurrent saves.
+    if (saveStatus !== 'saving') {
+      saveStatus = 'dirty';
+    }
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
       autoSaveTimer = null;
@@ -183,6 +265,144 @@
     } finally {
       loading = false;
     }
+
+    // Subscribe to the cross-route file-changed broadcast. Any writer to
+    // the same (year, week) markdown file emits this from Rust. We only
+    // act when the changed week matches what we have open (always the
+    // current week for /summary).
+    weeklyFileUnlisten = await listen<{ year: number; week: number }>(
+      'weekly-file-changed',
+      async (event) => {
+        if (!yearWeek) return;
+        if (
+          event.payload.year !== yearWeek.year ||
+          event.payload.week !== yearWeek.week
+        ) {
+          return;
+        }
+        // Don't gate on saveStatus here: Tauri's invoke-response and event
+        // emit travel separate IPC paths, so by the time this listener
+        // runs saveStatus may have already flipped to 'saved'. Instead,
+        // reconcileWithDisk compares the disk-loaded summary to BOTH
+        // `snapshot` (post-baseline) and `pendingCommit` (pre-baseline)
+        // to recognize our own emit. Suppressing on saveStatus alone
+        // caused a false-positive externalUpdate banner — and a
+        // destructive Reload — when the user typed during their own save.
+        await reconcileWithDisk();
+      }
+    );
+  });
+
+  /// Re-fetch the structured summary from disk and merge with the form.
+  ///   1. Disk == snapshot (or == pendingCommit) → silent no-op. The
+  ///      disk matches either our last-known baseline or the bytes our
+  ///      currently-in-flight save is writing — own emit echo, no
+  ///      reconcile needed.
+  ///   2. Disk != baseline, !isDirty → silent reload; replace fields +
+  ///      baseline.
+  ///   3. Disk != baseline, isDirty → set externalUpdate = true. Banner
+  ///      lets the user pick Reload (lose edits) or keep typing (next
+  ///      save overwrites the external change).
+  ///
+  /// Why compare to `snapshot` and not to the live form fields: the user
+  /// may have typed during an own-save's IPC roundtrip. Their newer
+  /// keystroke makes form != snapshot, so a `disk === form` check would
+  /// false-positive every time they type-through-save and surface a
+  /// misleading banner. The baseline + pendingCommit pair is invariant
+  /// during typing — only saveNow itself moves them.
+  async function reconcileWithDisk(): Promise<void> {
+    if (!yearWeek) return;
+    try {
+      const s = await invoke<WeeklySummary>('get_weekly_summary', {
+        year: yearWeek.year,
+        week: yearWeek.week
+      });
+      // The disk-loaded signature is already post-normalization (Rust's
+      // extract_subsection trims; label parse strips '#' + drops empties).
+      // We normalize the snapshot + pendingCommit at compare-time so a
+      // pre-normalize-vs-post-normalize delta is treated as "no real
+      // change". See `normalizedSig` for the rationale.
+      const diskSig: SummarySignature = {
+        keyAccomplishments: s.keyAccomplishments,
+        plansAndPriorities: s.plansAndPriorities,
+        challengesOrRoadblocks: s.challengesOrRoadblocks,
+        anythingElse: s.anythingElse,
+        labelsJson: JSON.stringify(s.labels ?? [])
+      };
+      if (
+        summariesEqual(diskSig, normalizedSig(snapshot)) ||
+        (pendingCommit && summariesEqual(diskSig, normalizedSig(pendingCommit)))
+      ) {
+        externalUpdate = false;
+        // Refresh lastUpdated even on a no-op — external writers can bump
+        // the timestamp without changing field contents (rare but possible).
+        lastUpdated = s.lastUpdated;
+        return;
+      }
+      if (isDirty) {
+        externalUpdate = true;
+        return;
+      }
+      // Clean form, but disk differs — adopt the new content silently.
+      keyAccomplishments = s.keyAccomplishments;
+      plansAndPriorities = s.plansAndPriorities;
+      challengesOrRoadblocks = s.challengesOrRoadblocks;
+      anythingElse = s.anythingElse;
+      labels = s.labels ?? [];
+      lastUpdated = s.lastUpdated;
+      snapshot = {
+        keyAccomplishments,
+        plansAndPriorities,
+        challengesOrRoadblocks,
+        anythingElse,
+        labelsJson: JSON.stringify(labels)
+      };
+      externalUpdate = false;
+    } catch (err) {
+      console.error('[summary] reconcile failed:', err);
+    }
+  }
+
+  /// Discard local edits and adopt whatever's on disk now. Wired to the
+  /// "Reload" button on the external-update banner.
+  async function reloadFromDisk(): Promise<void> {
+    if (!yearWeek) return;
+    try {
+      const s = await invoke<WeeklySummary>('get_weekly_summary', {
+        year: yearWeek.year,
+        week: yearWeek.week
+      });
+      keyAccomplishments = s.keyAccomplishments;
+      plansAndPriorities = s.plansAndPriorities;
+      challengesOrRoadblocks = s.challengesOrRoadblocks;
+      anythingElse = s.anythingElse;
+      labels = s.labels ?? [];
+      lastUpdated = s.lastUpdated;
+      snapshot = {
+        keyAccomplishments,
+        plansAndPriorities,
+        challengesOrRoadblocks,
+        anythingElse,
+        labelsJson: JSON.stringify(labels)
+      };
+      externalUpdate = false;
+      saveStatus = 'idle';
+    } catch (err) {
+      loadError = String(err);
+    }
+  }
+
+  onDestroy(() => {
+    // Cancel any pending autosave timer so it can't fire saveNow on a
+    // destroyed component. The reschedule arm in saveNow's gate can
+    // leave a chained timer active even after the user clicks Done
+    // (which navigates immediately, only blocked by saveStatus === 'saving').
+    if (autoSaveTimer) {
+      clearTimeout(autoSaveTimer);
+      autoSaveTimer = null;
+    }
+    weeklyFileUnlisten?.();
+    weeklyFileUnlisten = null;
   });
 
   /// Save the current form to disk. Used by both the auto-save debounce and
@@ -190,7 +410,20 @@
   /// early if a save is already in flight.
   async function saveNow() {
     if (!yearWeek) return;
-    if (saveStatus === 'saving') return;
+    if (saveStatus === 'saving') {
+      // Another save is mid-invoke. The single-slot pendingCommit can't
+      // hold both the in-flight bytes AND the new edits. Reschedule
+      // ourselves so the new content saves AFTER the current save
+      // settles — the new $effect-guard above keeps saveStatus = 'saving'
+      // through completion, so this branch fires for every typing
+      // round-trip while saving.
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+      autoSaveTimer = setTimeout(() => {
+        autoSaveTimer = null;
+        void saveNow();
+      }, AUTOSAVE_DEBOUNCE_MS);
+      return;
+    }
     if (autoSaveTimer) {
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
@@ -207,6 +440,18 @@
       anythingElse,
       labelsJson: JSON.stringify(labels),
       labels: [...labels]
+    };
+
+    // Declare intent for the cross-route listener BEFORE invoke so it
+    // can recognize our own emit even when the event arrives before
+    // (or co-incident with) the post-save snapshot baseline. Cleared
+    // in finally regardless of outcome.
+    pendingCommit = {
+      keyAccomplishments: committed.keyAccomplishments,
+      plansAndPriorities: committed.plansAndPriorities,
+      challengesOrRoadblocks: committed.challengesOrRoadblocks,
+      anythingElse: committed.anythingElse,
+      labelsJson: committed.labelsJson
     };
 
     saveStatus = 'saving';
@@ -236,12 +481,18 @@
         anythingElse: committed.anythingElse,
         labelsJson: committed.labelsJson
       };
-      lastSavedAt = new Date();
-      saveStatus = 'saved';
       // Recompute the content hash off the freshly-saved file. This is what
       // the Send button's "edited since last send" gate compares against
       // sentRecord.contentHash. Refreshing here keeps the gate accurate
       // immediately after a save (no delay before Send re-enables).
+      //
+      // We MUST keep saveStatus = 'saving' through this await — otherwise
+      // a rescheduled saveNow firing during the hash-refresh window would
+      // sail through the `if (saveStatus === 'saving')` gate (status is
+      // 'saved' but pendingCommit is still set from this save), overwrite
+      // pendingCommit with new bytes, kick off a concurrent invoke, and
+      // our own finally would then clobber THAT save's suppression slot —
+      // re-opening the round-2 own-save race.
       if (yearWeek) {
         try {
           currentHash = await invoke<string>('get_summary_hash', {
@@ -254,9 +505,13 @@
           // a phantom "Send updated version" that uses a hash we don't trust.
         }
       }
+      lastSavedAt = new Date();
+      saveStatus = 'saved';
     } catch (err) {
       saveErrorMessage = String(err);
       saveStatus = 'error';
+    } finally {
+      pendingCommit = null;
     }
   }
 
@@ -464,6 +719,27 @@
         {/if}
       </header>
 
+      {#if externalUpdate}
+        <div class="external-update-banner" role="status" aria-live="polite">
+          <span class="banner-text">
+            This week was modified outside this view (likely from
+            /journal or a quick-capture note). Your unsaved edits would
+            overwrite it on the next save.
+          </span>
+          <button
+            type="button"
+            class="banner-action"
+            onclick={() => void reloadFromDisk()}
+          >Reload (lose my edits)</button>
+          <button
+            type="button"
+            class="banner-dismiss"
+            onclick={() => (externalUpdate = false)}
+            aria-label="Dismiss warning"
+          >×</button>
+        </div>
+      {/if}
+
       <div class="form">
         <!-- Phase 2.5 Step 4: each field is a CodeMirror MarkdownEditor.
           Native WebKit spell-check + clickable Markdown links + GFM
@@ -475,35 +751,38 @@
           content exceeds; resize: vertical on the wrapper lets the user
           drag-grow each field, matching the textarea-era affordance. -->
         <div class="field">
-          <label for="key-acc">Key accomplishments</label>
+          <label for="key-acc">Key accomplishments…</label>
           <MarkdownEditor
             id="key-acc"
             value={keyAccomplishments}
             onChange={(v) => (keyAccomplishments = v)}
-            placeholder="- "
-            style="--md-min-height: 134px; resize: vertical; overflow: hidden;"
-          />
-        </div>
-
-        <div class="field">
-          <label for="plans">Plans and priorities for next week</label>
-          <MarkdownEditor
-            id="plans"
-            value={plansAndPriorities}
-            onChange={(v) => (plansAndPriorities = v)}
-            placeholder="- "
+            placeholder=""
+            livePreview
             style="--md-min-height: 112px; resize: vertical; overflow: hidden;"
           />
         </div>
 
         <div class="field">
-          <label for="challenges">Challenges or roadblocks</label>
+          <label for="plans">Plans and priorities for next week…</label>
+          <MarkdownEditor
+            id="plans"
+            value={plansAndPriorities}
+            onChange={(v) => (plansAndPriorities = v)}
+            placeholder=""
+            livePreview
+            style="--md-min-height: 112px; resize: vertical; overflow: hidden;"
+          />
+        </div>
+
+        <div class="field">
+          <label for="challenges">Challenges or roadblocks…</label>
           <MarkdownEditor
             id="challenges"
             value={challengesOrRoadblocks}
             onChange={(v) => (challengesOrRoadblocks = v)}
-            placeholder="- "
-            style="--md-min-height: 90px; resize: vertical; overflow: hidden;"
+            placeholder=""
+            livePreview
+            style="--md-min-height: 112px; resize: vertical; overflow: hidden;"
           />
         </div>
 
@@ -514,7 +793,8 @@
             value={anythingElse}
             onChange={(v) => (anythingElse = v)}
             placeholder=""
-            style="--md-min-height: 90px; resize: vertical; overflow: hidden;"
+            livePreview
+            style="--md-min-height: 112px; resize: vertical; overflow: hidden;"
           />
         </div>
 
@@ -665,6 +945,54 @@
     font-size: var(--text-caption);
     line-height: var(--text-caption-lh);
     margin-top: var(--space-1);
+  }
+
+  /* ---- External-update banner ---- */
+
+  .external-update-banner {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-warning, var(--accent-primary));
+    border-left-width: 3px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-caption);
+    line-height: var(--text-caption-lh);
+    color: var(--text-primary);
+  }
+  .external-update-banner .banner-text {
+    flex: 1;
+  }
+  .external-update-banner .banner-action {
+    appearance: none;
+    background: transparent;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font: inherit;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast);
+  }
+  .external-update-banner .banner-action:hover {
+    background: var(--bg-surface);
+    border-color: var(--accent-primary);
+  }
+  .external-update-banner .banner-dismiss {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+  }
+  .external-update-banner .banner-dismiss:hover {
+    color: var(--text-primary);
   }
 
   .form {

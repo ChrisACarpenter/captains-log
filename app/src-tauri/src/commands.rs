@@ -53,6 +53,7 @@ pub struct CreateNoteInput {
 /// Append a Note to the current ISO week's file.
 #[tauri::command]
 pub async fn create_note(
+    app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     input: CreateNoteInput,
 ) -> Result<(), String> {
@@ -88,6 +89,8 @@ pub async fn create_note(
         eprintln!("warning: label index update failed: {e}");
     }
 
+    emit_weekly_file_changed(&app, year, week);
+
     Ok(())
 }
 
@@ -112,6 +115,7 @@ pub async fn read_week(
 /// section while preserving Weekly Notes below.
 #[tauri::command]
 pub async fn write_week(
+    app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     year: u32,
     week: u32,
@@ -121,7 +125,11 @@ pub async fn write_week(
     storage
         .write_week(year, week, &content)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_weekly_file_changed(&app, year, week);
+
+    Ok(())
 }
 
 /// List ISO years that have any weekly files, sorted ascending. Empty if
@@ -218,6 +226,7 @@ pub struct UpdateWeeklySummaryInput {
 /// doesn't send it.
 #[tauri::command]
 pub async fn update_weekly_summary(
+    app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     input: UpdateWeeklySummaryInput,
 ) -> Result<(), String> {
@@ -254,7 +263,36 @@ pub async fn update_weekly_summary(
     storage
         .write_week(input.year, input.week, &updated)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    emit_weekly_file_changed(&app, input.year, input.week);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Weekly file change event
+// ---------------------------------------------------------------------------
+
+/// Payload broadcast on the `weekly-file-changed` event. Frontend routes
+/// listen for this and reload their in-memory copy when the (year, week)
+/// they have open matches.
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WeeklyFileChanged {
+    year: u32,
+    week: u32,
+}
+
+/// Broadcast a "this weekly file just changed" notification to all
+/// frontend windows. Listeners on /journal and /summary use it to
+/// reconcile their in-memory copy when a sibling route (or the menu-bar
+/// /capture popup) writes to the same week.
+///
+/// Errors from `emit` are swallowed — failing to notify shouldn't fail
+/// the underlying write that already succeeded on disk.
+fn emit_weekly_file_changed(app: &AppHandle, year: u32, week: u32) {
+    let _ = app.emit("weekly-file-changed", WeeklyFileChanged { year, week });
 }
 
 // ---------------------------------------------------------------------------

@@ -42,18 +42,58 @@
     toggleStrikethrough,
     toggleBulletList,
     toggleNumberedList,
+    toggleTaskList,
     toggleQuote,
     insertLink,
     toggleInlineCode,
+    insertCurrentDate,
+    detectActiveFormats,
+    type ActiveFormat,
   } from './markdown-formatting';
 
   let {
     view,
+    updateTick,
   }: {
     /** The EditorView this toolbar dispatches into. Owned by the parent
      *  MarkdownEditor; passed down once it's mounted. */
     view: EditorView | undefined;
+    /** A monotonic counter bumped by MarkdownEditor on every cursor-move
+     *  or doc-change. Acts as a Svelte reactivity dependency for the
+     *  `activeFormats` $derived below — without it, $derived would only
+     *  re-run on `view` changes (effectively never post-mount) and the
+     *  pressed-state classes would stay frozen at whatever they were when
+     *  the editor first mounted. */
+    updateTick: number;
   } = $props();
+
+  /** Set of formats applied at the cursor right now. Buttons get
+   *  `.is-active` when their format is in this set so the user gets
+   *  continuous visual feedback of "what formatting is on at the cursor"
+   *  — mirrors the Slack toolbar's pressed-state convention. Empty set
+   *  before the editor mounts. */
+  const activeFormats = $derived.by(() => {
+    // Explicit read of `updateTick` so Svelte 5 registers it as a reactive
+    // dependency. `void updateTick` works in practice but relies on the
+    // compiler not eliding the read — the assignment-and-use pattern is
+    // contractually safe across compiler versions.
+    const tick = updateTick;
+    return tick >= 0 && view
+      ? detectActiveFormats(view)
+      : new Set<ActiveFormat>();
+  });
+
+  /** Build the class string for a toggle-style toolbar button, adding
+   *  `is-active` when the named format applies at the cursor right now.
+   *  Non-toggle buttons (Date / Help) keep their static `md-toolbar-btn`
+   *  class inline rather than going through this helper — keeps the
+   *  parameter type narrow (required, no `undefined` branch) which avoids
+   *  a Svelte 5 + Vite-plugin parse quirk with `format?:` syntax. */
+  function btnClass(format: ActiveFormat): string {
+    return activeFormats.has(format)
+      ? 'md-toolbar-btn is-active'
+      : 'md-toolbar-btn';
+  }
 
   const CHEAT_SHEET_URL = 'https://www.markdownguide.org/cheat-sheet/';
 
@@ -74,10 +114,12 @@
 <div class="md-toolbar" role="toolbar" aria-label="Markdown formatting">
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('heading')}
     onclick={() => run(cycleHeading)}
     aria-label="Cycle heading level"
-    title="Heading — cycle H1 / H2 / H3 / none"
+    aria-pressed={activeFormats.has('heading')}
+    aria-keyshortcuts="Meta+Alt+0"
+    title="Heading — cycle H1 / H2 / H3 / none (⌘⌥0)"
   >
     <Icon name="heading" />
   </button>
@@ -86,9 +128,10 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('bold')}
     onclick={() => run(toggleBold)}
     aria-label="Bold"
+    aria-pressed={activeFormats.has('bold')}
     aria-keyshortcuts="Meta+B"
     title="Bold (⌘B)"
   >
@@ -97,9 +140,10 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('italic')}
     onclick={() => run(toggleItalic)}
     aria-label="Italic"
+    aria-pressed={activeFormats.has('italic')}
     aria-keyshortcuts="Meta+I"
     title="Italic (⌘I)"
   >
@@ -108,10 +152,12 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('strike')}
     onclick={() => run(toggleStrikethrough)}
     aria-label="Strikethrough"
-    title="Strikethrough"
+    aria-pressed={activeFormats.has('strike')}
+    aria-keyshortcuts="Meta+Shift+X"
+    title="Strikethrough (⌘⇧X)"
   >
     <Icon name="strikethrough" />
   </button>
@@ -120,9 +166,10 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('bullet')}
     onclick={() => run(toggleBulletList)}
     aria-label="Bulleted list"
+    aria-pressed={activeFormats.has('bullet')}
     aria-keyshortcuts="Meta+Shift+8"
     title="Bulleted list (⌘⇧8)"
   >
@@ -131,9 +178,10 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('numbered')}
     onclick={() => run(toggleNumberedList)}
     aria-label="Numbered list"
+    aria-pressed={activeFormats.has('numbered')}
     aria-keyshortcuts="Meta+Shift+7"
     title="Numbered list (⌘⇧7)"
   >
@@ -142,10 +190,24 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('task')}
+    onclick={() => run(toggleTaskList)}
+    aria-label="Task list"
+    aria-pressed={activeFormats.has('task')}
+    aria-keyshortcuts="Meta+Shift+L"
+    title="Task list (⌘⇧L)"
+  >
+    <Icon name="list-checks" />
+  </button>
+
+  <button
+    type="button"
+    class={btnClass('quote')}
     onclick={() => run(toggleQuote)}
     aria-label="Block quote"
-    title="Block quote"
+    aria-pressed={activeFormats.has('quote')}
+    aria-keyshortcuts="Meta+Shift+9"
+    title="Block quote (⌘⇧9)"
   >
     <Icon name="quote" />
   </button>
@@ -154,9 +216,10 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('link')}
     onclick={() => run(insertLink)}
     aria-label="Insert link"
+    aria-pressed={activeFormats.has('link')}
     aria-keyshortcuts="Meta+K"
     title="Link (⌘K)"
   >
@@ -165,13 +228,25 @@
 
   <button
     type="button"
-    class="md-toolbar-btn"
+    class={btnClass('code')}
     onclick={() => run(toggleInlineCode)}
     aria-label="Code"
+    aria-pressed={activeFormats.has('code')}
     aria-keyshortcuts="Meta+E"
     title="Code (⌘E)"
   >
     <Icon name="code" />
+  </button>
+
+  <button
+    type="button"
+    class="md-toolbar-btn"
+    onclick={() => run(insertCurrentDate)}
+    aria-label="Insert today's date"
+    aria-keyshortcuts="Meta+;"
+    title="Today's date (⌘;)"
+  >
+    <Icon name="calendar" />
   </button>
 
   <span class="md-toolbar-spacer" aria-hidden="true"></span>
@@ -232,6 +307,24 @@
   .md-toolbar-btn:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--focus-glow);
+    color: var(--accent-primary);
+  }
+
+  /* Pressed / active state — applied when the format is in `activeFormats`
+   * (computed from the syntax tree at the cursor on every move + edit).
+   * Distinct from :active (mouse-down momentary feedback) by maintaining
+   * the highlight as long as the cursor sits inside the formatted span.
+   * Matches Slack's toolbar convention: "I'm inside bold right now" reads
+   * as a continuously-tinted button. Stronger than :hover (accent color +
+   * accent-tinted background) so the user can tell at a glance which
+   * formats apply at the cursor. */
+  .md-toolbar-btn.is-active {
+    background: var(--bg-surface);
+    color: var(--accent-primary);
+    box-shadow: inset 0 0 0 1px var(--border-structural);
+  }
+  .md-toolbar-btn.is-active:hover {
+    background: var(--bg-surface);
     color: var(--accent-primary);
   }
 
