@@ -1,14 +1,10 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2.5 — editor upgrade (active, mid-pivot)
+## Current phase: 2.5 + 2.5b ✅ done — next up Phase 2.7 (onboarding + Settings revisit)
 
-Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped on 2026-06-24. Phase 2.5 Steps 1-4 + the formatting toolbar shipped today (CodeMirror 6 source-mode editor on all three surfaces, native WebKit spell-check, 10-button formatting toolbar with Cmd+B/I/K/E + Cmd+Shift+7/8 shortcuts, clickable Markdown links).
+Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session.
 
-**Active pivot** (decided 2026-06-24): the source-mode editor — visible `**`, `~~`, `#`, `-`, `>` markers in the user's text — is a UX blocker for non-technical adopters (HR, artists, accountants, PMs) coming within 60 days. Pivoting from source mode to **aggressive Slack/Typora-style marker hiding** on the same CodeMirror 6 engine. Storage stays markdown on disk (5 of 6 evaluation lenses converged on that — power-user workflow, LLM bundle, Phase 5/6/7 portability, long-term maintenance, implementation realism). Display becomes true rich-text with markdown hidden as decorations.
-
-**Rollback baseline tagged at `pre-slack-wysiwyg`** (commit `ac101c8`) — clean restore point before the Architecture B build begins.
-
-**Phase 2.7 (onboarding + Settings revisit)** stays queued after Phase 2.5 completes.
+**Next up: Phase 2.7** — onboarding wizard expansion + Settings layout revisit. Phase 2.5 Steps 5-7 (HTML email body + preview modal) remain deferred behind 2.7 since the Send flow already works in plaintext via 2.6.
 
 ---
 
@@ -74,38 +70,102 @@ Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to 
 
 **Success:** Captain's Log has replaced any other journaling system I was using. **Achieved.**
 
-## Phase 2.5 — Editor upgrade (active, mid-pivot)
+## Phase 2.5 — Editor upgrade ✅ (shipped 2026-06-25)
 
-Replaces the plain `<textarea>` on `/summary`, the capture popup body, and `/journal` with a real Markdown editor; switches the Send-to-manager email body to HTML so recipients see real formatting and clickable links. **Disk format stays raw markdown** (decision locked across power-user workflow / LLM bundle / Phase 5/6/7 portability / long-term maintenance lenses).
+Slack/Typora-style live-preview editor on CodeMirror 6, markdown stays on disk byte-identical. Replaces the plain `<textarea>` on `/summary`, `/capture`, and `/journal` with one shared MarkdownEditor.
 
-### Steps 1-4 + toolbar ✅ (shipped 2026-06-24)
+### Steps 1-4 + initial toolbar ✅ (2026-06-24)
 
-- [x] **Step 1 — `MarkdownEditor.svelte` + `/capture` swap** (commit `fb40bda`). Added CodeMirror 6 deps (`@codemirror/{state,view,commands,language,lang-markdown}` + `@lezer/markdown`). Hand-rolled ~40-line Svelte 5 wrapper with one-way `value` prop + `onChange` callback. Body of `/capture` swapped from textarea to MarkdownEditor. Markdown round-trip verified byte-for-byte via `xxd` on the draft file.
-- [x] **Step 2 — Clickable Markdown links** (commit `05201d8`). New `markdown-links.ts` CM6 ViewPlugin that walks the Lezer syntax tree, applies `domEventHandlers.mousedown` to `Link` / `Autolink` / `URL` nodes with Cmd-click handlers calling Tauri's `openUrl()`. Capability scope extended to allow `http://*` and `https://*`. Three link forms work end-to-end: `[text](url)`, `<https://example.com>`, and GFM bare URLs.
-- [x] **Step 3 — Native WebKit spell-check on contenteditable** (commit `cfb2ce3`). Investigation arc surfaced that `tauri-apps/tauri#7705` (the textarea spell-check bug we worked around with SpellcheckTextarea) does NOT apply to contenteditable surfaces. CodeMirror's editing surface IS a contenteditable div. Setting `EditorView.contentAttributes.of({ spellcheck: 'true' })` routes the entire pipeline through WebKit + NSSpellChecker natively — same engine Apple Mail and Pages use. Squiggles paint natively, right-click suggestions pre-populated, contractions (`dont` → `don't`) caught the way users expect. Custom IPC + Decoration.mark plugin + `SpellcheckTextarea.svelte` all deleted (~400 LOC net delete).
-- [x] **Step 4 — Propagate MarkdownEditor to `/journal` (monospace) + `/summary` (four instances)** (commit `b27b263`). Monospace, 14px font, 1.5 line-height, 16px padding wired via `--md-*` CSS variables on the new MarkdownEditor invocation. `/summary` fields use `--md-min-height` to approximate prior `rows={3|4|5}` initial heights + `resize: vertical` for user-drag-grow affordance. `id` prop forwarded to `.cm-content` for `<label for={id}>` accessibility. `SpellcheckTextarea.svelte`, `spellcheck.rs`, the `check_spelling` Tauri command, and the `objc2-app-kit` NSSpellChecker feature all retired. Net delete: ~280 lines.
-- [x] **Toolbar + journal cheat sheet** (commit `6d60b58`). 10-button formatting strip above each MarkdownEditor on `/capture` and `/summary` (Heading cycle / Bold / Italic / Strikethrough / Bulleted list / Numbered list / Block quote / Link / Code / Help). Keyboard shortcuts: Cmd+B / Cmd+I / Cmd+K / Cmd+E / Cmd+Shift+7 / Cmd+Shift+8. Shared command module (`markdown-formatting.ts`) backs both toolbar onClicks and the keymap so wrap/unwrap logic lives in one place per format. New `Icon.svelte` with 10 Lucide-derived inline SVGs (no icon library dep). New `showToolbar?: boolean = true` prop on MarkdownEditor; `/journal` opts out and adds an inline cheat-sheet link to its placeholder copy.
+- [x] **Step 1** — `MarkdownEditor.svelte` Svelte 5 wrapper on CM6, `/capture` body swapped (commit `fb40bda`). Byte-identical round-trip verified.
+- [x] **Step 2** — Clickable Markdown links via `markdown-links.ts` ViewPlugin + Cmd-click → Tauri `openUrl()` for `[text](url)`, autolinks, and GFM bare URLs (commit `05201d8`).
+- [x] **Step 3** — Native WebKit/NSSpellChecker on the CM contenteditable; ~400 LOC custom IPC + `SpellcheckTextarea` deleted (commit `cfb2ce3`).
+- [x] **Step 4** — MarkdownEditor propagated to `/journal` + `/summary`'s four fields; `--md-*` CSS vars + `resize: vertical` + `id` forwarding for label-for accessibility. Net delete ~280 LOC (commit `b27b263`).
+- [x] **Initial toolbar** — 10-button strip + Cmd+B / Cmd+I / Cmd+K / Cmd+E / Cmd+Shift+7 / Cmd+Shift+8 keymap; shared `markdown-formatting.ts` command module; new `Icon.svelte` (commit `6d60b58`).
 
-### Step 5+ — Architecture B pivot (active, ~10-14 days)
+### Architecture B — live-preview engine ✅ (2026-06-25)
 
-**Rollback line: `pre-slack-wysiwyg` (commit `ac101c8`)** — clean restore point.
+- [x] **Inline marker hiding** — bold, italic, strike, inline code, links collapsed via `Decoration.replace` + atomic ranges. Inline code rendered as a pill chip (`display: inline-block` so parent strikethrough can't bleed through).
+- [x] **Fenced code blocks** — `` ``` `` + Enter (or 3rd backtick keystroke) auto-expands a body block with cursor on the body line. Backspace at body start deletes an empty fence or exits upward; trailing blank line auto-inserted when flush against doc edge; cursor-skip filter blocks typing on the opening/closing fence lines (prevents CodeInfo / broken closer). Line decoration on all body lines, left accent stripe.
+- [x] **Slack-style blockquote** — 3px accent left bar, italic + muted color, scoped with `:not(.cm-md-fenced-line)` so nested fenced code stays readable.
+- [x] **Atomic ranges + RangeSetBuilder sort** — load-bearing fix: sort by `deco.startSide` (replace=499.999M, mark=500M, line=−200M). Hand-rolled rank caused RangeSetBuilder to silently throw and decorations to vanish.
+- [x] **5-lens adversarial passes** — cursor-after-closing-wrap edge correction, italic-on-fenced-in-quote CSS fix, code-button-while-in-FencedCode strips the fence, `updateTick` explicit-assignment reactivity, nested-list mutual exclusion for active-state.
 
-Source-mode editor (`**bold**` markers visible, faded) is a UX blocker for non-technical users coming within 60 days. Pivoting from source mode to **aggressive Slack/Typora-style marker hiding** while keeping CodeMirror 6 + markdown-on-disk. Markers (`**`, `*`, `_`, `~~`, `` ` ``, `#`, `-`, `1.`, `>`, `[`/`](url)`) become atomic-hidden ranges via `Decoration.replace`; user sees rendered rich text only, types markdown shortcuts but never sees the syntax in the result. Storage axis stays locked at markdown (5 of 6 evaluation lenses converged here — power-user workflow, LLM bundle, Phase 5/6/7, long-term maintenance, implementation realism); display axis goes all-the-way Slack, not partway Obsidian-style.
+### Toolbar overhaul ✅
 
-Implementation order:
+- [x] **Active-state detection** — `detectActiveFormats` walks syntax tree from selection.head; buttons get `.is-active` + `aria-pressed`. Edge correction skips wrap nodes when the cursor sits at their right/left boundary.
+- [x] **Multi-line Cmd+E** — cursor lands at body end with trailing newline (was: stuck on hidden opening fence).
+- [x] **C3 fix** — `transformLines` skips opening/closing fence lines so quote/bullet/numbered can't corrupt a fenced block.
+- [x] **C4 fix** — heading cycle preserves H4-H6 via narrow strip + early-return.
+- [x] **M2 fix** — link placeholder changed from `url` to `https://`.
+- [x] **New buttons + shortcuts** — Task list (Cmd+Shift+L), Today's date (Cmd+;); plus strike (Cmd+Shift+X), quote (Cmd+Shift+9), heading (Cmd+Alt+0).
+- [x] **Skeptic-round fixes** — H6 regression (regex strip-vs-prepend mismatch, H4-H6 guard added); empty-line task on blank doc (`addOnBlanks` branch + `sawNonBlank` tracking); Cmd+; for date vs Cmd+Shift+; for time (Google Sheets convention).
 
-- [ ] **Day 1-3** — Build the aggressive-hiding ViewPlugin in `MarkdownEditor.svelte`. Decoration.replace + atomic ranges hide all marker tokens. Selection-watcher governs the brief "cursor on the closing marker that completes a pair" reveal edge case. Ship to `/capture` only first (smallest blast radius). Toolbar + keymap stay visible and working.
-- [ ] **Day 4** — Propagate to `/summary`'s four fields. Manual QA matrix (paste from Slack, paste from VS Code, undo/redo across atomic ranges, backspace at marker boundaries, list creation/deletion, link insertion via toolbar).
-- [ ] **Day 5-7** — `/journal` rich-text redesign. Same Live Preview editor for past weeks, full rich-text editing parity with `/summary` (Chris confirmed daily past-week editing is part of his workflow). Per-view "reveal source" toggle (NOT global — global creates a mode users toggle by accident and never recover from). Wire to existing auto-save + `dirty.ts`.
-- [ ] **Day 8-10** — Edge-case hardening. Atomic-range escape on selection-drag, backspace at marker boundaries, line-level constructs (headings need `Decoration.line` for the style + `Decoration.replace` for the `# ` marker). Code fences, strikethrough, blockquote consistency. Verify `markdown-links.ts` Cmd-click still works.
-- [ ] **Day 11-12** — Polish + architecture note in `docs/`. Update CLAUDE.md. Document the storage axis (markdown, locked) vs display axis (aggressive hiding now, true-WYSIWYG-via-TipTap as a future graduation if needed).
-- [ ] **Day 13-14** — Buffer + final QA + hand-off. Use it for at least a week before declaring Phase 2.5 done.
+### Date chip + picker ✅ (Confluence-style)
 
-### Deferred (post-pivot, still part of Phase 2.5)
+- [x] **`date-chip.ts` ViewPlugin** — scans visible viewport for `\b\d{4}-\d{2}-\d{2}\b`, skips code spans, replaces with a WidgetType chip showing formatted date ("Jun 25" / "Jun 25, 2026"). Atomic range.
+- [x] **`DatePickerPopover.svelte`** — hand-rolled month grid (~200 LOC), full keyboard nav (arrows day, PgUp/Dn month, Shift+PgUp/Dn year, Enter commits, Esc closes), outside-mousedown closes, Floating-UI-style position computation with bottom-flip-to-top + viewport clamp.
+- [x] **Click routing** — dispatch directly on the owning MarkdownEditor's view (NOT via window event + activeViews Set — would misroute commits across /summary's 4 instances).
+- [x] **Position-bake fix** — `WidgetType.eq()` includes from/to so DOM rebuilds on text shift (otherwise stale offsets in click handlers).
+- [x] **Cursor-at-matchEnd allow** — newly-inserted date chip renders immediately; viewport-edge clamp keeps popover on-screen in `/capture`'s small window.
 
-- [ ] **Step 5 (post-pivot) — HTML email via `pulldown-cmark`.** Add the crate. Rename `render_body` to `render_body_plaintext` (debug/LLM view). New `render_body_html` runs each section through `pulldown_cmark::html::push_html` and wraps in a minimal inline-CSS shell. `write_eml_file` flips `Content-Type` to `text/html`, quoted-printable encodes the body, adds `X-Unsent: 1`. Delete `MAILTO_MAX_BYTES` + the mailto branch in `compose_weekly_email`.
-- [ ] **Step 6 (post-pivot) — Preview modal on `/summary`.** New `EmailPreview.svelte`, calls a new `render_email_preview` command (DRY — same renderer as the send path). HTML rendered inside an `iframe srcdoc` for style isolation. "Preview" button next to "Send to manager".
-- [ ] **Step 7 (post-pivot) — Final smoke + commit.** Smoke matrix: markdown byte-identity on `/capture`, week-switch flush on `/journal`, all four sections + Preview + Send on `/summary`, real email to a Gmail + Outlook account.
+### /journal Preview/Source toggle ✅
+
+- [x] Segmented control + Cmd+Shift+S + localStorage persistence (`captainslog:journalViewMode`). Default Preview, editable in both modes. `{#key viewMode}` forces editor remount (CM bakes extensions at construction).
+- [x] Source mode keeps monospace + 14px; Preview uses body font + 16px + toolbar.
+- [x] **Empty-state placeholder** — `/journal` no longer auto-selects current week on mount. Was a real data-mutation bug (typing into current week's file just by opening `/journal`).
+
+### /summary polish ✅
+
+- [x] livePreview on all four fields; field min-height unified to 112px; labels use Unicode horizontal ellipsis (…); placeholders dropped from `- ` to empty.
+
+### List widgets (Day 8-10) ✅
+
+- [x] **BulletWidget** — replaces `-` ListMark of BulletList items with `•` (muted, fixed-width). Numbered ListMarks left alone (digits are meaningful).
+- [x] **TaskCheckboxWidget** — replaces 3-char TaskMarker with a clickable 16px square; toggles via direct `view.dispatch`. Sibling `cm-md-task-done` mark applies strikethrough + muted color to checked task body.
+- [x] **Dynamic Tab cap** — `maxListIndentAllowed` walks backward to the would-be parent line, caps indent at `parent_content_offset + 3` (CommonMark sub-item range). Top-level lone items can't Tab.
+- [x] **Lazy-continuation fix v2** — `applyListMarkerToCurrentLine` handles both empty-line and only-marker (`2. `) cases. When the line above is non-blank and different-family, prepends `\n` so Lezer parses as a fresh list instead of a lazy continuation or Setext underline. Verified empirically with `@lezer/markdown` + GFM.
+
+### Layout chrome ✅
+
+- [x] **Cat companion** — upper-left, clickable (opens random YouTube cat search via `tauri-plugin-opener`), "Meow!" tooltip, hidden on `/journal` (browser overlap).
+- [x] **Help + Nerds Only popups** — moved to lower-LEFT (so scrollbar appearance doesn't shift them). Two pill-shaped 11px buttons. Backdrop dismiss + Escape + close button; focus restored on close. Bodies cover three surfaces, keyboard shortcuts grouped by category, menu-bar capture, Noot description, and a Nerds Only stack (Tauri / SvelteKit / Svelte 5 runes / CM6 / Lezer + GFM / CommonMark / live-preview model / repo link).
+
+### File audit + cleanup ✅
+
+- [x] 20 existing weekly files audited via parallel workflow: 3 clean, 16 en-dash drift in `# Week of` titles (bulk-fixed to hyphens), 1 broken (W26 test/scratch — deleted). 8 throwaway 2024/2025 test files generated for multi-year sidebar verification, then deleted.
+
+### Architecture documentation ✅
+
+- [x] `ARCHITECTURE.md` (~4000 words): overview, three surfaces, storage model, live-preview architecture, toolbar + commands, multi-instance routing lesson, known limitations.
+
+### Deferred from Phase 2.5 (rolled into Phase 2.7 or later)
+
+- [ ] **HTML email body via `pulldown-cmark`** — original Step 5. Send flow already works in plaintext via 2.6; HTML upgrade is non-blocking.
+- [ ] **Preview modal on `/summary`** — original Step 6. Same renderer as the send path, iframe srcdoc for isolation.
+
+## Phase 2.5b — Editor follow-ups ✅ (shipped 2026-06-25, evening)
+
+The two known follow-ups from 2.5's hand-off:
+
+### Cursor preservation across Preview/Source toggle ✅
+
+- [x] **Compartment-based extension swap** — `MarkdownEditor.svelte` wraps the `livePreview` extension in a per-instance CodeMirror 6 `Compartment`. A `$effect` watching the prop dispatches `view.dispatch({effects: livePreviewCompartment.reconfigure(...)})` on change. The EditorView stays mounted across mode flips; cursor position, selection, scroll position, and undo history all survive.
+- [x] **/journal removed `{#key viewMode}`** — earlier shape forced full remount on every toggle.
+
+### Cross-route file invalidation ✅
+
+- [x] **Rust event broadcast** — `write_week`, `update_weekly_summary`, and `create_note` now emit a `weekly-file-changed` event with `{ year, week }` payload after a successful write (helper `emit_weekly_file_changed` in `commands.rs`).
+- [x] **/journal + /summary listeners** — both routes subscribe via `listen('weekly-file-changed', ...)` and call `reconcileWithDisk` when the event matches the selected/current week. Clean-form-clean-disk → silent no-op (covers the /capture-appends-a-note path so /journal updates without user action). Clean form, disk differs → silent reload. Dirty form, disk differs → `externalUpdate` banner with "Reload (lose my edits)" + dismiss buttons. Never silently destroys edits.
+- [x] **Own-save race suppression (pendingCommit)** — Tauri's invoke-response and event emit travel separate IPC paths; a pure `saveStatus === 'saving'` gate is racy. Each route now tracks a `pendingCommit` slot (the bytes/signature the in-flight save is writing) set before invoke and cleared in the success path. `reconcileWithDisk` no-ops when disk matches the post-baseline state OR the pre-baseline `pendingCommit` — robust to either ordering.
+- [x] **Concurrent-saveNow suppression** — the typing `$effect` no longer downgrades `saveStatus` from `'saving'` to `'dirty'`; the `saveNow` gate now reschedules the autoSaveTimer instead of dropping the save. Together this prevents two saveNow calls overlapping (which would clobber the single `pendingCommit` slot).
+- [x] **Normalization-aware compare (/summary only)** — Rust trims field bodies and strips `#` prefixes from labels on read. The frontend stores pre-normalize values in `snapshot`/`pendingCommit` (so `isDirty` correctly compares to what the user typed); `reconcileWithDisk` runs `normalizedSig` on both sides before comparing, so a normalization-only delta is treated as "no real change" — no spurious banner, no silent field rewrite on every own-save echo.
+- [x] **Post-baseline hash refresh held inside `saveStatus = 'saving'`** — /summary's `get_summary_hash` await happens before the status flips to `'saved'`, so the gate stays armed for the full critical section. Earlier shape let a rescheduled saveNow slip through during the hash refresh and clobber `pendingCommit`.
+- [x] **/summary onDestroy clears autoSaveTimer** — mirrors /journal's pattern, so navigating away mid-debounce (e.g. clicking Done while dirty) can't fire saveNow on a destroyed component.
+
+### Known limitations (deferred)
+
+- [ ] **/journal reschedule loop is bounded only by save settling** — if invoke('write_week') gets genuinely stuck, the autoSaveTimer reschedule loop spins at 1.5s intervals. Cheap but not zero. Acceptable for local-SSD writes (< 100ms typical).
+- [ ] **External-writer-during-own-save race** — if an external writer modifies the file while our save's invoke is in flight, the listener may either silently adopt the external content (clean form) or be overwritten by our save completing (we wrote last). This is the inherent two-writer race; the event mechanism only enables refresh, not coordination.
 
 ## Phase 2.6 — Send weekly summary to manager ✅ (shipped 2026-06-24)
 
@@ -141,13 +201,14 @@ Sequenced after Phase 2.5 so the editor refactor doesn't trip over onboarding st
 - [ ] Click search result → opens correct week, scrolls to correct Note
 - [ ] Year/week tree handles many years gracefully
 
-## Phase 4 — Link Enrichment
+## Phase 4 — Link Enrichment + Label Library
 
 - [ ] Detect URLs in Notes (Jira, GitHub, Slack, Confluence to start)
 - [ ] Fetch metadata via MCP connectors
 - [ ] Store enriched metadata inline or in a `.metadata/links/` cache
 - [ ] Display enriched cards in the rendered view (status, title, last update)
 - [ ] Room to grow to other systems beyond the initial four
+- [ ] **Label library viewer** — browse + filter all labels in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). UX TBD; will need at minimum a filter input (substring + maybe tag-cloud-by-recency) and a way to drill from a label into the matching Notes/Summaries. Depends on Phase 3 search so labels can reuse the same result-list + week-jump plumbing.
 
 ## Phase 5 — Performance Review Module
 
@@ -176,6 +237,13 @@ The reason this app exists.
 
 ## Deferred / TBD
 
+- [ ] **Editor follow-ups from Phase 2.5** (tracked, not blockers):
+  - Cursor preservation across `/journal` Preview/Source toggle (currently resets to 0 on remount).
+  - Cross-route stale preview between `/summary` and `/journal` on the same week (pre-existing race).
+  - Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by `lineDelta > 1` guard).
+  - IME on body-line-start backspace edge case.
+  - Multi-cursor + most widget commands bail rather than handle each range.
+  - Setext headings not detected by active-state.
 - [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
 - [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
 - [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.

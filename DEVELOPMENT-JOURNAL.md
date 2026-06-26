@@ -667,3 +667,229 @@ Architecture B begins. Day 1-3 chunk: aggressive-hiding ViewPlugin in `MarkdownE
 - ABeeZee (the brand body face) has no bold weight. Any `font-weight: bold` rule on ABeeZee text falls through to WebKit faux-bold which is not visibly distinct. Explicit `font-family: system-ui` override for bold spans is the cleanest fix; brand consistency suffers slightly, weight visibility wins.
 - For Tauri opener capability scoping: `$TEMP` resolves to `std::env::temp_dir()` (confirmed by reading Tauri's path::parse source). Path patterns support `**` glob recursion.
 - The two-axis framing (storage vs display) is the right way to think about editor architecture decisions. They combine freely. Bundling them in "WYSIWYG = JSON storage" loses the design space.
+
+---
+
+## 2026-06-25 — Phase 2.5 Architecture B: live preview, end-to-end
+
+Single longest session of the phase. Yesterday's tagged baseline (`pre-slack-wysiwyg`) was source-mode with a toolbar; today it's a Slack-style live-preview editor with hidden markdown markers, atomic decorations, active-state toolbar buttons, a Confluence-style date chip + picker, list widgets, a `/journal` Preview/Source toggle, layout chrome, and ~4000 words of architecture documentation. No commit yet — the whole arc is sitting in the working tree until I do a clean cold-read pass tomorrow.
+
+### Live-preview engine
+
+The heart of the day. `MarkdownEditor.svelte` got a new set of ViewPlugins that walk the Lezer syntax tree per visible range and emit Decoration sets: `Decoration.replace` for marker characters (`**`, `*`, `~~`, `[`, `]`, `(...)`, `>`, `#`, opening/closing fence lines), `Decoration.mark` for the surrounding span styling (bold weight, italic, strikethrough, link color), and `Decoration.line` for line-level constructs (fenced-code block, blockquote, heading sizes). Active-line edge-correction: when the cursor sits inside a wrap, the markers on THAT wrap un-hide so the user can see what they're editing.
+
+Fence handling has its own little state machine inside the input filter, because the Lezer parser doesn't classify a half-built fence as `FencedCode` until the closing triple is present:
+
+- Type ` ``` ` + Enter → auto-expands to a 3-line block (opening fence, empty body line, closing fence), cursor on the body line.
+- The 3rd backtick keystroke ALSO auto-expands, even without Enter — covers the case where you just want a block right now.
+- Backspace at body-line start: empty fence → delete the whole block; non-empty → exit up into the line above (cursor lands at end of preceding line).
+- Trailing blank line is auto-inserted when a closing fence is flush against the document edge, otherwise the cursor has nowhere to land after Cmd-End.
+- Cursor-skip filter: keystrokes on the opening or closing fence lines are rerouted down to the body. Without this, a user typing on the opening fence creates a `CodeInfo` substring (and on the closing fence breaks the closing-fence match → the parser collapses the whole block into a paragraph).
+
+Three Decoration patterns shipped:
+
+- **Inline code chip** (`` `like this` ``): pill-shaped span, monospace, subtle background, `display: inline-block`. The inline-block matters — without it, a strikethrough on a parent paragraph draws through the chip too. Inline-block creates a new line-box and the strike doesn't span it.
+- **Fenced-code block**: line decoration on every line in the range, plus a 3px left accent stripe and a slightly elevated background. Opening and closing fence lines are the SAME decoration (so the block reads as one continuous element) but their text is replaced with empty widgets, leaving just the accent stripe at top/bottom.
+- **Slack-style blockquote**: 3px accent left bar, italic, muted color. Critically scoped with `:not(.cm-md-fenced-line)` so a fenced code block embedded inside a quote stays readable — italic over monospace looks broken, and the muted color washed out the syntax-highlighting tokens.
+
+### The RangeSetBuilder startSide lesson
+
+Several hours mid-morning chasing a "decorations randomly vanish at certain cursor positions" bug. Root cause: I had a hand-rolled rank field on each decoration (`{rank: 0|1|2}`) intending to control z-order between replace / mark / line. CodeMirror's `RangeSetBuilder.add(from, to, deco)` requires inputs to be **sorted by `deco.startSide`**, not by any custom comparator I hang off the deco's `spec`. When two decorations shared a starting offset and my hand-rolled rank put them in the wrong order relative to startSide, the builder threw a `RangeError: Ranges must be added sorted by from position and side` — which CodeMirror was catching silently somewhere upstream and dropping the entire decoration set.
+
+Fix: drop the hand-rolled rank entirely, sort the working list by the actual `Decoration` startSide values (`replace = 499_999_999`, `mark = 500_000_000`, `line = -200_000_000`), and feed them into the builder in that order. Decorations stopped disappearing and the codepath got 30 lines shorter.
+
+### Toolbar overhaul
+
+Yesterday's toolbar was static — buttons fired commands, no visual state. Today it became active-state-aware and learned two new tricks.
+
+- **`detectActiveFormats(state)`**: walks the Lezer syntax tree from `selection.main.head` upward, returns a `Set<FormatName>` of every format that contains the cursor. Buttons get `.is-active` + `aria-pressed="true"` when their format is in the set. Edge-correction: when the cursor sits at the right edge of a wrap node (e.g. just after the closing `**` of bold), the tree walk would still report Strong as active. Skip wrap nodes whose `to === cursor` so the toolbar agrees with what the user is about to type.
+- **Multi-line Cmd+E**: previously dropped the cursor on the hidden opening fence (broken UX — invisible cursor, every keystroke triggered the skip-filter). Now the command computes the end-of-body position with a trailing newline, dispatches the cursor there, and the user lands ready to type.
+- **C3 — transformLines fence guard**: the prefix-line commands (quote, bullet, numbered) walk selected lines and prepend a marker. If the selection straddled or sat inside a fenced block, they corrupted it. Added a `isInFencedBlock(state, line)` check and skipped opening/closing fence lines plus body lines.
+- **C4 — heading cycle preservation**: cycling `# → ## → ### → none` was implemented as a regex that matched only H1-H3. An H6 line had its `# ` prepended (no match to strip) and got bumped to H7 nonsense. Added an early-return for unsupported levels and a narrow strip that handles H4-H6 verbatim.
+- **M2 — link placeholder**: `[text](url)` placeholder said the literal word `url`. Clicking away left the user with a link to `url`, which the Cmd+click handler obligingly tried to open. Changed to `https://` — at worst the user has a broken URL, but the intent is clear.
+- **Two new buttons**: Task list (Cmd+Shift+L), Today's date (Cmd+;).
+- **Five new shortcuts**: strike (Cmd+Shift+X), quote (Cmd+Shift+9), heading cycle (Cmd+Alt+0), task (Cmd+Shift+L), date (Cmd+;).
+
+Three skeptic-found bugs during the adversarial pass:
+
+- **H6 regression**: the strip regex didn't match H4-H6 but the prepend ALSO didn't guard. Caught before commit.
+- **Empty-line task on a blank doc**: hitting Cmd+Shift+L with the cursor on an empty line at the top of a blank document did nothing. The transform skipped blank lines globally. Added an `addOnBlanks` branch + a `sawNonBlank` accumulator so the first blank still gets the marker.
+- **Cmd+; vs Cmd+Shift+;**: I had Cmd+Shift+; on date. Google Sheets convention is Cmd+; for date and Cmd+Shift+; for time. Swapped to match — if I ever add a "current time" command, the obvious shortcut is free.
+
+### Date chip + Confluence-style picker
+
+`date-chip.ts` is a ViewPlugin that scans the visible viewport for `\b\d{4}-\d{2}-\d{2}\b` (anchored on word boundaries to avoid matching `2026-06-25-01-23` partials), skips matches inside code spans via the syntax tree, and emits a `Decoration.replace` with a `WidgetType` rendering a clickable pill. The pill shows a short form when the date is in the current year (`Jun 25`) and a long form otherwise (`Jun 25, 2026`). Atomic range registered so the cursor jumps over the chip on arrow keys instead of falling into the hidden underlying offset.
+
+`DatePickerPopover.svelte` is a hand-rolled month grid — ~200 lines, no calendar lib. Keyboard nav: arrows move days, PgUp/Down moves months, Shift+PgUp/Down moves years, Enter commits, Esc closes. Outside-mousedown closes (mousedown not click — click loses to the chip's own mousedown if the picker just opened from a chip click). Position computation is Floating-UI-style: prefer bottom-left of the chip, flip to top if there isn't room, clamp horizontally to viewport with an 8px pad.
+
+**The routing-doc-changes lesson** — load-bearing for `/summary`, which has four MarkdownEditor instances. Initial design dispatched commits through a `window` event with a Set of active views registered on plugin construction. With four editors on one route, a date chip in field 2 firing a window event would route to whichever view's listener won the race. Symptoms: editing a date in "Plans" would replace text in "Key Accomplishments." Rewrote to pass the owning view down through the WidgetType constructor and dispatch directly with `view.dispatch(...)`. Window event + activeViews Set deleted.
+
+**Position-bake fix**: WidgetType subclasses default `eq()` to `true` for any other instance of the same type. The widget DOM was being reused across content shifts — a date chip that had been at offset 312 on first render kept its handlers' bound `from`/`to` when the underlying date moved to offset 327 after text was inserted above. Override `eq(other) { return other.from === this.from && other.to === this.to }`. DOM rebuilds on shift; handlers see correct offsets.
+
+**Strict cursor bounds**: original implementation hid the chip whenever the cursor was inside `[from, to]` of the date match. Made dates impossible to "see" right after typing them (cursor sat at `to`, blocked the chip from rendering). Loosened to `cursor > to || cursor < from` — chip renders the moment the typing cursor leaves the match.
+
+**Viewport-edge clamp**: opening the chip near the top of the `/capture` popup (which is a small window) clipped the popover above the screen. The position computation flipped to top but didn't clamp top to a min viewport-pad — fix was a single `Math.max(viewportPad, computedTop)`.
+
+### /summary, /journal toggle, layout chrome
+
+**/summary** got livePreview enabled on all four fields, all four field min-heights unified to 112px (the four `rows={3|4|5}` defaults from the textarea era were inconsistent enough to look sloppy), labels updated with Unicode horizontal ellipsis (`…`), placeholders cleared from `- ` to empty (the auto-bullet leaked into screenshots of empty fields).
+
+**/journal Preview/Source toggle**: segmented control, Cmd+Shift+S keyboard shortcut, `localStorage` persistence under `captainslog:journalViewMode`. Defaults to Preview. Editable in BOTH modes — Source is for power-user formatting, not view-only. The implementation uses Svelte's `{#key viewMode}` block to force a full remount of the editor on mode change, because CodeMirror bakes its extension list at construction and there's no clean way to swap a livePreview extension in/out at runtime. Source mode uses monospace + 14px; Preview uses the body font + 16px + the formatting toolbar.
+
+**`/journal` no longer auto-selects the current week on mount.** This was a real data-mutation bug: open `/journal`, type anywhere on the page (the editor caught focus on mount), and the current week's file got modified. Now the right pane shows an empty-state placeholder until the user explicitly clicks a sidebar entry. Selection is intentional; opening is read-only.
+
+**Layout chrome**: cat companion in the upper-left, clickable, opens a random YouTube cat search via `tauri-plugin-opener`. "Meow!" tooltip on hover. Hidden on `/journal` because the journal browser's left column has its own visual weight and the cat overlapped awkwardly. Help + Nerds Only popups moved from lower-right to lower-LEFT so the appearance of a scrollbar on smaller windows doesn't shove them around. Both pill-shaped, 11px font. Backdrop dismiss + Escape + close button. Focus restored to the trigger on close.
+
+Help body covers the three surfaces (Capture / Summary / Journal), what a note IS, keyboard shortcuts grouped by category, the menu-bar capture icon, Noot ("they're here from the RPG to help"), tips. Nerds Only covers Tauri / SvelteKit / Svelte 5 runes / CodeMirror 6 / Lezer + GFM / CommonMark storage / typography / the live-preview model / repo link.
+
+### List widgets
+
+The final visual upgrade of the day. Plain markdown bullets (`-`) and tasks (`- [ ]`) are now widgets:
+
+- **BulletWidget**: replaces the `-` ListMark of a BulletList item with a `•` (muted color, fixed-width). Numbered list ListMarks are LEFT ALONE — `1.` `2.` `3.` carry information that `•` would erase.
+- **TaskCheckboxWidget**: replaces the 3-char `[ ]` or `[x]` TaskMarker with a clickable 16px square. Click toggles via direct `view.dispatch` (same routing lesson — no window events).
+- **Strikethrough-on-checked**: a sibling `Decoration.mark` (`cm-md-task-done`) applies `text-decoration: line-through` + muted color to the body of a checked task. The inline-code chip's `display: inline-block` fix earned its keep here — `[x] don't \`code\` this` strikes the body but the chip keeps its identity.
+
+**Dynamic Tab cap**: indenting a list item with Tab used to be uncapped. CommonMark only treats an indented item as a sub-item of the previous list item if its content-offset is within `parent_content_offset + 3` (the 1-3 spaces "sub-item range"). Beyond that, the parser treats it as a sibling at a deeper indent, which Lezer renders correctly but produces weird wrapping. `maxListIndentAllowed(state, line)` walks backward from the current line to find the would-be parent list item's content offset and caps the new indent at `parent + 3`. Top-level lone items (no preceding list context) can't Tab at all — no parent to nest under.
+
+**Lazy-continuation fix v2**: discovered when smoke-testing the "press Enter twice to exit a list" behavior. Two edge cases:
+
+- After hitting Enter on `- foo`, the new line `- ` (just the marker) is auto-inserted. If the user then types nothing and hits Enter, CommonMark's lazy-continuation rule absorbs the trailing `- ` into the preceding paragraph instead of starting a fresh BulletList. Same problem when the line is fully blank.
+- Worse, if the line ABOVE the new `- ` is a non-blank paragraph of a different family (e.g. text directly after a heading), Lezer parses the trailing `- ` as a **Setext heading underline** — silently re-classifying the paragraph above as an H2 with no marker visible to the user.
+
+Fix in `applyListMarkerToCurrentLine`: when the line above is non-blank and a different list family from what we're inserting, prepend a `\n` before the marker so Lezer sees a blank-line separator and parses a fresh BulletList. Verified empirically by parsing each case through `@lezer/markdown` + GFM with a small script in the scratchpad.
+
+### Architecture documentation
+
+Wrote `ARCHITECTURE.md` (~4000 words). Covers: overview, the three surfaces (Capture / Summary / Journal), the storage model (CommonMark on disk, `.metadata/` sidecars), the live-preview architecture (ViewPlugins, decoration patterns, atomic ranges, RangeSetBuilder ordering), the toolbar + commands (single source of truth for wrap/unwrap logic), the routing-doc-changes pattern (the four-editor `/summary` lesson made explicit so I don't backslide), and known limitations.
+
+### File audit + cleanup
+
+Audited 20 existing weekly files in parallel — agent fan-out, one shell per file. 3 clean, 16 with en-dash drift in `# Week of` titles (the email-subject en-dash fix from yesterday backflowed into the file titles in a way I didn't expect; bulk-fixed to hyphens), 1 broken W26 test/scratch file deleted. Also generated 8 synthetic test files for 2024 + 2025 (4 each, varied realistic content) to exercise the multi-year sidebar — verified, then deleted.
+
+### Key lessons / things to remember
+
+- **RangeSetBuilder requires inputs sorted by `Decoration.startSide`, not by a custom `spec` field.** The startSide constants are `replace = 499_999_999 < mark = 500_000_000`, and line decorations sit at `-200_000_000`. Hand-rolled rank fields will fight the builder silently — when builder ordering is wrong it throws upstream and the entire decoration set is dropped, producing a "decorations randomly vanish" symptom that looks nothing like a sort error. If decorations disappear at specific cursor positions, suspect this first.
+- **CommonMark lazy-continuation absorbs an empty `- ` line that follows a non-blank line of a different family.** When auto-continuing a list, the inserter must prepend `\n` if the line above is non-blank and from a different list family. Otherwise the marker disappears into the preceding paragraph.
+- **Setext-heading underline silent re-classification.** A paragraph followed by `- ` becomes an H2 (`-` is a Setext underline). This is upstream of the lazy-continuation fix: even when the inserter does the right thing, a user manually typing `- ` directly under a paragraph will silently bump the paragraph to H2. The blank-line separator fixes both.
+- **Routing doc changes: direct `view.dispatch` on the owning MarkdownEditor, not window events + an activeViews Set.** With multiple editors on one route (`/summary`'s four fields), window events misroute under load. Pass the view down through WidgetType constructors and dispatch on it directly.
+- **`WidgetType.eq()` must include the underlying offsets** (`from`/`to` or whatever the widget's handlers close over). Default `eq() => true` means CodeMirror reuses the DOM across text shifts, baking stale offsets into handlers. Override `eq` to compare offsets and the DOM rebuilds correctly.
+- **Dynamic Tab cap for list indenting = `parent_content_offset + 3`** (the CommonMark sub-item range), NOT a flat indent number. Walk backward to find the parent list item's content offset; cap the new indent at that + 3. Top-level lone items can't Tab — there's no parent to nest under.
+- **`/journal` auto-selecting the current week on mount is a typing-data-leak.** Opening a route shouldn't mutate the current week's file just because the editor catches focus. The rule is: selection is explicit; opening is read-only. The empty-state placeholder is the right shape.
+- **Inline-code chip needs `display: inline-block`** so a parent strikethrough (e.g. a checked task) doesn't draw through the chip. Inline-block creates a new line-box; the strike line doesn't cross it.
+- **CodeMirror bakes its extension list at construction** — there's no clean runtime swap for livePreview-on / livePreview-off. The Svelte `{#key viewMode}` block forcing a remount on Preview/Source toggle is the right shape, not a hack.
+- **Cmd+; = date, Cmd+Shift+; = time** (Google Sheets convention). When I add a time command, the shortcut is already reserved by convention; don't poach it for something else.
+
+### Tracked follow-ups
+
+Not blockers — captured here so they don't get lost:
+
+- Cursor preservation across `/journal` Preview/Source toggle. The `{#key viewMode}` remount resets the cursor to 0. Need to capture `selection.main.head` before remount and restore after.
+- Cross-route stale preview between `/summary` and `/journal` on the same week. Pre-existing race from the file-IO layer; surfaces now because both surfaces render the same week. Probably wants a shared in-memory cache keyed by year-week.
+- Cmd+Home / Cmd+End / Cmd+F land the cursor on a fence line, then arrow-key cursor-skip filter assumes a 1-line delta from the previous position. The current `lineDelta > 1` guard mitigates but doesn't fully solve.
+- IME composition on a body-line-start backspace — the empty-fence-delete branch fires mid-composition and eats the composition state.
+- Multi-cursor + most widget commands bail rather than handle each range. Acceptable for now; full multi-cursor support is its own arc.
+- Setext headings not detected by the active-state walker. Atypical in practice (almost everyone uses ATX `#`), but the toolbar's heading button won't light up on a Setext H1/H2.
+
+### Commits today
+
+None yet. The whole arc is in the working tree pending a cold-read pass tomorrow morning before staging. Will likely commit as 5-7 logically grouped commits rather than one mega-commit: live-preview engine, toolbar, date chip, journal toggle, list widgets, layout chrome, architecture doc.
+
+### Test totals at end of day
+
+- Backend: **112** (unchanged — today was almost entirely frontend).
+- Frontend: `svelte-check` clean (181 files, 0 errors, 0 warnings). Four new files (`date-chip.ts`, `DatePickerPopover.svelte`, the list widget module, the layout-chrome popups) accounting for the +4.
+
+### Tomorrow
+
+Cold-read the diff. Stage and commit in logical chunks. Then look at the tracked follow-ups list and pick off the cursor-preservation and cross-route-stale-preview items — both are small fixes that have outsized UX impact. After that, the editor arc is functionally done and Phase 2.5 closes; next phase is the onboarding revisit that got deferred when 2.5 expanded.
+
+---
+
+## 2026-06-25 (evening) — Phase 2.5b: the two tracked follow-ups, with three adversarial rounds
+
+Picked up the two end-of-day follow-ups. What I thought would be ~60 minutes of polish turned into ~3 hours because each adversarial verification pass surfaced a real bug I had missed. The patches landed clean; the journey is the lesson.
+
+### Cursor preservation across Preview/Source toggle
+
+Straightforward. CM6's `Compartment` is purpose-built for prop-driven extension swaps. Wrapped the live-preview extension in `livePreviewCompartment.of(...)` inside `MarkdownEditor.svelte`, added a `$effect` that watches the `livePreview` prop and dispatches `view.dispatch({effects: livePreviewCompartment.reconfigure(...)})` on change. Removed the `{#key viewMode}` wrapper in `/journal/+page.svelte` so the editor no longer remounts on toggle.
+
+Result: cursor, selection, scroll position, AND undo history all survive Cmd+Shift+S now.
+
+The Compartment is declared INSIDE the component (per-instance), not at module scope. On `/summary` with four MarkdownEditor instances, each gets its own compartment; reconfigure() dispatches are per-view. No cross-instance contention.
+
+### Cross-route file invalidation — the part that grew tentacles
+
+Setup is straightforward: when a writer (`/summary`'s `update_weekly_summary`, `/journal`'s `write_week`, `/capture`'s `create_note`) writes the file, Rust emits a `weekly-file-changed` event with `{year, week}`. The other routes listen and reconcile by re-reading from disk.
+
+UX shape:
+- Disk matches in-memory baseline → silent no-op.
+- Disk differs, no unsaved edits → silent reload.
+- Disk differs, dirty form → show "modified externally" banner with Reload + dismiss.
+
+Wrote it, ran type-check, ran cargo check — both green. Felt done. Decided to spend tokens on adversarial verification before declaring victory. **Glad I did.**
+
+### Round 1 — own-save race (real bug, found by skeptic)
+
+Six parallel skeptics, each given a different angle. Three of them independently flagged the same issue: **Tauri's invoke-response and event-emit travel separate IPC paths. There's no contract that the event arrives after the invoke promise resolves.** My initial design gated the listener with `if (saveStatus === 'saving') return;` — but by the time the listener callback runs, `saveStatus` may have flipped to `'saved'` already.
+
+Worse: if the user types during the save's await (perfectly normal — they don't pause), the post-baseline `initialContent` no longer matches their freshly-typed `content`. The listener compares `disk` (= committed bytes from our own save) to `content` (= user's freshly-typed bytes) → diff → `isDirty` → **false-positive "modified externally" banner pointing at the user's own save**. And the banner has a Reload button that would silently destroy the typed-during-save characters.
+
+Fix: track `pendingCommit` (the bytes our in-flight save is writing) set BEFORE invoke and cleared in `finally`. The listener no-ops when disk matches EITHER the post-baseline state OR `pendingCommit`. Robust to either ordering.
+
+### Round 2 — TWO more real bugs the patch revealed
+
+Re-ran verification on the patched code. Found two more bugs:
+
+**Bug A — pendingCommit is a single slot.** If invoke takes longer than the autosave debounce (1.5s), a second saveNow can fire while the first is in flight, overwriting `pendingCommit` with the new bytes. The first save's event arrives, listener checks disk against `pendingCommit` (which now holds the SECOND save's bytes), mismatch, false-positive banner returns.
+
+Trigger path: anything that makes invoke slow (large weekly file, OS fsync pressure, IPC contention). The autosave `$effect` was unconditionally setting `saveStatus = 'dirty'` on every keystroke — even during a save — so the gate `if (saveStatus === 'saving')` in saveNow had already been cleared when the second timer fired.
+
+**Bug B — Rust normalizes on write.** The skeptic read the actual Rust source: `render_weekly_summary` calls `trim_body` (trim_end) on each field; `extract_subsection` calls `.trim()` (both ends) on read; labels go through `.trim().trim_start_matches('#')` + empty-filter. So the bytes on disk are POST-normalization. My frontend was storing PRE-normalization values in `snapshot` and `pendingCommit`.
+
+Consequence: every `/summary` save with a trailing newline or a `#release`-style label would either (a) show a false-positive banner OR (b) silently rewrite the field with the normalized version on every own-save echo — CodeMirror would reset cursor/selection mid-typing. Critical bug.
+
+Patches:
+- For Bug A: typing `$effect` no longer downgrades `saveStatus` from `'saving'` to `'dirty'`. The saveNow gate now reschedules the autoSaveTimer instead of dropping the call. Together this prevents concurrent saveNow calls.
+- For Bug B: added a `normalizedSig` helper in `/summary` that mirrors Rust's normalization rules. Applied at compare-time only (never to form fields or snapshot directly), so user's pre-normalize input survives in the editor between saves, but the disk-compare correctly treats normalization-only deltas as "no real change."
+
+### Round 3 — two MORE real bugs
+
+Re-verified. Found:
+
+**Bug C — /summary's `get_summary_hash` await is AFTER `saveStatus = 'saved'`.** During the hash-refresh await, `saveStatus` is 'saved' but `pendingCommit` is still set. A rescheduled saveNow firing in this window passes the gate, overwrites `pendingCommit`, starts a concurrent invoke. Then the FIRST save's `finally` runs and clobbers the SECOND save's `pendingCommit`. Race re-opens.
+
+Fix: move the hash refresh BEFORE `saveStatus = 'saved'`, so the gate stays armed for the full critical section. The `lastSavedAt`/`saveStatus` flip happens only after every await in the save lifecycle has completed.
+
+**Bug D — /summary's `onDestroy` doesn't clear `autoSaveTimer`.** The reschedule arm can leave a dangling timer scheduled for ~1.5s out. The Done button calls `goto('/')` and is only gated on `saveStatus === 'saving'`, so the user can navigate away with a pending timer. The timer fires on the destroyed component and tries to save stale state.
+
+Fix: mirror /journal's `onDestroy` and clear the timer. Trivial.
+
+### Key lessons
+
+**Tauri IPC ordering is not contractual.** Don't rely on "the invoke resolves before the event arrives" for correctness. Use payload comparison (pendingCommit) that's robust to either ordering.
+
+**The autosave `$effect` is load-bearing for the save state machine.** Mutating `saveStatus` from the typing path can silently break gates elsewhere. The fix was to read `saveStatus` and only downgrade when it's a sensible transition (not from `'saving'`).
+
+**Skeptics > self-review.** Three independent rounds found four real bugs across the same code I had just verified-with-type-checks-clean. The reading-against-actual-source angle (skeptic #2 reading notes.rs to find the normalization rules) is something I would have skipped in a self-review.
+
+**The reschedule-on-gate-trip pattern coalesces typing-through-save cleanly.** Instead of dropping the second save (data loss) or running it concurrently (race), defer it until the in-flight save settles. Cheap, correct, doesn't require Set-of-pending or per-save tokens.
+
+### Files touched
+
+- `app/src/lib/MarkdownEditor.svelte` — Compartment, $effect for prop-driven extension swap.
+- `app/src/routes/journal/+page.svelte` — removed `{#key viewMode}`; added listener + reconcileWithDisk + pendingCommit + banner; autosave $effect guarded; saveNow reschedules on in-flight; onDestroy already clears autoSaveTimer.
+- `app/src/routes/summary/+page.svelte` — listener + reconcileWithDisk + pendingCommit + normalizedSig + banner; autosave $effect guarded; saveNow reschedules on in-flight; hash refresh held inside 'saving'; onDestroy clears autoSaveTimer.
+- `app/src-tauri/src/commands.rs` — added `WeeklyFileChanged` struct, `emit_weekly_file_changed` helper, three call sites (`create_note`, `write_week`, `update_weekly_summary`) take AppHandle and emit after successful write.
+
+### Test totals at end of evening
+
+- Backend: **112** (unchanged — Rust changes were small additions that don't need new tests; existing test suite covers the file write paths).
+- Frontend: `svelte-check` clean (182 files, 0 errors, 0 warnings).
+- Adversarial workflow rounds run: 3.
+- Real bugs found and fixed: 5 (round 1: own-save race; round 2: pendingCommit single-slot, pre-normalize values; round 3: post-saved hash window, dangling autoSaveTimer).
+
+### Tomorrow
+
+This is the actual end of Phase 2.5. Cold-read the full editor + invalidation diff. Stage in logical chunks. Run the smoke tests Chris has been doing in-app — type during a save, toggle modes mid-edit, /capture-while-/journal-open. Commit. Then move to Phase 2.7.
+
