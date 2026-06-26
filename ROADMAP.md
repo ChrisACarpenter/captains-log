@@ -30,7 +30,7 @@ Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to 
 
 **Success criterion met:** captured multiple notes across an afternoon; markdown files contain frontmatter, Weekly Summary scaffold, Weekly Notes section, timestamped notes with labels and inline `#hashtags`.
 
-## Phase 2 — Polish: "Can I actually use this daily?"
+## Phase 2 — Polish: "Can I actually use this daily?" ✅
 
 ### Done
 
@@ -162,10 +162,9 @@ The two known follow-ups from 2.5's hand-off:
 - [x] **Post-baseline hash refresh held inside `saveStatus = 'saving'`** — /summary's `get_summary_hash` await happens before the status flips to `'saved'`, so the gate stays armed for the full critical section. Earlier shape let a rescheduled saveNow slip through during the hash refresh and clobber `pendingCommit`.
 - [x] **/summary onDestroy clears autoSaveTimer** — mirrors /journal's pattern, so navigating away mid-debounce (e.g. clicking Done while dirty) can't fire saveNow on a destroyed component.
 
-### Known limitations (deferred)
+### Known limitations
 
-- [ ] **/journal reschedule loop is bounded only by save settling** — if invoke('write_week') gets genuinely stuck, the autoSaveTimer reschedule loop spins at 1.5s intervals. Cheap but not zero. Acceptable for local-SSD writes (< 100ms typical).
-- [ ] **External-writer-during-own-save race** — if an external writer modifies the file while our save's invoke is in flight, the listener may either silently adopt the external content (clean form) or be overwritten by our save completing (we wrote last). This is the inherent two-writer race; the event mechanism only enables refresh, not coordination.
+Moved to the global [Deferred / TBD](#deferred--tbd) list below.
 
 ## Phase 2.6 — Send weekly summary to manager ✅ (shipped 2026-06-24)
 
@@ -185,9 +184,9 @@ One-click handoff to the OS-default mail handler. No SMTP credentials, no OAuth 
 - [x] **`.eml` temp janitor** — startup task prunes `$TEMP/captainslog/*.eml` files older than 24h.
 - [x] **Backend ⇄ frontend label parity** — `format_week_label` matches the frontend's `weekLabel` exactly (full month names + en-dash), so the modal and the email subject read the same string.
 
-## Phase 2.7 — Onboarding + Settings revisit (after Phase 2.5)
+## Phase 2.7 — Onboarding + Settings revisit
 
-Sequenced after Phase 2.5 so the editor refactor doesn't trip over onboarding state mid-flight. The first-run wizard captures the bare minimum today (name, journal location, reminder); after 2.6 the data model grows enough — and the Settings screen is long enough — that both deserve a polish pass.
+The first-run wizard captures the bare minimum today (name, journal location, reminder); after 2.6 the data model grew enough — and the Settings screen is long enough — that both deserve a polish pass.
 
 - [ ] **"Tell me about you" wizard step** — name, Bamboo title (with the word *Bamboo* linking to Prodigy's BambooHR site), Jira project keys (comma-separated, e.g. `MAGE`, multiple allowed).
 - [ ] **"Tell me about your manager" wizard step** — manager name + email. Both fields reuse the columns added in 2.6.
@@ -208,7 +207,7 @@ Sequenced after Phase 2.5 so the editor refactor doesn't trip over onboarding st
 - [ ] Store enriched metadata inline or in a `.metadata/links/` cache
 - [ ] Display enriched cards in the rendered view (status, title, last update)
 - [ ] Room to grow to other systems beyond the initial four
-- [ ] **Label library viewer** — browse + filter all labels in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). UX TBD; will need at minimum a filter input (substring + maybe tag-cloud-by-recency) and a way to drill from a label into the matching Notes/Summaries. Depends on Phase 3 search so labels can reuse the same result-list + week-jump plumbing.
+- [ ] **Label library viewer + bulk management** — browse + filter all labels in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). UX TBD; will need at minimum a filter input (substring + maybe tag-cloud-by-recency) and a way to drill from a label into the matching Notes/Summaries. Depends on Phase 3 search so labels can reuse the same result-list + week-jump plumbing. **Bulk rename/merge/delete** is a natural extension of the same screen — do both at once if it shapes up as one cohesive workflow.
 
 ## Phase 5 — Performance Review Module
 
@@ -237,16 +236,16 @@ The reason this app exists.
 
 ## Deferred / TBD
 
-- [ ] **Editor follow-ups from Phase 2.5** (tracked, not blockers):
-  - Cursor preservation across `/journal` Preview/Source toggle (currently resets to 0 on remount).
-  - Cross-route stale preview between `/summary` and `/journal` on the same week (pre-existing race).
+- [ ] **Editor edge cases from Phase 2.5** (tracked, not blockers):
   - Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by `lineDelta > 1` guard).
   - IME on body-line-start backspace edge case.
   - Multi-cursor + most widget commands bail rather than handle each range.
   - Setext headings not detected by active-state.
+- [ ] **Cross-route invalidation edge cases from Phase 2.5b**:
+  - `/journal` reschedule loop is bounded only by save settling — if `invoke('write_week')` gets genuinely stuck, the autoSaveTimer reschedule loop spins at 1.5s intervals. Cheap but not zero. Acceptable for local-SSD writes (< 100ms typical).
+  - External-writer-during-own-save race — if an external writer modifies the file while our save's invoke is in flight, the listener may either silently adopt the external content (clean form) or be overwritten by our save completing (we wrote last). Inherent two-writer race; the event mechanism only enables refresh, not coordination.
 - [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
-- [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. Address as we build screens in Phase 2.
-- [ ] **Bulk label management UI** — rename/merge/delete labels across all files. Phase 2 if it becomes a pain point; later if not.
+- [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. No specific phase — bolt on whenever a new screen forces the question.
 - [ ] **Plugin / extension API** — let other tools read/write Captain's Log data.
 - [ ] **iOS/Android companion app** — flagged but probably not worth doing soon.
 - [ ] **Multi-user / team features** — flagged but likely never.
