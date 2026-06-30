@@ -175,6 +175,39 @@ const fencedCodeLine = Decoration.line({ class: 'cm-md-fenced-line' });
 const blockquoteLine = Decoration.line({ class: 'cm-md-blockquote-line' });
 
 /**
+ * Hanging-indent line decoration for list items. Lezer-markdown emits a
+ * ListItem node whose range covers every visual line of one bullet, but
+ * CodeMirror's `EditorView.lineWrapping` extension wraps each editor line
+ * flush against `.cm-content`'s left padding — so a long bullet that
+ * wraps visually has rows 2+ at column 0, breaking alignment with where
+ * row 1's text begins (after the `- ` marker).
+ *
+ * We fix that with the classic CSS hang-indent: `padding-left` applies
+ * to every visual row INCLUDING soft-wrapped rows; the matching negative
+ * `text-indent` applies only to the first visual row, pulling the bullet
+ * back to column 0. The `--md-list-depth` custom property scales the
+ * padding per nesting level so nested bullets stay aligned under their
+ * parent's content.
+ *
+ * Cached by depth so a doc with hundreds of bullet lines doesn't allocate
+ * a fresh Decoration.line object for each one.
+ */
+const listLineDecoCache = new Map<number, Decoration>();
+function listItemLineDeco(depth: number): Decoration {
+  let d = listLineDecoCache.get(depth);
+  if (!d) {
+    d = Decoration.line({
+      attributes: {
+        class: 'cm-md-list-line',
+        style: `--md-list-depth: ${depth};`,
+      },
+    });
+    listLineDecoCache.set(depth, d);
+  }
+  return d;
+}
+
+/**
  * Inline marker tokens — hidden as-is. These are adjacent to the content
  * they wrap, with no trailing whitespace to swallow.
  *
@@ -288,6 +321,39 @@ class BulletWidget extends WidgetType {
     span.className = 'cm-md-bullet';
     span.textContent = '•';
     span.setAttribute('aria-hidden', 'true');
+    return span;
+  }
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+/**
+ * Numbered-list marker widget. Mirrors `BulletWidget`: replaces the
+ * source `1.` / `2.` / `12.` etc. with a `<span class="cm-md-list-num">`
+ * whose text content is the same marker. The replacement is functionally
+ * a no-op on rendered text, but it gives us full CSS control over the
+ * span (matching `.cm-md-bullet`) and bypasses CodeMirror's default
+ * highlight style, which colors `tags.processingInstruction` so dimly
+ * that the digits become unreadable on the dark theme. Without the
+ * widget swap, any class- or attribute-based color rule we ship gets
+ * out-cascaded by the highlight style's CSS.
+ *
+ * `eq()` compares the marker text so the widget DOM rebuilds when the
+ * digit changes (e.g. an item gets inserted earlier in the list and
+ * everything renumbers).
+ */
+class OrderedListMarkerWidget extends WidgetType {
+  constructor(public marker: string) {
+    super();
+  }
+  eq(other: WidgetType): boolean {
+    return other instanceof OrderedListMarkerWidget && other.marker === this.marker;
+  }
+  toDOM(): HTMLElement {
+    const span = document.createElement('span');
+    span.className = 'cm-md-list-num';
+    span.textContent = this.marker;
     return span;
   }
   ignoreEvent(): boolean {
@@ -506,6 +572,37 @@ function buildLivePreviewDecorations(view: EditorView): DecorationSet {
           return;
         }
 
+        // ListItem: emit a line decoration on every line in the item so
+        // wrapped lines hang-indent under the bullet's content. Depth is
+        // the count of ancestor BulletList/OrderedList nodes — the CSS
+        // multiplies it by the per-level gutter (currently 2ch, matching
+        // the bullet glyph + trailing space). Nested ListItems are also
+        // visited by `iterate` and emit their own deeper-depth decorations
+        // on inner lines; CodeMirror tolerates duplicate Decoration.line
+        // on the same line, and the deeper-depth decoration wins by way
+        // of inline-style precedence (visited after the parent).
+        //
+        // Bare `return` (NOT `return false`) — we want descent to continue
+        // so ListMark / TaskMarker / inline handlers still fire on the
+        // subtree.
+        if (node.name === 'ListItem') {
+          let depth = 0;
+          let p = node.node.parent;
+          while (p) {
+            if (p.name === 'BulletList' || p.name === 'OrderedList') depth++;
+            p = p.parent;
+          }
+          if (depth < 1) depth = 1;
+          const deco = listItemLineDeco(depth);
+          const startLine = doc.lineAt(node.from);
+          const endLine = doc.lineAt(node.to);
+          for (let i = startLine.number; i <= endLine.number; i++) {
+            const line = doc.line(i);
+            out.push({ from: line.from, to: line.from, deco });
+          }
+          return;
+        }
+
         // URL: hide when it's the destination of either:
         //   - `[text](url)`-style Link (parent name 'Link'), OR
         //   - `![alt](url)`-style Image (parent name 'Image')
@@ -527,19 +624,47 @@ function buildLivePreviewDecorations(view: EditorView): DecorationSet {
         }
 
         // ListMark on a BulletList line — replace the `-` (or `*`/`+`)
-        // with a `•` glyph widget. Skip OrderedList ListMarks (the
-        // digits like `1.` are meaningful and readable). The trailing
-        // space after the marker stays visible so the gap reads
-        // naturally as "• item". Walk parent chain: ListMark → ListItem
-        // → BulletList | OrderedList.
+        // with a `•` glyph widget. For OrderedList markers (digits +
+        // dot) — replace with a same-text widget so we get a custom
+        // span to style; the widget's text content matches the source
+        // so the visible marker doesn't change, but the wrapping span
+        // gets `.cm-md-list-num` for direct CSS control. Replacing the
+        // source (rather than wrapping it via Decoration.mark) is what
+        // gives us the cascade authority over the digits — the same
+        // pattern that makes the bullet widget work.
+        //
+        // Task list items (`- [ ] foo`): suppress the bullet entirely.
+        // The TaskMarker handler below replaces `[ ]` with a clickable
+        // checkbox, which IS the visual marker — keeping the `•` too
+        // produces a confusing double-marker. Detect by walking the
+        // ListItem's children for a Task node.
+        //
+        // Walk parent chain: ListMark → ListItem → BulletList | OrderedList.
         if (node.name === 'ListMark') {
           const listItem = node.node.parent;
           const list = listItem ? listItem.parent : null;
           if (list && list.name === 'BulletList') {
+            // For task list items (`- [ ] foo`), the checkbox below is
+            // the visual marker — but we still need to HIDE the source
+            // `-` so the user doesn't see "- ☐ foo". Decoration.replace
+            // with no widget hides the range without inserting anything.
+            // For ordinary bullets, swap the `-` for a `•` glyph widget.
+            const isTask = !!listItem && !!listItem.getChild('Task');
             out.push({
               from: node.from,
               to: node.to,
-              deco: Decoration.replace({ widget: new BulletWidget() }),
+              deco: isTask
+                ? Decoration.replace({})
+                : Decoration.replace({ widget: new BulletWidget() }),
+            });
+          } else if (list && list.name === 'OrderedList') {
+            const markerText = doc.sliceString(node.from, node.to);
+            out.push({
+              from: node.from,
+              to: node.to,
+              deco: Decoration.replace({
+                widget: new OrderedListMarkerWidget(markerText),
+              }),
             });
           }
           return;

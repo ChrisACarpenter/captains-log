@@ -1,13 +1,16 @@
 <!--
-  Help + Nerds Only popup buttons anchored in the lower-right corner.
+  Help + Nerds Only popup buttons anchored in the lower-LEFT corner.
 
   Two small chrome-light buttons; clicking either opens a modal-style
   popup with the relevant content. The HTML content lives in
   ./help-content.ts so the discovery workflow's drafts can be updated
   there without touching the rendering shell.
 
+  Placement is bottom-LEFT (was bottom-right in an earlier draft) so
+  the scrollbar appearing on long routes can't shift the buttons.
+
   ## Layering
-  - Fixed at bottom: 12px, right: 12px.
+  - Fixed at bottom: 12px, left: 12px.
   - z-index: 60 — below WeekStripe + Noot (z=100) but above page
     content (default 0) and above the cat (z=50).
   - Each popup uses a full-viewport backdrop (z=200) so it can't be
@@ -28,20 +31,19 @@
     on close.
 -->
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { HELP_HTML, NERDS_HTML } from './help-content';
+  import Modal from '$lib/Modal.svelte';
 
   type PopupKind = 'help' | 'nerds' | null;
 
   let openKind = $state<PopupKind>(null);
-  let popoverEl = $state<HTMLDivElement | undefined>(undefined);
   let lastTriggerBtn: HTMLButtonElement | null = null;
 
-  async function openPopup(kind: 'help' | 'nerds', triggerBtn: HTMLButtonElement): Promise<void> {
+  function openPopup(kind: 'help' | 'nerds', triggerBtn: HTMLButtonElement): void {
     lastTriggerBtn = triggerBtn;
     openKind = kind;
-    await tick();
-    popoverEl?.focus();
+    // Modal handles focus on open via its own queueMicrotask hop.
   }
 
   function closePopup(): void {
@@ -52,12 +54,8 @@
     lastTriggerBtn = null;
   }
 
-  function onKeyDown(e: KeyboardEvent): void {
-    if (openKind && e.key === 'Escape') {
-      e.preventDefault();
-      closePopup();
-    }
-  }
+  // Escape + click-backdrop both flow through Modal's onClose now —
+  // no manual window keydown listener needed.
 
   onDestroy(() => {
     lastTriggerBtn = null;
@@ -66,8 +64,6 @@
   const popupTitle = $derived(openKind === 'help' ? 'Help' : 'Nerds Only');
   const popupBody = $derived(openKind === 'help' ? HELP_HTML : NERDS_HTML);
 </script>
-
-<svelte:window onkeydown={onKeyDown} />
 
 <div class="help-buttons" role="group" aria-label="Help and About">
   <button
@@ -87,33 +83,11 @@
 </div>
 
 {#if openKind}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    class="help-backdrop"
-    onclick={closePopup}
-  ></div>
-  <div
-    class="help-popup"
-    bind:this={popoverEl}
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="help-popup-title"
-    tabindex="-1"
-  >
-    <header class="help-popup-header">
-      <h2 id="help-popup-title">{popupTitle}</h2>
-      <button
-        type="button"
-        class="help-popup-close"
-        onclick={closePopup}
-        aria-label="Close"
-      >×</button>
-    </header>
+  <Modal open={true} onClose={closePopup} title={popupTitle}>
     <div class="help-popup-body">
       {@html popupBody}
     </div>
-  </div>
+  </Modal>
 {/if}
 
 <style>
@@ -135,8 +109,10 @@
     appearance: none;
     background: var(--bg-elevated);
     border: 1px solid var(--border-structural);
-    border-radius: 999px;
-    color: var(--text-muted);
+    border-radius: var(--radius-pill);
+    /* text-muted on bg-elevated at 11px = 3.83:1, fails AA. text-secondary
+       clears 5.41:1 while still reading as quieter chrome than primary. */
+    color: var(--text-secondary);
     font: inherit;
     font-size: 11px;
     font-weight: 500;
@@ -165,67 +141,9 @@
     font-style: italic;
   }
 
-  .help-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 190;
-    background: rgba(0, 0, 0, 0.32);
-    backdrop-filter: blur(2px);
-  }
-
-  .help-popup {
-    position: fixed;
-    z-index: 200;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: min(520px, calc(100vw - 32px));
-    max-height: calc(100vh - 64px);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.28);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    outline: none;
-    font-family: var(--font-body);
-    color: var(--text-primary);
-  }
-
-  .help-popup-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--border-structural);
-    background: var(--bg-surface);
-  }
-  .help-popup-header h2 {
-    margin: 0;
-    font-size: 16px;
-    font-weight: 600;
-  }
-  .help-popup-close {
-    appearance: none;
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-sm);
-    color: var(--text-secondary);
-    font-size: 22px;
-    line-height: 1;
-    padding: 2px 8px;
-    cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
-  }
-  .help-popup-close:hover {
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-  }
-  .help-popup-close:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--focus-glow);
-  }
+  /* Backdrop + popup chrome + header bar + close button live in
+   * $lib/Modal.svelte now — this file only styles the body content
+   * (.help-popup-body below). */
 
   .help-popup-body {
     padding: var(--space-4);
@@ -264,7 +182,9 @@
     margin: 2px 0;
   }
   .help-popup-body :global(a) {
-    color: var(--accent-primary);
+    /* Contrast-safe variant — raw accent-primary on bg-elevated at 14px
+       only hits 3.77:1, failing AA for normal text. */
+    color: var(--accent-primary-text);
     text-decoration: underline;
   }
   .help-popup-body :global(a:hover) {

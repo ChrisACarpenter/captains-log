@@ -8,15 +8,16 @@ How journal data is laid out on disk.
 <user-chosen-root>/                       # Default: ~/Documents/CaptainsLog/
 ├── .metadata/
 │   ├── labels.json                       # Label index (see label-system.md)
-│   └── settings.json                     # App settings (see first-run-setup.md)
+│   ├── settings.json                     # Journal-level settings (see data-format.md)
+│   ├── sent-log.json                     # Per-week send-to-manager history (Phase 2.6)
+│   └── capture-draft.json                # In-flight quick-capture draft (Phase 2 auto-save)
 ├── 2026/
 │   ├── 2026-W01.md
 │   ├── 2026-W02.md
 │   ├── ...
 │   └── 2026-W52.md
-├── 2027/
-│   └── ...
-└── README.md                             # Auto-generated, explains the folder
+└── 2027/
+    └── ...
 ```
 
 ## Conventions
@@ -24,8 +25,7 @@ How journal data is laid out on disk.
 - **Root location:** user-chosen during first-run setup. Default suggestion: `~/Documents/CaptainsLog/`.
 - **Year folders:** `YYYY/` (4 digits).
 - **Weekly files:** `YYYY-Www.md` (ISO 8601 week number).
-- **Metadata folder:** `.metadata/` (dotfile = hidden in Finder, signals "internal").
-- **README at root:** auto-generated on first save. Explains the folder for any human or AI that finds it later.
+- **Metadata folder:** `.metadata/` (dotfile = hidden in Finder, signals "internal" / "app-managed").
 
 ## Why a dot-metadata folder?
 

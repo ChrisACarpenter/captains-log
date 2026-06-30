@@ -4,10 +4,11 @@ How Notes, Weekly Summaries, and metadata are structured on disk.
 
 ## File location
 
-- Journal data root: user-configurable, default `~/Documents/CaptainsLog/`
-- Weekly files: `journals/YYYY/YYYY-Www.md` (e.g. `journals/2026/2026-W25.md`)
-- Label index: `journals/.metadata/labels.json`
-- Settings: `journals/.metadata/settings.json`
+- Journal data root: user-configurable, default `~/Documents/CaptainsLog/`. Subsequent paths in this doc are relative to that root.
+- Weekly files: `<root>/YYYY/YYYY-Www.md` (e.g. `~/Documents/CaptainsLog/2026/2026-W25.md`)
+- Label index: `<root>/.metadata/labels.json`
+- Journal-level settings: `<root>/.metadata/settings.json` (manager, mail, reminder, etc.)
+- App-level settings: `~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` (theme, journal root pointer, last-known UI state)
 
 Week numbers use ISO 8601 (weeks start Monday; week 1 contains the year's first Thursday). This matches what most calendar apps and `date +%V` report.
 
@@ -104,7 +105,7 @@ Free-form body text. Inline `#labels` here also get parsed.
 
 ## Label index
 
-`journals/.metadata/labels.json`:
+`<root>/.metadata/labels.json`:
 
 ```json
 {
@@ -113,45 +114,75 @@ Free-form body text. Inline `#labels` here also get parsed.
     {
       "name": "release",
       "count": 47,
-      "first_used": "2026-01-12",
-      "last_used": "2026-06-18"
+      "firstUsed": "2026-01-12",
+      "lastUsed": "2026-06-18",
+      "color": null
     },
     {
       "name": "journal-app",
       "count": 3,
-      "first_used": "2026-06-17",
-      "last_used": "2026-06-18"
+      "firstUsed": "2026-06-17",
+      "lastUsed": "2026-06-18",
+      "color": "#ff5c08"
     }
   ]
 }
 ```
 
-Sorted by `last_used` desc, then `count` desc (recent + frequent surfaces first in autocomplete). See [label-system.md](label-system.md) for full update rules.
+JSON keys are camelCase (the Rust struct uses `#[serde(rename_all = "camelCase")]`). Snake-case keys from older files are accepted as a back-compat alias on read.
 
-## Settings
+The optional `color` field (Phase 2.8b) is an explicit per-label hex override; absent or `null` means the chip color is derived at render time from the label name + active theme via `generateLabelColor()`. The field is skipped on serialize when absent to keep older files clean.
 
-`journals/.metadata/settings.json`:
+Sorted by `lastUsed` desc, then `count` desc (recent + frequent surfaces first in autocomplete). See [label-system.md](label-system.md) for full update rules.
+
+## Journal-level settings
+
+`<root>/.metadata/settings.json` — per-journal state. Schema evolves; every field uses `#[serde(default)]` on the Rust side, so older files load cleanly when new fields are added.
 
 ```json
 {
   "version": 1,
-  "user": {
-    "name": "Chris Carpenter"
-  },
-  "storage": {
-    "backend": "local",
-    "path": "/Users/chris.carpenter/Documents/CaptainsLog"
-  },
+  "userName": "Chris Carpenter",
+  "userEmail": "chris.carpenter@prodigygame.com",
+  "bambooTitle": "QA Analyst",
+  "jiraProjectKeys": ["MAGE", "LIVE"],
+  "managerName": "Alex",
+  "managerEmail": "alex@prodigygame.com",
   "reminder": {
     "enabled": true,
-    "day_of_week": 4,
+    "daysOfWeek": [4],
     "hour": 16,
     "minute": 0
-  }
+  },
+  "mailSendMode": "Gmail",
+  "mailBodyFormat": "CleanText",
+  "mailBodyDelivery": "Prefilled",
+  "mailNativeHtml": false,
+  "mailOutlookFlavor": "Business",
+  "colorfulLabels": false
 }
 ```
 
-`day_of_week`: 0 = Monday … 6 = Sunday (ISO convention).
+Field notes:
+
+- `daysOfWeek`: array of weekday indices (0 = Monday … 6 = Sunday, ISO convention). Phase 2.7 widened this from a single `dayOfWeek` u8 to a Vec; a serde back-compat shim accepts the legacy single-value form.
+- `mailSendMode`: `"Gmail"` (default) | `"NativeMail"` | `"Outlook"` — the Send-to-manager dispatch path.
+- `mailBodyFormat`: `"CleanText"` | `"MarkdownSource"` — controls plaintext flavor (ignored when `mailNativeHtml` is true and the mode is NativeMail).
+- `mailBodyDelivery`: `"Prefilled"` (URL/AppleScript carries the body) | `"ClipboardPaste"` (compose opens empty, rich HTML written to clipboard for Cmd+V).
+- `mailNativeHtml`: Native Mac Mail only — emits a multipart `.eml` with styled HTML.
+- `mailOutlookFlavor`: `"Business"` (outlook.office.com) | `"Personal"` (outlook.live.com).
+- `colorfulLabels`: Phase 2.8b toggle — when true, chips render with per-label generated/persisted color.
+
+## App-level settings
+
+`~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` — settings that aren't tied to a specific journal (theme, journal root pointer, window state).
+
+Key fields:
+
+- `theme`: `"Light"` | `"Dark"` | `"Custom"` (default Dark)
+- `customTheme`: when `theme` is Custom, the 12 user-edited primaries that derive the full token set (see Phase 2.8 in ROADMAP.md). Survives a Dark/Light flip so the user can come back to Custom from the tray-menu escape hatch.
+- `journalRoot`: absolute path to the active journal directory.
+- `firstRunComplete`: bool — gates the onboarding wizard.
 
 ## Markdown flavor
 

@@ -1,14 +1,35 @@
-//! Weekly reminder scheduling.
+//! Reminder scheduling.
 //!
-//! When journal settings say `reminder.enabled = true`, [`restart_reminder_task`]
+//! When journal settings say `reminder.enabled = true` AND at least one
+//! day is selected in `reminder.days_of_week`, [`restart_reminder_task`]
 //! starts a long-running async task that:
-//!   1. Computes the next occurrence of `(day_of_week, hour, minute)` in local time
-//!   2. Sleeps until then
+//!   1. Computes the next occurrence of `(any day in days_of_week, hour, minute)`
+//!      in local time — the soonest match across all selected days
+//!   2. Sleeps in short chunks (≤ 5 min each), re-reading the wall clock
+//!      between chunks (see "Chunked sleep design" below)
 //!   3. Fires a notification — on macOS via `UNUserNotificationCenter` (action
 //!      buttons + persistent until interacted with); on other platforms via
 //!      `tauri-plugin-notification` as a fallback
 //!   4. Sleeps a minute (so we don't immediately fire again within the same wall-clock minute)
 //!   5. Loops forever (until the app shuts down)
+//!
+//! ## Chunked sleep design
+//!
+//! `tokio::time::sleep` is backed by a monotonic clock (`Instant`) which on
+//! macOS PAUSES while the system is asleep. A naive `sleep(target - now)`
+//! scheduled for Friday 6pm that gets slept-through over the weekend wakes
+//! at "Friday 6pm + actual awake time elapsed" — i.e. Monday morning — and
+//! fires the reminder for the wrong slot, hours or days late.
+//!
+//! Mitigation: sleep at most [`MAX_SLEEP_CHUNK`] at a time, then re-check
+//! `Local::now()` against the target. On wake from a long system sleep the
+//! next chunk completes near-instantly, the wall-clock check finds itself
+//! past the target, and the reminder fires within ~5 min worst case.
+//!
+//! When the actual fire time is more than [`LATE_FIRE_THRESHOLD`] past the
+//! target (typical sleep-through case) we append a "you missed the
+//! {weekday} slot" suffix so the user understands why the notification is
+//! arriving outside its scheduled window.
 //!
 //! ## Limitations (Phase 3 polish)
 //!
@@ -21,13 +42,25 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Datelike, Duration, Local, Timelike, Weekday};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Weekday};
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::settings::ReminderSettings;
+
+/// Max single `tokio::time::sleep` duration in the reminder loop. Bounds the
+/// worst-case lag between wake-from-system-sleep and the wall-clock recheck
+/// that triggers the actual fire. See "Chunked sleep design" in the module doc.
+const MAX_SLEEP_CHUNK: StdDuration = StdDuration::from_secs(5 * 60);
+
+/// Gap (actual fire time − target time) above which we treat the fire as
+/// "late" and append a missed-slot suffix to the notification body. Stored
+/// in seconds so the const is usable (`chrono::Duration` constructors aren't
+/// `const fn`); convert via `Duration::seconds(LATE_FIRE_THRESHOLD_SECS)` at
+/// use sites.
+const LATE_FIRE_THRESHOLD_SECS: i64 = 30 * 60;
 
 /// PNG used as the notification icon (Prodigy RPG `ui-raster-icons/scroll.png`).
 /// Embedded into the binary so we don't depend on bundle-resource path resolution
@@ -88,9 +121,59 @@ fn day_of_week_to_weekday(day_of_week: u8) -> Weekday {
     }
 }
 
-/// Compute the next time the reminder should fire, strictly in the future.
-/// Pure function so we can unit-test the time math without spawning tasks.
-pub fn next_reminder_time_after(
+/// Resolve a naive (year/month/day/hour/minute) into a concrete
+/// `DateTime<Local>`. Handles the two DST-edge cases that occur once a
+/// year for jurisdictions that observe daylight saving:
+///
+/// - **Spring-forward (gap)**: the local time doesn't exist (e.g. US
+///   `02:30` on the second Sunday of March). chrono returns
+///   `LocalResult::None`. We return `None` here too — the caller's
+///   responsibility is to bump by a calendar week, preserving the
+///   user's chosen weekday. (Earlier shape advanced one day, which
+///   meant a "Sunday only" reminder could fire on Monday — silently
+///   violating the user's day-of-week selection.)
+/// - **Fall-back (ambiguous)**: the local time occurs twice (e.g. US
+///   `01:30` on the first Sunday of November). chrono returns
+///   `LocalResult::Ambiguous(earliest, latest)`. We pick the EARLIEST
+///   (the pre-fall-back instant). Matches what most cron-like systems
+///   do and is the conservative choice — fires sooner rather than
+///   later, and stays on the user's chosen weekday.
+///
+/// Returns `None` for both the gap case and the un-constructable date
+/// case (e.g. February 31, which can't happen from real-date
+/// arithmetic but is defensive).
+fn resolve_local_datetime(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u8,
+    minute: u8,
+) -> Option<DateTime<Local>> {
+    let date = NaiveDate::from_ymd_opt(year, month, day)?;
+    let naive = date.and_hms_opt(hour as u32, minute as u32, 0)?;
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => Some(dt),
+        chrono::LocalResult::Ambiguous(earliest, _) => Some(earliest),
+        chrono::LocalResult::None => None,
+    }
+}
+
+/// Compute the next time the reminder should fire for a SINGLE weekday,
+/// strictly in the future. Helper for the multi-day variant.
+///
+/// Uses naive-date arithmetic + per-candidate local resolution rather
+/// than `Duration::days(N)` arithmetic on a `DateTime<Local>`. The
+/// older shape stayed in DateTime<Local> the whole way and silently
+/// drifted by 1 hour across DST transitions (Duration::days is a fixed
+/// 86,400s; calendar days vary across spring-forward and fall-back).
+///
+/// On a DST gap (target hour:minute doesn't exist on the target date),
+/// we BUMP BY 7 DAYS rather than advancing to the next calendar day —
+/// the user picked a specific weekday and we must respect that. DST
+/// gaps recur at most once a year per jurisdiction, so +7 days from
+/// any gap day always lands on a non-gap day. We cap the loop at 53
+/// iterations as a hard backstop against an unbounded climb.
+fn next_reminder_time_for_day(
     now: DateTime<Local>,
     day_of_week: u8,
     hour: u8,
@@ -101,30 +184,99 @@ pub fn next_reminder_time_after(
     // 0..=6 days from `now` to the target weekday (0 means "today").
     let now_dow = now.weekday().num_days_from_monday() as i64;
     let target_dow = target_weekday.num_days_from_monday() as i64;
-    let mut days_until = (target_dow - now_dow + 7) % 7;
+    let days_until = (target_dow - now_dow + 7) % 7;
 
-    let mut candidate = now
-        .with_hour(hour as u32)
-        .and_then(|d| d.with_minute(minute as u32))
-        .and_then(|d| d.with_second(0))
-        .and_then(|d| d.with_nanosecond(0))
-        .expect("hour/minute should be in range 0..24, 0..60")
-        + Duration::days(days_until);
+    let now_date = now.date_naive();
+    let mut target_date = now_date + Duration::days(days_until);
 
-    // If the candidate is in the past (today's slot already passed),
-    // bump by a week so we're strictly in the future.
-    if candidate <= now {
-        candidate += Duration::days(7);
-        days_until += 7;
-        let _ = days_until; // silence unused warning
+    // Walk forward by 7-day strides looking for the first occurrence
+    // that (a) resolves cleanly in local time and (b) is strictly in
+    // the future. The bound of 53 covers one year + 1 week of buffer
+    // — DST gaps happen at most once per year, so we should never
+    // need more than 2 iterations in practice.
+    for _ in 0..53 {
+        if let Some(candidate) = resolve_local_datetime(
+            target_date.year(),
+            target_date.month(),
+            target_date.day(),
+            hour,
+            minute,
+        ) {
+            if candidate > now {
+                return candidate;
+            }
+        }
+        target_date += Duration::days(7);
     }
 
-    candidate
+    // Unreachable for any realistic input — keeps the return type free
+    // of Option for the common path. If a malformed input ever reached
+    // here, panicking is the right loud-failure mode.
+    panic!(
+        "no valid reminder fire time within 53 weeks for day={day_of_week} hour={hour} minute={minute}"
+    );
 }
 
-/// Wrapper for convenient calling from the scheduler.
-pub fn next_reminder_time(day_of_week: u8, hour: u8, minute: u8) -> DateTime<Local> {
-    next_reminder_time_after(Local::now(), day_of_week, hour, minute)
+/// Compute the soonest reminder fire time across all selected days,
+/// strictly in the future. Returns `None` when `days_of_week` is empty
+/// (reminder is enabled-but-has-no-days, which is a configured no-op).
+///
+/// Pure function so we can unit-test the time math without spawning
+/// tasks. The set of days is treated as an unordered collection — order
+/// + duplicates don't affect the result.
+pub fn next_reminder_time_after(
+    now: DateTime<Local>,
+    days_of_week: &[u8],
+    hour: u8,
+    minute: u8,
+) -> Option<DateTime<Local>> {
+    days_of_week
+        .iter()
+        .map(|&d| next_reminder_time_for_day(now, d, hour, minute))
+        .min()
+}
+
+/// Convenience wrapper for the scheduler.
+pub fn next_reminder_time(
+    days_of_week: &[u8],
+    hour: u8,
+    minute: u8,
+) -> Option<DateTime<Local>> {
+    next_reminder_time_after(Local::now(), days_of_week, hour, minute)
+}
+
+/// Human weekday name for the missed-slot suffix ("Monday" not "Mon").
+fn weekday_long_name(weekday: Weekday) -> &'static str {
+    match weekday {
+        Weekday::Mon => "Monday",
+        Weekday::Tue => "Tuesday",
+        Weekday::Wed => "Wednesday",
+        Weekday::Thu => "Thursday",
+        Weekday::Fri => "Friday",
+        Weekday::Sat => "Saturday",
+        Weekday::Sun => "Sunday",
+    }
+}
+
+/// Build the notification body, appending a missed-slot suffix when the
+/// fire is more than [`LATE_FIRE_THRESHOLD_SECS`] past the scheduled target.
+/// Typical trigger: system slept through the target, the chunked-sleep loop
+/// caught up on wake.
+fn build_notification_body(
+    greeting: &str,
+    target: DateTime<Local>,
+    fired_at: DateTime<Local>,
+) -> String {
+    let base = format!("Time to log this week's summary, {greeting}.");
+    let lag = fired_at - target;
+    if lag > Duration::seconds(LATE_FIRE_THRESHOLD_SECS) {
+        format!(
+            "{base} — this is the {} slot you missed",
+            weekday_long_name(target.weekday())
+        )
+    } else {
+        base
+    }
 }
 
 /// Cancel any running reminder task and start a fresh one with the new config.
@@ -136,7 +288,7 @@ pub fn next_reminder_time(day_of_week: u8, hour: u8, minute: u8) -> DateTime<Loc
 /// Called from:
 /// - `lib::run::setup()` on app launch (initial spawn from disk settings)
 /// - `commands::complete_first_run` after the wizard saves new settings
-/// - future `update_settings` command (Phase 2 settings panel)
+/// - `commands::update_settings` after a Settings-panel save
 pub fn restart_reminder_task(
     app: AppHandle,
     handle: &ReminderHandle,
@@ -157,39 +309,63 @@ pub fn restart_reminder_task(
         println!("[reminders] disabled — no task scheduled");
         return;
     }
+    if config.days_of_week.is_empty() {
+        // Configured-but-has-no-days. The Settings UI surfaces an
+        // "enabled but no days selected" hint near the multi-day picker,
+        // so this isn't a silent failure as far as the user is concerned.
+        println!("[reminders] enabled but no days selected — nothing to schedule");
+        return;
+    }
 
     let new_handle = tauri::async_runtime::spawn(async move {
         loop {
-            let next = next_reminder_time(config.day_of_week, config.hour, config.minute);
-            let now = Local::now();
-            let delta = next - now;
-
-            let duration = match delta.to_std() {
-                Ok(d) => d,
-                Err(_) => {
-                    // Defensive: if we computed something in the past somehow,
-                    // sleep a minute and retry.
-                    eprintln!("reminder: non-positive duration; sleeping 60s and retrying");
-                    tokio::time::sleep(StdDuration::from_secs(60)).await;
-                    continue;
-                }
+            let Some(target) = next_reminder_time(
+                &config.days_of_week,
+                config.hour,
+                config.minute,
+            ) else {
+                // Should be unreachable given the empty-check above, but
+                // keep the loop robust: sleep an hour and try again rather
+                // than spin-looping.
+                eprintln!(
+                    "[reminders] next_reminder_time returned None despite non-empty days; sleeping 1h"
+                );
+                tokio::time::sleep(StdDuration::from_secs(3600)).await;
+                continue;
             };
 
             println!(
-                "[reminders] next fire at {} (in {} seconds)",
-                next.format("%Y-%m-%d %H:%M:%S %z"),
-                duration.as_secs()
+                "[reminders] next fire at {} (chunked-sleep, max {}s per chunk)",
+                target.format("%Y-%m-%d %H:%M:%S %z"),
+                MAX_SLEEP_CHUNK.as_secs()
             );
 
-            tokio::time::sleep(duration).await;
+            // Chunked sleep: re-read the wall clock between chunks so a
+            // long system sleep can't carry us silently past the target.
+            // See module-level "Chunked sleep design" comment.
+            loop {
+                let now = Local::now();
+                if now >= target {
+                    break;
+                }
+                let remaining = (target - now).to_std().unwrap_or(StdDuration::ZERO);
+                let chunk = remaining.min(MAX_SLEEP_CHUNK);
+                tokio::time::sleep(chunk).await;
+            }
 
+            let fired_at = Local::now();
             let greeting = user_name.as_deref().unwrap_or("Captain");
-            let body = format!("Time to log this week's summary, {greeting}.");
+            let body = build_notification_body(greeting, target, fired_at);
             let icon_path = notification_icon_path();
 
             fire_notification(&app, &body, icon_path.as_deref()).await;
 
-            println!("[reminders] fired at {}", Local::now().format("%H:%M:%S"));
+            println!(
+                "[reminders] fired at {} (target was {}, lag {}s)",
+                fired_at.format("%H:%M:%S"),
+                target.format("%H:%M:%S"),
+                (fired_at - target).num_seconds()
+            );
 
             // Sleep a minute so the next iteration doesn't recompute "now" inside
             // the same target minute and re-fire immediately.
@@ -480,7 +656,7 @@ pub async fn request_notification_authorization() {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
 
     fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime<Local> {
         Local
@@ -494,12 +670,25 @@ mod tests {
         local(2026, 6, 22, 12, 0)
     }
 
+    /// Convenience for single-day tests — wraps the day in a slice and
+    /// unwraps the Option (panics on empty input, which is fine for tests
+    /// that always pass exactly one day).
+    fn single(
+        now: DateTime<Local>,
+        day_of_week: u8,
+        hour: u8,
+        minute: u8,
+    ) -> DateTime<Local> {
+        next_reminder_time_after(now, &[day_of_week], hour, minute)
+            .expect("single-day input must produce a fire time")
+    }
+
     // ---- Same-week future slot ----
 
     #[test]
     fn friday_4pm_from_monday_noon_is_this_week() {
         // Monday noon -> next Friday at 4pm should be in the same calendar week.
-        let target = next_reminder_time_after(monday_noon(), 4, 16, 0);
+        let target = single(monday_noon(), 4, 16, 0);
         assert_eq!(target.weekday(), Weekday::Fri);
         assert_eq!(target.hour(), 16);
         assert_eq!(target.minute(), 0);
@@ -509,7 +698,7 @@ mod tests {
     #[test]
     fn same_day_later_today_returns_today() {
         // Monday noon -> reminder is Monday 6pm.
-        let target = next_reminder_time_after(monday_noon(), 0, 18, 0);
+        let target = single(monday_noon(), 0, 18, 0);
         assert_eq!(target.weekday(), Weekday::Mon);
         assert_eq!(target.day(), 22);
         assert_eq!(target.hour(), 18);
@@ -520,7 +709,7 @@ mod tests {
     #[test]
     fn same_day_earlier_today_returns_next_week() {
         // Monday noon -> reminder is Monday 9am (already passed today).
-        let target = next_reminder_time_after(monday_noon(), 0, 9, 0);
+        let target = single(monday_noon(), 0, 9, 0);
         assert_eq!(target.weekday(), Weekday::Mon);
         assert_eq!(target.day(), 29); // next Monday
         assert_eq!(target.hour(), 9);
@@ -530,7 +719,7 @@ mod tests {
     fn yesterday_in_iso_week_returns_next_week_not_yesterday() {
         // Tuesday noon -> reminder is Monday 9am.
         let tue_noon = local(2026, 6, 23, 12, 0);
-        let target = next_reminder_time_after(tue_noon, 0, 9, 0);
+        let target = single(tue_noon, 0, 9, 0);
         assert_eq!(target.weekday(), Weekday::Mon);
         // Should be NEXT Monday, not yesterday.
         assert!(target > tue_noon);
@@ -542,7 +731,7 @@ mod tests {
     #[test]
     fn sunday_from_monday_noon_is_six_days_away() {
         // Monday noon -> reminder is Sunday 4pm.
-        let target = next_reminder_time_after(monday_noon(), 6, 16, 0);
+        let target = single(monday_noon(), 6, 16, 0);
         assert_eq!(target.weekday(), Weekday::Sun);
         assert_eq!((target - monday_noon()).num_days(), 6);
     }
@@ -555,7 +744,7 @@ mod tests {
         // it as "passed" and schedule for next week. (Better than firing
         // immediately on app launch and feeling spammy.)
         let exact = local(2026, 6, 22, 16, 0);
-        let target = next_reminder_time_after(exact, 0, 16, 0);
+        let target = single(exact, 0, 16, 0);
         assert_eq!(target.day(), 29);
     }
 
@@ -563,7 +752,7 @@ mod tests {
     fn target_with_seconds_remaining_returns_today() {
         // 12:00:00 now, target is 12:01. Should be today, ~1 min away.
         let now = local(2026, 6, 22, 12, 0);
-        let target = next_reminder_time_after(now, 0, 12, 1);
+        let target = single(now, 0, 12, 1);
         assert_eq!(target.day(), 22);
         assert_eq!(target.minute(), 1);
         assert_eq!((target - now).num_minutes(), 1);
@@ -573,7 +762,7 @@ mod tests {
 
     #[test]
     fn out_of_range_day_of_week_falls_back_to_friday() {
-        let target = next_reminder_time_after(monday_noon(), 99, 16, 0);
+        let target = single(monday_noon(), 99, 16, 0);
         assert_eq!(target.weekday(), Weekday::Fri);
     }
 
@@ -586,7 +775,7 @@ mod tests {
         for day in 0..7u8 {
             for hour in [0, 12, 23] {
                 for minute in [0, 30, 59] {
-                    let t = next_reminder_time_after(now, day, hour, minute);
+                    let t = single(now, day, hour, minute);
                     assert!(
                         t > now,
                         "expected strictly future for day={day}, h={hour}, m={minute}: got {t} vs now {now}"
@@ -594,5 +783,206 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ---- Multi-day fire-time selection ----
+
+    #[test]
+    fn empty_days_of_week_returns_none() {
+        let r = next_reminder_time_after(monday_noon(), &[], 16, 0);
+        assert!(r.is_none(), "empty days_of_week should produce no fire time");
+    }
+
+    #[test]
+    fn mwf_from_monday_noon_fires_wednesday() {
+        // Mon/Wed/Fri at 4pm, evaluating from Monday at noon. Monday 4pm
+        // hasn't passed yet — so Monday wins as the soonest target.
+        let target = next_reminder_time_after(monday_noon(), &[0, 2, 4], 16, 0).unwrap();
+        assert_eq!(target.weekday(), Weekday::Mon);
+        assert_eq!(target.day(), 22);
+    }
+
+    #[test]
+    fn mwf_from_monday_evening_fires_wednesday() {
+        // Mon/Wed/Fri at 4pm, evaluating from Monday at 6pm. Monday 4pm
+        // has passed — next is Wednesday.
+        let mon_evening = local(2026, 6, 22, 18, 0);
+        let target = next_reminder_time_after(mon_evening, &[0, 2, 4], 16, 0).unwrap();
+        assert_eq!(target.weekday(), Weekday::Wed);
+    }
+
+    #[test]
+    fn daily_reminder_fires_tomorrow_when_today_passed() {
+        // All 7 days at 9am, evaluating from Monday noon. Today's 9am
+        // passed -> next is Tuesday.
+        let days: Vec<u8> = (0..=6).collect();
+        let target = next_reminder_time_after(monday_noon(), &days, 9, 0).unwrap();
+        assert_eq!(target.weekday(), Weekday::Tue);
+        assert_eq!((target - monday_noon()).num_hours(), 21); // noon Mon → 9am Tue
+    }
+
+    #[test]
+    fn daily_reminder_fires_today_when_today_still_future() {
+        // All 7 days at 6pm, evaluating from Monday noon. Today's 6pm
+        // still ahead -> fires today.
+        let days: Vec<u8> = (0..=6).collect();
+        let target = next_reminder_time_after(monday_noon(), &days, 18, 0).unwrap();
+        assert_eq!(target.weekday(), Weekday::Mon);
+        assert_eq!(target.day(), 22);
+    }
+
+    #[test]
+    fn day_order_does_not_affect_result() {
+        // The Set-of-days semantics should be order-independent. Same
+        // input expressed two ways must produce the same answer.
+        let now = monday_noon();
+        let a = next_reminder_time_after(now, &[6, 0, 2, 4], 9, 0).unwrap();
+        let b = next_reminder_time_after(now, &[0, 2, 4, 6], 9, 0).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn duplicate_days_do_not_affect_result() {
+        // The serde shim dedupes on read; here we double-check that even
+        // if duplicates leak in (hand-edited json, future bugs), the
+        // result is unchanged.
+        let now = monday_noon();
+        let a = next_reminder_time_after(now, &[4], 16, 0).unwrap();
+        let b = next_reminder_time_after(now, &[4, 4, 4], 16, 0).unwrap();
+        assert_eq!(a, b);
+    }
+
+    // ---- DST safety ----
+    //
+    // These three tests use `chrono::Local`, which reads the system
+    // timezone at runtime. On a DST-observing TZ (e.g. America/New_York
+    // — the maintainer's machine) the gap/ambiguous branches of
+    // `resolve_local_datetime` are exercised; on UTC or other non-DST
+    // zones the tests pass trivially because every target time
+    // resolves on the first try as LocalResult::Single.
+    //
+    // KNOWN COVERAGE GAP: a CI runner pinned to UTC won't catch a
+    // future regression in the gap/ambiguous branches. Mitigation
+    // would be a `chrono-tz` dev-dependency + tests pinned to
+    // `America/New_York` — deferred until we actually have a CI host
+    // where it matters.
+
+    #[test]
+    fn dst_gap_target_time_does_not_panic() {
+        // 2026-03-08 is the US spring-forward Sunday — at 02:00 local
+        // (on US-DST systems) the clock jumps to 03:00, so 02:30 is a
+        // non-existent local time on that date. The old code path would
+        // have panicked at the `.expect("hour/minute should be in
+        // range")` because chrono's with_hour/with_minute returns None
+        // for non-existent local datetimes. The new shape resolves to
+        // the next valid local instant.
+        let now = local(2026, 3, 7, 12, 0); // Saturday noon, pre-transition
+        let result = next_reminder_time_after(now, &[6], 2, 30);
+        assert!(
+            result.is_some(),
+            "scheduler must not panic when target time lands in a DST gap"
+        );
+    }
+
+    #[test]
+    fn dst_crossing_preserves_target_hour() {
+        // The old code added Duration::days(N) — a fixed 86,400 seconds
+        // per "day" — which drifted the wall-clock by ±1 hour across DST
+        // transitions. The new code computes via naive-date arithmetic
+        // and resolves the local time on the TARGET date, so the wall
+        // clock the user picked is what they get.
+        //
+        // From Saturday 2026-03-07 noon, asking for next Sunday at 9am
+        // must produce 9am local on March 8 — not 8am (fall-back error
+        // direction) or 10am (spring-forward error direction).
+        let now = local(2026, 3, 7, 12, 0);
+        let target = next_reminder_time_after(now, &[6], 9, 0).unwrap();
+        assert_eq!(target.hour(), 9, "wall-clock hour must survive DST crossing");
+        assert_eq!(target.minute(), 0);
+        // Should be the very next day.
+        assert!((target - now).num_hours() < 30);
+    }
+
+    // ---- Late-fire / sleep-drift suffix ----
+    //
+    // These test the body-builder directly (not the loop) so we don't need
+    // a fake-clock harness. The loop itself is a straightforward
+    // "while now < target { sleep chunk; recheck }" — its correctness
+    // reduces to the body builder + the existing next_reminder_time math.
+
+    #[test]
+    fn body_on_time_has_no_suffix() {
+        // Target Friday 6pm, fired one minute later — well under the 30-min
+        // threshold. No suffix.
+        let target = local(2026, 6, 26, 18, 0); // Friday
+        let fired = target + Duration::minutes(1);
+        let body = build_notification_body("Chris", target, fired);
+        assert_eq!(body, "Time to log this week's summary, Chris.");
+    }
+
+    #[test]
+    fn body_just_under_threshold_has_no_suffix() {
+        // 30 minutes exactly — NOT greater than threshold, so no suffix.
+        let target = local(2026, 6, 26, 18, 0);
+        let fired = target + Duration::minutes(30);
+        let body = build_notification_body("Chris", target, fired);
+        assert!(
+            !body.contains("missed"),
+            "30 min exactly is the threshold, must not flag as late: {body}"
+        );
+    }
+
+    #[test]
+    fn body_late_fire_appends_missed_slot_suffix() {
+        // Target Friday 6pm, fired Monday morning (typical sleep-through
+        // case). Body must call out the missed Friday slot.
+        let target = local(2026, 6, 26, 18, 0); // Friday
+        let fired = local(2026, 6, 29, 9, 0); // Monday morning
+        let body = build_notification_body("Chris", target, fired);
+        assert!(
+            body.contains("Friday slot you missed"),
+            "expected missed-Friday suffix in late-fire body: {body}"
+        );
+    }
+
+    #[test]
+    fn body_late_fire_uses_target_weekday_name() {
+        // The weekday in the suffix comes from the TARGET, not the fire
+        // time. A Wednesday slot fired Thursday afternoon should say
+        // "Wednesday".
+        let target = local(2026, 6, 24, 16, 0); // Wednesday
+        let fired = local(2026, 6, 25, 15, 0); // Thursday, ~23h late
+        let body = build_notification_body("Captain", target, fired);
+        assert!(
+            body.contains("Wednesday slot you missed"),
+            "suffix must name the target weekday, got: {body}"
+        );
+    }
+
+    #[test]
+    fn body_just_over_threshold_appends_suffix() {
+        // 31 minutes late — just past the threshold.
+        let target = local(2026, 6, 26, 18, 0);
+        let fired = target + Duration::minutes(31);
+        let body = build_notification_body("Chris", target, fired);
+        assert!(
+            body.contains("missed"),
+            "31 min past target must flag as late: {body}"
+        );
+    }
+
+    #[test]
+    fn fall_back_ambiguous_time_returns_a_concrete_instant() {
+        // 2026-11-01 is the US fall-back Sunday — 01:30 occurs twice
+        // (once in DST, once in standard time). The new resolver picks
+        // the earlier of the two. We can't easily assert which without
+        // a fixed TZ, but we CAN assert that the function returns a
+        // single concrete instant and doesn't panic / hang.
+        let now = local(2026, 10, 31, 12, 0); // Saturday noon, pre-fall-back
+        let result = next_reminder_time_after(now, &[6], 1, 30);
+        assert!(result.is_some());
+        let target = result.unwrap();
+        assert_eq!(target.hour(), 1);
+        assert_eq!(target.minute(), 30);
     }
 }

@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { confirm } from '@tauri-apps/plugin-dialog';
+  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import LabelInput from '$lib/LabelInput.svelte';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
+  import SaveStatus from '$lib/SaveStatus.svelte';
+  import ConfirmDialog from '$lib/ConfirmDialog.svelte';
   import { reportDirty } from '$lib/dirty';
 
   // Submit lifecycle — distinct from auto-save status. 'submitting' is the
@@ -28,6 +30,11 @@
   let title = $state('');
   let body = $state('');
   let labels = $state<string[]>([]);
+  // Phase 2.8 follow-on: drives chip rendering in LabelInput. Read on mount
+  // from get_settings and refreshed on 'settings-changed' so toggling the
+  // Theme tab's switch updates this popup live without a remount.
+  let colorfulLabels = $state(false);
+  let unlistenSettings: UnlistenFn | undefined;
   let submitStatus = $state<SubmitStatus>('idle');
   let submitErrorMessage = $state('');
 
@@ -119,6 +126,16 @@
     }
   }
 
+  // Pull only the one bool we need; broader settings live in /settings.
+  async function refreshColorfulLabels(): Promise<void> {
+    try {
+      const s = await invoke<{ colorfulLabels?: boolean }>('get_settings');
+      colorfulLabels = s.colorfulLabels ?? false;
+    } catch {
+      // Pre-storage / first-run — leave at default false.
+    }
+  }
+
   // ---------- load / restore ----------
   onMount(async () => {
     // Restore the saved draft (if any) before enabling auto-save — otherwise
@@ -135,6 +152,11 @@
       console.error('[capture] load_capture_draft failed:', err);
     }
 
+    await refreshColorfulLabels();
+    unlistenSettings = await listen('settings-changed', () => {
+      void refreshColorfulLabels();
+    });
+
     // Baseline the snapshot to whatever we just loaded (or empty if no draft).
     snapshot = {
       title: title || '',
@@ -146,6 +168,7 @@
 
   onDestroy(() => {
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    if (unlistenSettings) unlistenSettings();
   });
 
   function resetFormState() {
@@ -198,23 +221,20 @@
     void submit();
   }
 
-  /// Discard the in-flight note: confirm with the user, then cancel any
-  /// pending auto-save, delete the draft file, clear form state, and hide
-  /// the popup. Destructive — there's no undo, hence the confirmation.
-  async function discardWithConfirm() {
-    if (!hasContent) return;
-    const ok = await confirm(
-      "This will delete the in-progress note and clear the saved draft. " +
-        "This can't be undone.",
-      {
-        title: 'Discard this note?',
-        kind: 'warning',
-        okLabel: 'Discard',
-        cancelLabel: 'Keep editing'
-      }
-    );
-    if (!ok) return;
+  // Discard flow — two steps so the confirmation lives in our shared
+  // ConfirmDialog component (consistent shell + a11y + dim/blur backdrop
+  // with the rest of the app) instead of a native OS confirm sheet. The
+  // Discard button flips showDiscardConfirm; the user picks Confirm or
+  // Cancel inside the dialog; performDiscard runs only on Confirm.
+  let showDiscardConfirm = $state(false);
 
+  function requestDiscard(): void {
+    if (!hasContent) return;
+    showDiscardConfirm = true;
+  }
+
+  async function performDiscard(): Promise<void> {
+    showDiscardConfirm = false;
     if (autoSaveTimer) {
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
@@ -244,26 +264,9 @@
     }
   }
 
-  // ---------- indicator text ----------
-  function formatTime(d: Date): string {
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  }
-
-  const draftStatusText = $derived.by(() => {
-    switch (draftStatus) {
-      case 'saving':
-        return 'Saving draft…';
-      case 'dirty':
-        return 'Unsaved changes';
-      case 'saved':
-        return lastSavedAt ? `Draft saved ${formatTime(lastSavedAt)}` : 'Draft saved';
-      case 'error':
-        return "Couldn't save draft";
-      case 'idle':
-      default:
-        return '';
-    }
-  });
+  // formatTime + draftStatusText now live inside <SaveStatus>; the
+  // draft-flavor copy ("Saving draft…", "Draft saved", "Couldn't save
+  // draft") is passed via savingText / savedPrefix / errorText props.
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -271,26 +274,20 @@
 <main>
   <form onsubmit={handleSubmit}>
     <input
-      class="title-input"
+      class="text-input title-input"
       type="text"
       placeholder="Title (optional)"
       spellcheck="true"
       bind:value={title}
     />
 
-    <!-- Body is the first surface to land Phase 2.5's CodeMirror 6 editor
-      (commit landing this swap is "Step 1" of the editor rollout). The
-      editor's `value` is one-way + `onChange` push-back, so we keep the
-      same `body` state var the auto-save $effect watches — the debounce
-      flow is unchanged from when this was a textarea. Spell-check on
-      this surface is dark until the Decoration.mark plugin lands in
-      Step 3; right-click + macOS suggestions still work via the WKWebView
-      context menu fallback. -->
-    <!-- Slack-style live preview: markers (`**`, `*`, `~~`, `` ` ``, `#`,
-       `-`, `>`, `[`/`](url)`) hide as atomic ranges; the user sees rendered
-       rich text while the buffer stays canonical markdown. /capture is the
-       smallest blast-radius surface, so Phase 2.5 Architecture B ships
-       here first and propagates to /summary after a real-use validation. -->
+    <!-- Body uses MarkdownEditor (CodeMirror 6) with live-preview decorations:
+       markers (`**`, `*`, `~~`, `` ` ``, `#`, `-`, `>`, `[`/`](url)`) hide
+       as atomic ranges so the user sees rendered rich text while the
+       buffer stays canonical markdown on disk. WebKit handles spell-check
+       on the contenteditable surface natively. The editor's `value` is
+       one-way + `onChange` push-back; the auto-save $effect on `body`
+       handles the debounce. -->
     <!-- svelte-ignore a11y_autofocus -->
     <MarkdownEditor
       class="body-input"
@@ -303,19 +300,24 @@
     />
 
 
-    <LabelInput bind:labels placeholder="Labels (type to search, Enter to add)" />
+    <LabelInput
+      bind:labels
+      placeholder="Labels (type to search, Enter to add)"
+      {colorfulLabels}
+    />
 
+    <!-- Primary on the left (Submit), destructive ruby on the right
+       (Discard) — per the app-wide convention finalized in Phase 2.7.
+       Save status sits leftmost in the same row, matching /journal +
+       /summary so users find autosave indicators in one consistent spot. -->
     <div class="actions">
-      <!-- Ruby (destructive) on the left, primary Emerald on the right —
-        per the RPG style-guide convention for modal footers. -->
-      <button
-        type="button"
-        class="btn btn-ruby"
-        onclick={() => void discardWithConfirm()}
-        disabled={!hasContent || submitStatus === 'submitting'}
-      >
-        Discard
-      </button>
+      <SaveStatus
+        status={draftStatus}
+        lastSavedAt={lastSavedAt}
+        savingText="Saving draft…"
+        savedPrefix="Draft saved"
+        errorText="Couldn't save draft"
+      />
       <span class="hint">⌘↩ submit · esc close</span>
       <button
         type="submit"
@@ -324,18 +326,41 @@
       >
         {submitStatus === 'submitting' ? 'Submitting…' : 'Submit'}
       </button>
+      <button
+        type="button"
+        class="btn btn-ruby"
+        onclick={requestDiscard}
+        disabled={!hasContent || submitStatus === 'submitting'}
+      >
+        Discard
+      </button>
     </div>
-
-    <!-- Draft auto-save indicator — kept subtle in this tight popup. -->
-    {#if draftStatusText}
-      <p class="draft-status is-{draftStatus}">{draftStatusText}</p>
-    {/if}
 
     {#if submitStatus === 'error'}
       <p class="status status-error">Error: {submitErrorMessage}</p>
     {/if}
   </form>
 </main>
+
+{#if showDiscardConfirm}
+  <ConfirmDialog
+    title="Discard This Note?"
+    confirmLabel="Discard"
+    confirmVariant="ruby"
+    cancelLabel="Keep Editing"
+    cancelVariant="marble"
+    onConfirm={() => void performDiscard()}
+    onCancel={() => (showDiscardConfirm = false)}
+    body={discardConfirmBody}
+  />
+{/if}
+
+{#snippet discardConfirmBody()}
+  <p>
+    This will delete the in-progress note and clear the saved draft.
+    This can't be undone.
+  </p>
+{/snippet}
 
 <style>
   main {
@@ -353,37 +378,17 @@
     min-height: 0;
   }
 
-  /* Title input is still rendered directly by this template, so the
-   * unscoped element selector applies normally. */
-  input {
-    width: 100%;
-    padding: var(--space-3);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    font-family: var(--font-body);
-    font-size: var(--text-body);
-    line-height: var(--text-body-lh);
-    transition: border-color var(--transition-fast);
-  }
-
-  input:focus-visible {
-    outline: none;
-    border-color: var(--accent-primary);
-    box-shadow: 0 0 0 2px var(--focus-glow);
-  }
-
-  /* Body editor (MarkdownEditor / CodeMirror 6) — chrome (background,
-   * border, focus glow) lives inside the component itself. Only flex
-   * sizing is set on the wrapper via inline `style` on the element.
-   * Phase 2.5 / Step 1. */
-
+  /* Title input uses the shared .text-input utility from app.css and
+     adds a .title-input modifier for the display-font + bigger size. */
   .title-input {
     font-family: var(--font-display);
     font-size: var(--text-display-sm);
     line-height: var(--text-display-sm-lh);
   }
+
+  /* Body editor (MarkdownEditor / CodeMirror 6) — chrome (background,
+   * border, focus glow) lives inside the component itself. Only flex
+   * sizing is set on the wrapper via inline `style` on the element. */
 
   .actions {
     display: flex;
@@ -391,8 +396,8 @@
     gap: var(--space-3);
   }
 
-  /* Pushes Submit to the right; hint absorbs the remaining horizontal
-   * space between Discard (left) and Submit (right). */
+  /* Pushes the button cluster (Submit + Discard) to the right; save
+   * status + ⌘↩ hint absorb the remaining horizontal space on the left. */
   .btn-submit {
     margin-left: auto;
   }
@@ -403,36 +408,10 @@
     color: var(--text-secondary);
   }
 
-  /* Draft auto-save indicator — small italic line below the actions row.
-   * Matches the /summary route's .save-status pattern but compacted for
-   * the popup's smaller surface. */
-  .draft-status {
-    margin: 0;
-    font-size: var(--text-caption);
-    line-height: var(--text-caption-lh);
-    font-style: italic;
-    color: var(--text-muted);
-  }
+  /* Draft auto-save indicator now uses the shared <SaveStatus>
+     component — the local .draft-status class went away with the
+     extraction. */
 
-  .draft-status.is-dirty,
-  .draft-status.is-saving {
-    color: var(--text-secondary);
-  }
-
-  .draft-status.is-error {
-    color: var(--accent-pink);
-  }
-
-  .status {
-    margin: 0;
-    padding: var(--space-3);
-    border-radius: var(--radius-md);
-    font-size: var(--text-body);
-  }
-
-  .status-error {
-    background: rgba(235, 1, 139, 0.12);
-    color: var(--accent-pink);
-    border: 1px solid rgba(235, 1, 139, 0.4);
-  }
+  /* .status + .status-error live in app.css as a shared utility — same
+     error-pill is used here, on /summary, and inside SendToManagerButton. */
 </style>

@@ -178,16 +178,15 @@ For offline-capable Tauri builds, we may self-host these later — both fonts ha
 
 Two icon systems work together: a comprehensive functional library and selected decorative pieces from the RPG game assets.
 
-### Functional icons — Lucide
+### Functional icons — custom Icon.svelte (Lucide-derived)
 
-For all UI controls (settings, search, save, close, calendar, etc.), use **[Lucide](https://lucide.dev/)** via [`@lucide/svelte`](https://lucide.dev/guide/packages/lucide-svelte).
+For all UI controls (formatting toolbar, info callouts, calendar, etc.), use the custom **`$lib/Icon.svelte`** component. It embeds hand-picked SVG paths cribbed from [Lucide](https://lucide.dev/)'s MIT-licensed set — 24×24 viewBox, 2px stroke, `currentColor` so consumers theme via CSS.
 
-- ISC license (effectively free)
-- 1,300+ icons covering every functional need
-- Clean line-icon style that pairs with the RPG aesthetic without being a pixel-art clone
-- SVG-based — scales and themes via CSS
+- No `@lucide/svelte` runtime dependency — bundle stays slim, icons inline as SVG
+- Each icon is a named entry in the `IconName` union (`bold`, `italic`, `link`, `info`, `calendar`, etc.)
+- Adding a new icon: extend the `IconName` union + add a `case 'name'` arm in Icon.svelte's template
 
-The game's `EStandardIcons` set (Left, Right, Up, Down, Check, Close, Info, Spin, Shop, Build, Gift, Lock, Music, Play, Plus, Sparkle, Delete) maps cleanly to Lucide — Lucide is the right call.
+The game's `EStandardIcons` set (Left, Right, Up, Down, Check, Close, Info, Spin, Shop, Build, Gift, Lock, Music, Play, Plus, Sparkle, Delete) maps cleanly to Lucide's catalog — port new ones into Icon.svelte as needed.
 
 #### Sizes
 
@@ -224,11 +223,13 @@ For branded moments (app icon, empty states, splash, achievements), pull from th
 
 **IP guidance:** generic UI elements (anchor, book, compass, stamps, generic hats, scrolls) are safe for an internal Prodigy tool. Character art (Mythics, pets, full NPC sprites) stays in the game.
 
-When we use these, copy them into `app/assets/branded/` rather than hot-linking — keeps the app portable.
+When we use these, copy them into `app/static/branded/` (SvelteKit's static-asset directory, served at `/branded/<file>`) rather than hot-linking — keeps the app portable.
 
 ## Component patterns
 
 Adapted from the [Prodigy RPG Components spec](https://prodigygame.atlassian.net/wiki/spaces/GD/pages/548569098/Components), and refined via direct inspection of the game source (`src/ui/MathStandardButtonEnums.ts`, `src/ui/StandardButton.ts`).
+
+> **Looking for what's actually shipping in the app?** This section codifies the *design language* — colors, sizing, gemstone button variants, layout grammar. The **implemented Svelte component library** (Modal, TipBubble, InputField, MarkdownEditor, etc.) lives at [`docs/components.md`](docs/components.md). That doc is the map; the canonical API contract for each component lives in the `<!-- ... -->` header comment at the top of its `.svelte` file.
 
 ### Buttons
 
@@ -421,6 +422,5 @@ Pulled from analysis of [prodigygame.com/main-en/teachers](https://www.prodigyga
 
 - Spacing scale finalization (do we need `--space-5` for 20px, or stick to the powers-of-2 cadence?)
 - Motion / animation spec (timing functions, durations, easing curves)
-- Full component spec library (Phase 2 work, as we build screens)
 - Self-hosted font files for offline builds (currently Google Fonts CDN)
 - Corporate font identification (if we ever need the reference style)

@@ -53,10 +53,12 @@
     EditorView,
     keymap,
     placeholder as placeholderExt,
+    type KeyBinding,
   } from '@codemirror/view';
-  import { Compartment } from '@codemirror/state';
-  import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
-  import { markdown } from '@codemirror/lang-markdown';
+  import { Compartment, type EditorState } from '@codemirror/state';
+  import { defaultKeymap, history, historyKeymap, indentMore, indentLess } from '@codemirror/commands';
+  import { markdown, markdownKeymap } from '@codemirror/lang-markdown';
+  import { syntaxTree } from '@codemirror/language';
   import { GFM } from '@lezer/markdown';
   import {
     syntaxHighlighting,
@@ -110,6 +112,13 @@
       fontFamily: 'system-ui, -apple-system, sans-serif',
     },
   ]);
+  // Numbered list markers ("1.", "2.", …) are tagged via Decoration.mark
+  // with class `.cm-md-list-num` from live-preview.ts and styled directly
+  // (see the `.cm-md-list-num` rule in the component CSS block below).
+  // We don't use a HighlightStyle rule for them because CM6's default-
+  // highlight style appears to out-cascade ours for
+  // `tags.processingInstruction`, leaving the digits illegibly faint on
+  // the dark surface.
 
   let {
     value = '',
@@ -221,6 +230,43 @@
   // state indicators would stay stuck on whatever was at mount.
   let updateTick = $state(0);
 
+  // Walks up the lezer-markdown tree from the primary selection head and
+  // returns true if any ancestor is a list construct. Used to scope Tab
+  // to list-indent inside lists, and let it fall through to the browser's
+  // native focus-traversal everywhere else.
+  function cursorInList(state: EditorState): boolean {
+    const pos = state.selection.main.head;
+    let node = syntaxTree(state).resolveInner(pos, -1);
+    while (node) {
+      const n = node.name;
+      if (n === 'ListItem' || n === 'BulletList' || n === 'OrderedList') return true;
+      if (!node.parent) break;
+      node = node.parent;
+    }
+    // Fallback for the cursor-on-blank-line-inside-list case where the
+    // tree resolves to the doc root before any ListItem.
+    const line = state.doc.lineAt(pos).text;
+    return /^\s*([-*+]|\d+\.)\s/.test(line);
+  }
+
+  // Context-aware Tab: indent inside markdown lists (nest a bullet),
+  // otherwise return false so the browser performs native focus traversal
+  // to the next form field. Returning false from a CM6 KeyBinding lets
+  // the event fall through to the browser default — which is the lever
+  // we want here. Replaces the bare `indentWithTab` import that used to
+  // unconditionally insert a literal \t character.
+  const listAwareTab: KeyBinding = {
+    key: 'Tab',
+    run: (view) => {
+      if (!cursorInList(view.state)) return false;
+      return indentMore(view);
+    },
+    shift: (view) => {
+      if (!cursorInList(view.state)) return false;
+      return indentLess(view);
+    },
+  };
+
   onMount(() => {
     view = new EditorView({
       doc: value,
@@ -230,11 +276,20 @@
         // they win precedence over the catch-all defaultKeymap. The same
         // command functions back the toolbar buttons, so wrap/unwrap
         // logic only lives in one place — `markdown-formatting.ts`.
+        // Keymap precedence is explicit: our toolbar shortcuts win first
+        // (Cmd+B / Cmd+I / etc.), then Tab routes through listAwareTab,
+        // then the markdown keymap handles Enter (auto-continues bullet
+        // and numbered lists, increments the next number) and Backspace
+        // (deletes one level of list/blockquote markup), and finally
+        // defaultKeymap catches everything else. markdownKeymap MUST land
+        // before defaultKeymap or the latter's plain `insertNewline` Enter
+        // binding swallows the event and the auto-continue never fires.
         keymap.of([
           ...markdownFormattingKeymap,
+          listAwareTab,
+          ...markdownKeymap,
           ...defaultKeymap,
           ...historyKeymap,
-          indentWithTab,
         ]),
         // GFM extension turns on the lezer rules for task lists ([ ] / [x]),
         // strikethrough (~~text~~), tables, and autolinks (bare URLs become
@@ -243,7 +298,23 @@
         // clickable checkbox (that's a live-preview decoration, deferred
         // per the Phase 2.5 design). Autolink parsing pairs with the
         // markdown-links plugin in Step 2 so bare URLs are Cmd-clickable.
-        markdown({ extensions: [GFM] }),
+        // Disable Setext (underline) headings — they conflict with starting
+        // a bullet list under a paragraph. Without this, typing a paragraph
+        // then a `-` on the next line parses the dash as an H2 underline
+        // and re-renders the paragraph above as a heading instead of
+        // starting a list. Captain's Log only emits ATX (`#`) headings.
+        //
+        // `addKeymap: false` disables the package's auto-installed Enter
+        // and Backspace bindings. The Enter binding misfires on empty
+        // list items (typing `- ` then Enter deletes the marker instead
+        // of moving the cursor down), and the auto-continue behavior
+        // surprised users mid-type. Default Enter (insert newline) is
+        // the predictable behavior every other markdown editor uses;
+        // Tab still works correctly via our own `listAwareTab` binding.
+        markdown({
+          extensions: [GFM, { remove: ['SetextHeading'] }],
+          addKeymap: false
+        }),
         // Register defaultHighlightStyle as a PRIMARY highlighter (no
         // `fallback: true`). Once another primary is registered below,
         // the fallback path is ignored — which would silently disable
@@ -465,7 +536,9 @@
      * right behavior anyway. */
     display: inline-block;
     background: var(--bg-elevated);
-    color: var(--accent-primary);
+    /* Lifted variant — raw accent-primary on bg-elevated at 0.92em (~14.7px)
+       is only 3.69:1, failing WCAG AA. */
+    color: var(--accent-primary-text);
     padding: 0 4px;
     border-radius: 3px;
     border: 1px solid var(--border-structural);
@@ -498,6 +571,54 @@
     font-weight: 700;
   }
 
+  /* Numbered-list markers ("1.", "2.", …). Rendered by an
+   * OrderedListMarkerWidget that REPLACES the source digits with a span
+   * carrying this class. Same shape as `.cm-md-bullet` so digits and
+   * bullets read at the same visual weight. Replacing (not just wrapping)
+   * was load-bearing — wrapping-via-Decoration.mark let CodeMirror's
+   * default-highlight color win the cascade and the digits stayed
+   * unreadable on the dark surface. */
+  .md-editor :global(.cm-md-list-num) {
+    color: var(--text-secondary);
+    opacity: 0.75;
+    font-weight: 500;
+  }
+
+  /* Hanging indent for list items. Different technique from v1 (which
+   * used `text-indent: -2ch` on the line and ended up clipping the
+   * BulletWidget in WebKit). Instead:
+   *
+   *  - The line gets `padding-left: <depth>*2ch` so the CONTENT area
+   *    starts indented by the marker + space width. Wrapped visual rows
+   *    naturally start at this indent — that IS the hang.
+   *  - The marker widget (bullet glyph or numbered-list span) gets
+   *    `margin-left: -2ch` so it pulls itself back out of the padding
+   *    and sits at the line's left edge, where the user expects it.
+   *
+   * Result: marker at column 0 visually, row 1 text at column 2, rows
+   * 2+ at column 2. The widget keeps its full inline-block width and
+   * doesn't fight the cascade.
+   *
+   * Caveat: tuned for single-digit ordered lists (`1.` through `9.`
+   * fit in 2ch). Double-digit items (`10.`, `11.`, …) visually overlap
+   * the content by 1ch — acceptable for now; weekly summaries rarely
+   * exceed 9 items per list. */
+  .md-editor :global(.cm-md-list-line) {
+    padding-left: calc(var(--md-list-depth, 1) * 2ch);
+  }
+  .md-editor :global(.cm-md-list-line .cm-md-bullet),
+  .md-editor :global(.cm-md-list-line .cm-md-list-num) {
+    margin-left: -2ch;
+  }
+  /* Same combo gotcha as before: lists inside blockquotes or fenced
+   * code blocks need the gutter padding to stack with the container's
+   * own padding (which uses !important). Without this, hang-indent
+   * disappears inside quotes. */
+  .md-editor :global(.cm-md-list-line.cm-md-blockquote-line),
+  .md-editor :global(.cm-md-list-line.cm-md-fenced-line) {
+    padding-left: calc(var(--space-3) + var(--md-list-depth, 1) * 2ch) !important;
+  }
+
   /* Task checkbox. Decoration.replace from live-preview.ts swaps the
    * 3-char `[ ]` / `[x]` TaskMarker for this clickable square. Sizing
    * tuned to sit on the body text baseline without disrupting line
@@ -511,7 +632,10 @@
     margin: 0 4px 0 0;
     padding: 0;
     background: transparent;
-    border: 1.5px solid var(--border-structural);
+    /* text-muted gives a visible 4.59:1 outline against bg-surface
+       (border-structural's 10%-alpha cream is only 1.32:1 and the
+       checkbox's interactivity is invisible to the user at rest). */
+    border: 1.5px solid var(--text-muted);
     border-radius: 3px;
     color: transparent;
     cursor: pointer;
@@ -564,9 +688,10 @@
     padding: 1px 8px 1px 6px;
     margin: 0 1px;
     background: var(--bg-elevated);
-    color: var(--accent-primary);
+    /* Contrast-safe orange — same reasoning as inline-code chip above. */
+    color: var(--accent-primary-text);
     border: 1px solid var(--border-structural);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font: inherit;
     font-size: 0.92em;
     font-weight: 500;

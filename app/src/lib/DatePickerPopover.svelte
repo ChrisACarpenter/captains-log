@@ -406,7 +406,10 @@
     text-align: center;
     font-size: 11px;
     font-weight: 600;
-    color: var(--text-muted);
+    /* text-muted on bg-elevated at 11px = 3.83:1 (fails AA). text-secondary
+       clears 5.41:1; the 600 weight + uppercase still reads as quieter
+       than the day numbers. */
+    color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -428,7 +431,7 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-caption);
     cursor: pointer;
     transition: background var(--transition-fast), color var(--transition-fast);
   }
@@ -436,9 +439,12 @@
     background: var(--bg-surface);
   }
   .dp-cell.is-today {
-    /* Subtle ring on today, even when not selected. */
+    /* Subtle ring on today, even when not selected. Use lifted-orange
+       variant for the text — raw accent-primary at 13px on bg-elevated
+       fails AA (3.77:1). The ring's color stays accent-primary; rings
+       are UI components (3:1 threshold) where raw accent-primary passes. */
     box-shadow: inset 0 0 0 1px var(--accent-primary);
-    color: var(--accent-primary);
+    color: var(--accent-primary-text);
   }
   .dp-cell.is-selected {
     background: var(--accent-primary);
@@ -469,7 +475,7 @@
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-caption);
     cursor: pointer;
     transition: background var(--transition-fast);
   }

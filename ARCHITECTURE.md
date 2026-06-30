@@ -359,14 +359,6 @@ Any range shift forces a DOM rebuild, which is cheap (one button, one inline SVG
 
 This section catalogs limitations that exist by deliberate scope choice in v1, along with the reasoning and what a future fix would entail. Nothing here is a bug — these are tradeoffs the architecture currently makes.
 
-### Cursor lost on `/journal` Preview/Source toggle
-
-Toggling between Preview and Source on `/journal` is implemented with a `{#key viewMode}` block that force-remounts `MarkdownEditor.svelte`. CodeMirror 6 bakes its extension array at `EditorState.create()` time, and the live-preview / heading-size / toolbar / placeholder set differs materially between modes — there is no clean reconfigure path that swaps all of them in place. The remount is the honest implementation, but it tears down the `EditorView` and rebuilds from `initialContent`, so the cursor and scroll position reset. Fixing it would require `MarkdownEditor` to expose its `EditorView` upward, `/journal` to snapshot `state.selection` and `scrollDOM.scrollTop` before the toggle, and a post-mount `$effect` to restore them across the `{#key}` boundary. Deferred for v1 — the toggle is rare, and most users park in Preview.
-
-### Cross-route stale preview between `/journal` and `/summary`
-
-`/journal` and `/summary` can both edit the same week's file: `/summary` saves via `update_weekly_summary` (which patches the summary block), and `/journal` saves via raw `write_week` (full overwrite). There is no file watcher, no in-memory store coordination, and no mtime check on save. If both windows are open on the same week, last-writer-wins and one side will silently clobber the other's unsaved edits on save. A proper fix would mean introducing a single source of truth — either a shared Svelte store with a Tauri file-change subscription, or a save-time mtime guard that surfaces a conflict dialog. Both are real work and were out of scope for v1, which assumes a single active editing surface per week.
-
 ### Date chip false-positives in prose
 
 The date-chip ViewPlugin matches any `\b\d{4}-\d{2}-\d{2}\b` substring in the visible viewport and rewrites it as a clickable pill. It already skips matches inside `InlineCode` and `FencedCode` syntax nodes, so error logs and version strings pasted into a fenced block stay raw — but prose containing ISO-shaped tokens (a build tag, a serial number, the literal string "1999-12-31" written in a non-date context) still chips. There is no inline opt-out for prose dates the user wants to keep as plain text. A future fix could honor a leading backslash (`\2026-06-25` stays literal) or a configurable allowlist of contexts, but no escape syntax was added in v1.
@@ -383,9 +375,9 @@ The fence-aware backspace handler covers the "empty body line, cursor at column 
 
 The toolbar commands in `markdown-formatting.ts` mostly bail when `state.selection.ranges.length > 1` — they read `selection.main` and operate on a single range. Properly supporting multi-cursor for bold/italic/list/heading/quote/link would mean iterating ranges in reverse-document order (so earlier edits don't shift later range offsets) and composing one transaction with multiple changes. The math is tractable but tedious, and the target journaling workflow is single-cursor. Accepted as a v1 limitation.
 
-### Setext-style headings not detected by active-state
+### Setext-style heading parsing disabled (Phase 2.9c)
 
-The heading toggle button and active-state highlight only recognize ATX headings (`# Heading`). Setext headings (`===` / `---` underline) parse correctly via Lezer and render with heading size, but the toolbar's "is the cursor on a heading?" check walks for ATX-shaped nodes only. Cycling a setext heading via the button would also need a different rewrite path than the ATX cycle. Low impact — the journal is written in ATX exclusively — so no setext-awareness in v1.
+Setext headings (`===` / `---` underline) used to parse via Lezer and render with heading size. They were a footgun in list-heavy prose — typing a paragraph then a `-` on the next line retroactively re-rendered the paragraph as an H2 underline. Phase 2.9c disabled the SetextHeading extension entirely (`markdown({ extensions: [GFM, { remove: ['SetextHeading'] }] })` in MarkdownEditor.svelte). The journal is ATX-exclusive now; this was always the de-facto convention.
 
 ### Tab inside fenced code blocks bypasses the list-indent cap
 

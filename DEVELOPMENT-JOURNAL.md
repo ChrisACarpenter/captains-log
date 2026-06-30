@@ -893,3 +893,386 @@ Fix: mirror /journal's `onDestroy` and clear the timer. Trivial.
 
 This is the actual end of Phase 2.5. Cold-read the full editor + invalidation diff. Stage in logical chunks. Run the smoke tests Chris has been doing in-app — type during a save, toggle modes mid-edit, /capture-while-/journal-open. Commit. Then move to Phase 2.7.
 
+## 2026-06-26 — Phase 2.7 + 2.7b (onboarding, multi-day reminders, cross-app UX polish)
+
+A long session that covered all of Phase 2.7 plus a parallel polish pass (2.7b) that ran longer than 2.7 itself.
+
+### Dock icon reset bug (incidental, opened the day)
+
+When the main window restored from `.Accessory` activation policy (used by the menu-bar capture flow) back to `.Regular`, the dock icon dropped to the generic placeholder. Root cause: macOS clears `NSApplication.applicationIconImage` on the policy flip. Fix: `restore_dock_icon()` re-loads `icon.icns` from the bundle and re-sets it via objc2 — runs every time `restore_main_window` flips back to `.Regular`. Small, isolated, no design call needed.
+
+### Phase 2.7 — Onboarding wizard expansion
+
+Pre-design step before code: walked through the wizard end-to-end with Chris to lock the 5-step flow and the Ed images. Final shape:
+
+1. **Intro** — Ed waving, copy welcoming the user.
+2. **About you** — name, Bamboo title (the word *Bamboo* hyperlinks to Prodigy's BambooHR site), Jira project keys (comma-separated, normalized server-side, defaults `MAGE` if empty).
+3. **About your manager** — name + email (reuses the columns added in Phase 2.6).
+4. **Settings** — journal location picker, reminder time + day(s).
+5. **Complete** — Ed cheering, "Open your journal" CTA.
+
+Each step has a unique Ed image (waving / pointing / writing / pointing again / cheering) — Chris approved the placements after one iteration. Wizard state is local to the route; only commits to `app-settings.json` on the final step. Cancel = wizard goes home and writes nothing.
+
+### Multi-day reminders + tabbed Settings
+
+Triggered by a feature request from the MAGE devs after Chris demoed the app: "can we have reminders on multiple days, not just one?" Decision: build in two slices — first multi-day data model + UI, then the Settings tab restructure that the new field made necessary.
+
+**Data model:** `dayOfWeek: u8` → `daysOfWeek: Vec<u8>` in `ReminderSettings`. Serde back-compat shim via `ReminderSettingsRaw + From impl`:
+
+- If `daysOfWeek` is present (even `[]`), it wins — explicit empty array means user has opted out of reminders, not "fall back to legacy single value".
+- Else fall back to the legacy `dayOfWeek` field.
+
+This nuance bit us in adversarial round 1 — `unwrap_or_default` silently overrode the empty array with the legacy value. Fixed with an explicit `match` on `Option<Vec<u8>>`.
+
+**DST scheduling:** the original `next_reminder_time` used `Duration::days(7)` (fixed seconds), which drifts by an hour across spring-forward/fall-back. And `with_hour(2).unwrap()` panicked on the spring-forward gap. New `resolve_local_datetime` returns `None` on the gap (caller bumps by 7 days, preserves weekday) and earliest local time on the ambiguous fall-back hour. Naive-date arithmetic + per-target localization inside `next_reminder_time_for_day` keeps the actual local clock time stable across the boundary.
+
+**UI:** day-pill picker (Mon Tue Wed Thu Fri Sat Sun, multi-select). Pills use `--accent-primary` when selected; bumped pill text to `#1f0a02` (dark) when the day-pill failed contrast at 13px on `--accent-primary` (3.25:1 → AA fail; dark text → 9.5:1, pass). Adversarial round.
+
+**Settings tabs:** General / Reminders / Theme, persisted in `localStorage` so a Settings round-trip preserves the active tab. General sub-divided into "Your details…" / "Manager details…" / "Journal location…" sections (Chris-specified ellipses).
+
+### Three adversarial verification rounds
+
+Same workflow as Phase 2.5: Plan → Implement → Skeptic agents → triage → fix. Real bugs found this session:
+
+- **Empty `daysOfWeek` clobbered by legacy** — described above.
+- **DST spring-forward panic** — `.expect()` on `with_hour` crashed the scheduler.
+- **DST 1-hour drift** — `Duration::days(7)` is fixed seconds.
+- **Own-save race in `pendingCommit`** — `get_summary_hash` await was *after* `saveStatus = 'saved'`, leaving the external-update gate open for a window where the file mtime had updated but we hadn't refreshed the hash. Fix: hash refresh moved *before* the status flip.
+- **Concurrent `saveNow` clobbering pending state** — second save kicked off while first was in flight downgraded `saveStatus` from `'saving'` to `'dirty'`. Fix: `saveNow` reschedules instead of overwriting in-flight state.
+- **Pre-normalization signature mismatch** — Rust trims fields on save; frontend was hashing pre-normalize values, so external-update detection misfired. Fix: `normalizedSig` helper that compares post-normalization.
+- **/summary `onDestroy` missing `autoSaveTimer` cleanup** — dangling timer could fire on destroyed component. Mirrored `/journal`'s pattern.
+- **Day-pill contrast** — described above.
+
+8 real bugs total across the three rounds. The Skeptic-Agents workflow paid for itself again.
+
+### Dark-theme contrast audit + 30+ fixes
+
+Sweep across the app after Chris noted some text looked washed-out in dark mode. Worst offenders:
+
+- **`--accent-primary` on dark surfaces as text** — orange at the brand value is fine as a fill but fails AA when used for text on `--bg-surface` (dark). Added `--accent-primary-text: #ff8e51` (dark theme override) and migrated every usage where the accent was actually being read.
+- **`--accent-pink` as text on dark surfaces** — same problem. Added `--accent-pink-text: #ff80c0`.
+- **`text-muted` on `bg-elevated`** — 5+ sites. Bumped to `text-secondary` where the contrast didn't clear AA.
+- **`--accent-teal` in `LabelInput`'s palette** — 1.61:1 on dark surfaces, no fix possible without diverging from the brand teal. Dropped from the palette entirely. Existing labels using teal keep working (still in token set, just not in the picker).
+
+After the sweep, ran a Chrome devtools contrast pass across every screen in dark mode and didn't find a remaining AA fail.
+
+### UI legacy sweep + token cleanup
+
+Cleared the kind of cruft that accumulates faster than you realize:
+
+- **`var(--space-5)` was never defined** — found two callsites (Settings `.section` gap, `/summary` `.modal-actions`) silently rendering 0px. Switched both to `var(--space-6)`.
+- **`999px` raw values** for pill radii → `var(--radius-pill)`.
+- **`13px` raw value in `DatePickerPopover`** → `var(--text-caption)`.
+- **Four dead tokens** removed from `app.css` after grep showed zero callsites.
+- **Dead `.status-success`** class and dead `class="editor"` reference removed.
+- **`.card`** promoted from `/summary` to `app.css` as a global utility class.
+- **`.text-input`** promoted similarly (was duplicated across 4 routes).
+- **`.sent-status`** promoted (used by `SendToManagerButton` on both `/summary` and `/journal`).
+- **Stale Phase 2.5 comments** trimmed from `/journal` and `/summary`.
+
+### Shared component extractions
+
+Threshold: extract when ≥2 callsites with ≥80 LOC of duplication. Four extractions today:
+
+- **`ExternalUpdateBanner`** — snippet-based message slot, shared between `/journal` and `/summary`.
+- **`SaveStatus`** — 5 states (idle/dirty/saving/saved/error), renders as button (with `onRetry`) or span (without), all text overridable via props. Made it possible to put save status in a consistent location across `/journal`, `/summary`, `/capture`.
+- **`InputField`** — wraps `<label>` + `.text-input` + hint/warning. Supports `labelSnippet` for inline links (used for the *Bamboo* hyperlink in the wizard) and `hintSnippet` for inline markup. Hit one TypeScript snag — used `HTMLInputAttributes['autocomplete']` instead of the `AutoFill` type (not exported). Replaced with the type literal directly.
+- **`SendToManagerButton`** — by far the biggest extraction (~370 LOC). Owns `sentRecord`, `currentHash`, `managerEmail` state, listens to `weekly-file-changed` for the active `(year, week)`, contains the confirmation modal + send flow. Two bindable props (`sentStatusText`, `sentStatusIsStale`) let the parent render the "Last sent …" line wherever it wants. Side effect: bringing send-to-manager to `/journal` became a 2-line change (gated on a selected week).
+
+### WeekStripe scrollbar-gutter fix
+
+Chris noticed Noot's position and the day-of-week stripe shifted slightly between `/journal` (scrollable) and `/summary` + `/settings` (non-scrollable). Root cause: document scrollbar reserved a gutter on the scrollable route, shrinking the viewport by ~15px and pulling the centered stripe with it. Fix: `html { scrollbar-gutter: stable; }` in `app.css`. Reserves the gutter on every route. Tested across all four routes.
+
+### Button/UX standardization pass
+
+Chris-specified convention nailed down:
+
+- **Primary action always left, Cancel/Back/Discard always right.**
+- **Cancel/Back/Discard always `btn-ruby` (maroon).**
+- **Save status always leftmost in the actions row** on `/journal`, `/summary`, `/capture` — same scan location across all three routes.
+
+Per-route changes:
+
+- **`/capture`** — Submit ↔ Discard order swapped. SaveStatus moved into `.actions` row.
+- **`/settings`** — Cancel (was Done, gray) → `btn-ruby`, swapped with Done order. Section titles got Chris's ellipses ("Your details…").
+- **`/journal`** — Back button now always visible (was hidden when no entry selected). "Write Weekly Summary" link in the placeholder replaced with `btn-emerald` button. Send-to-manager button added via `SendToManagerButton` (gated on selected week). Removed the redundant "← Home" link from the sidebar header.
+- **`/summary`** — Done → Back rename (and `btn-ruby` color). Final button order: Save, Back, Send to manager.
+
+### Sent-status repositioning (took two passes)
+
+Chris wanted the "Last sent Jun 26 at 11:22 AM (edited since)" line above the actions row, right-justified, on both `/journal` and `/summary`. First attempt: added `margin-top: var(--space-4)` to `.sent-status`. Fixed `/journal` but the same margin doubled the spacing on `/summary`.
+
+Root cause: `.actions` on `/summary` was inside `.form`, which had `flex gap: var(--space-6)`. The margin stacked on top of the flex gap. On `/journal`, `.actions` was at the top level so no parent gap applied.
+
+Final fix: extracted `.actions-area` wrapper that contains both `.sent-status` and `.actions`. Lifted it *outside* `.form` on `/summary`. Mirrored the same structure on `/journal`. Zeroed `.sent-status` margins; parent `.actions-area` owns the spacing via flex `gap`. Now visually identical on both routes.
+
+### Code-volume rough cut
+
+- Tauri/Rust: small additions (`daysOfWeek`, DST helpers, `restore_dock_icon`, `bambooTitle`, `jiraProjectKeys`, `normalize_jira_keys`).
+- Frontend: ~1500 LOC added (wizard, 4 new components, Settings tabs), ~800 LOC removed (extraction targets, dead code, legacy duplication).
+- New tokens: `--accent-primary-text`, `--accent-pink-text`, `--bg-error-tint`, `--bg-error-tint-soft`, `--border-error`.
+- New utility classes promoted to `app.css`: `.text-input`, `.card`, `.sent-status`.
+- Tests: backend test count unchanged; `svelte-check` clean.
+
+### Adversarial verification rounds
+
+3 again. 8 real bugs found and fixed (listed above). No skeptic round flagged a bug the prior round had missed, which is the signal I look for to know the implementation has stabilized.
+
+### Tomorrow
+
+Two paths queued up:
+
+1. **Phase 2.8 — Custom Themes.** Already designed. Wide token surface (10-12 user-editable tokens), hex inputs with swatches, auto-derived contrast tokens, Theme = Light / Dark / Custom, persist in `app-settings.json`, export/import via Tauri dialogs (link to htmlcolorcodes.com from the picker for color reference), "Reset to Light/Dark" buttons.
+2. **Phase 2.9 — HTML email rendering + Preview modal.** The deferred Phase 2.5 Steps 5-6 finally getting a slot. `pulldown-cmark` for the body, iframe srcdoc for the preview.
+
+Chris's call which order. Custom Themes is the more user-facing of the two; HTML email is the more architecturally interesting.
+
+---
+
+## 2026-06-29 — Phase 2.9b shipped
+
+Phase 2.9 was dark-released on the 26th because the `.eml` send path opens Apple Mail read-only — every send became a Message → Edit-as-New-Message dance instead of the 1-click flow we had pre-2.9. 2.9b finishes the job: Mail tab in Settings, three first-class send modes (Gmail / Native Mac Mail / Outlook), universal Preview modal with clipboard, plus two scheduler bugs that surfaced while testing the rollover behavior.
+
+### Nine slices in one session
+
+1. **`JournalSettings.user_email`** — new field. Pins Gmail's `/mail/u/{address}` slot so multi-account users land in the right inbox; also feeds AppleScript's `sender` property in Native Mac Mail mode.
+2. **Settings → Mail tab** — radio for `mail_send_mode` (Gmail / Native Mac Mail / Outlook), body-format toggle, Native-only HTML toggle, Outlook flavor (Business / Personal). `serde(default)` on every new field so older settings.json files load with Gmail defaults — no migration code, no users yet.
+3. **Gmail compose dispatch** — `https://mail.google.com/mail/u/{ACCOUNT}/?view=cm&tf=cm&to=…&su=…&body=…`. `su` (NOT `subject` — Gmail uses the legacy name). All params encoded with `percent_encoding::NON_ALPHANUMERIC`. Warn-and-allow modal when the encoded URL exceeds 2000 chars (Gmail silently truncates above that).
+4. **Outlook compose dispatch** — Business host `outlook.office.com/mail/deeplink/compose`, Personal host `outlook.live.com/mail/0/deeplink/compose`. Subject param IS `subject` here. Multi-account handled by Microsoft's account picker.
+5. **Native Mac Mail via AppleScript** — spawn `osascript -` and pipe the script via stdin (sidesteps argv length cap on long bodies). Permission-denied detection on `-1743` / `Not authorised` substring in stderr surfaces an "Open Automation Settings" link to `x-apple.systempreferences:com.apple.preference.security?Privacy_Automation`. Backslash + double-quote escaping on every substituted value.
+6. **Send-button rewire + universal Preview** — single dispatch point on `/summary` and `/journal` runs through `compose_weekly_email` and branches on `mail_send_mode`. Preview modal is always available now (Chris's decision — was previously HtmlEml-only). Native HTML mode shows the rich render in a sandboxed iframe; the other modes show plaintext in a `<pre>`. Heads-up tip styled to match the existing Reminders-tab notification-permission tip exactly.
+7. **Reminder sleep-drift fix** — scheduler's `tokio::time::sleep_until` doesn't survive macOS hibernation cleanly. On wake, "now" can be hours past the scheduled instant and the next-fire calculation went stale. Reworked: each wake recomputes `chrono::Local::now()` and re-derives the next fire from there, so a Friday-4pm reminder that misses its slot because the laptop was asleep fires immediately on wake instead of sliding to the next configured day.
+8. **Clipboard on Preview** — `tauri-plugin-clipboard-manager` `writeHtml` (HTML + plaintext fallback) in Native HTML mode, `writeText` everywhere else. Inline confirmation in the modal.
+9. **Gmail flipped to default** — `MailSendMode::default() = Gmail`. Doesn't need Automation permission, works anywhere Chrome/Safari are signed into Gmail.
+
+### Bonus: week-rollover fix
+
+The 2.9b kickoff doc flagged a bug Chris was tripping on: capturing a Note first thing Monday morning was writing into the prior week's file. Root cause: `/capture` resolved the current ISO week once at component mount, and the same value rode through every subsequent submit. After a weekend hibernation the cached week was 7 days stale. Fix: resolve the week at the moment of write, not at mount. Same fix applied to the reminder scheduler (which had the same shape). New round-trip tests around the ISO-week boundary pin the behavior.
+
+### Key risks mitigated
+
+- **Gmail URL truncation** — silent above ~2000 encoded chars. Warn-and-allow modal lets Chris see the threshold instead of the recipient getting a half-clipped paragraph.
+- **AppleScript permission denial** — first-time `osascript` failures surface a clear in-app link to System Settings → Privacy → Automation, not a raw exit code.
+- **Multi-account Gmail routing** — `user_email` is preferred over the `/u/0` fallback so Chris's work and personal Gmail tabs stop fighting.
+- **Sleep drift** — both `/capture` and the reminder scheduler now recompute time on every fire, not at boot.
+
+### What Chris should smoke-test before sending his real report
+
+- Switch through all three modes in Settings → Mail and confirm the Preview modal updates (HTML in Native HTML mode; plaintext elsewhere).
+- Click **Copy to clipboard** in each mode — paste into a scratch buffer and confirm Native HTML mode pastes with formatting, others paste plain.
+- In Native Mac Mail mode with HTML toggle ON, send to himself first — confirm Mail opens an editable draft (no Edit-as-New-Message dance) with the correct `sender`.
+- In Gmail mode, click Send and confirm Gmail opens in `/mail/u/<his email>/…` (not `/u/0/…`) with To/Subject/Body all populated.
+- Try sending a long summary (the kind that historically triggered the `.eml` fallback) and watch for the URL-length warning.
+- Capture a Note on Monday morning and confirm it lands in the current week's file, not the prior one.
+- Set a Friday-4pm reminder, sleep the laptop over a weekend, wake it Monday and confirm the reminder fires (or is correctly rescheduled to next Friday — whichever the spec lands on).
+
+### Verification
+
+- `cargo test`: 181 passed, 0 failed.
+- `svelte-check`: 0 errors, 0 warnings, 196 files.
+- No migration code shipped, by design — no users yet, `serde(default)` covers existing local settings.json files with Gmail defaults.
+
+### Tomorrow
+
+**Phase 2.8 — Custom Themes** is next. Already designed (see the 2026-06-26 entry above). Wide token surface, hex inputs with swatches, Theme = Light / Dark / Custom, JSON export/import via Tauri dialogs.
+
+## 2026-06-29 (afternoon) — Phase 2.9c (Compose + paste, Settings restructure, editor rendering)
+
+Started smoke-testing 2.9b's Gmail mode. Quick win confirmed: `writeHtml`-via-Preview-Copy → paste into Gmail web compose → recipient gets a fully formatted email. Two clicks in CaptainsLog (Send → Copy in Preview), one Cmd+V in Gmail, one Send in Gmail. Worked beautifully.
+
+That triggered the "can we formalize this as a one-click mode?" thread that became 2.9c.
+
+### Compose + paste mode (the headline)
+
+The pattern: when sending, atomically (a) open the chosen client's compose with To + Subject pre-filled but body **empty**, and (b) write the rich-HTML body to the clipboard. The user lands in compose, presses Cmd+V in the body, hits Send. 2 clicks in CL + 1 keystroke + 1 click in client. Universal across Gmail / Outlook web / Mac Mail.
+
+Architecture:
+- **Setting:** `JournalSettings.mail_body_delivery: MailBodyDelivery` (`Prefilled` | `ClipboardPaste`, default `Prefilled`). Single global field, applies orthogonally to send mode. Picked Shape 2 from a small brainstorm workflow that compared three UX shapes — per-mode sub-radio, global radio, fold-into-existing-Body-format. Global radio is the simplest mental model (the user picks "do I want formatted or not" once); the other shapes either triple the settings surface or overload "format" with delivery-mechanism semantics.
+- **Backend:** `MailSend.body_in_clipboard: bool`. Threaded into the dispatch branch in `email.rs::compose_weekly_email`. When set, body arg becomes empty string for the URL/AppleScript builders; truncation warning is forced off (empty body can't overflow). Native Mac HTML `.eml` path takes precedence (peer override — the `.eml` already carries a styled body without needing a paste).
+- **Frontend:** in `confirmSend`, branch at the top: when `mailBodyDelivery === 'clipboard-paste'` AND not Native HTML, invoke `render_weekly_summary_preview` then `await writeHtml(html, text)` BEFORE invoking `compose_weekly_email`. If `writeHtml` throws, abort the openUrl entirely and surface an in-modal `clipboardPasteError` block with "Open Preview" recovery link. Silent empty-draft sends would be a worse failure mode than a visible error.
+- **UX:** Send button label flips to `Copy + Open Gmail` / `Copy + Open Mac Mail` / `Copy + Open Outlook` when clipboard mode is active. Modal mode-tip swaps to "Opens X with an empty body and copies the formatted message. Press Cmd+V in the draft, then Send."
+
+Also loosened the existing Preview-modal Copy button to ALWAYS use `writeHtml(html, text)` (it was branching on `previewShowsHtml` before). HTML-aware paste targets get rich content; plaintext targets get the plaintext fallback via OS pasteboard negotiation. This is the manual workaround Chris discovered during smoke testing; the new mode just automates it.
+
+### Settings → Mail tab restructure
+
+Chris's direction: Body delivery up top, Send-to-manager path at the very top of the Mail tab, Body format hidden when Compose + paste is selected. Reorganized to:
+
+```
+Settings → Mail
+─────────────────────────────────
+How should Send work?
+  Send-to-manager path: [Gmail (recommended) ▼]
+  Body delivery:        ◯ Prefilled draft
+                        ◉ Compose + paste (formatted)
+  [Body format hidden when clipboard-paste is selected]
+
+Gmail / Native Mac / Outlook (per-mode sections with tips + sub-controls)
+```
+
+Three orthogonal choices, all in one top section. The Body format radio (Clean text / Markdown source) is only visible when Body delivery is Prefilled — Compose + paste hand-delivers rich HTML, plaintext flavor is moot. Native Mac's old 3-way "Body format" radio (Clean text / Markdown source / Styled HTML) was conflating `mail_body_format` with `mail_native_html`. Split into a clean two-way Body format radio at the top + a standalone "Send as Styled HTML draft (.eml)" checkbox in the Native Mac section, labeled as an independent peer override of Body delivery.
+
+Forward-pointer tips on Gmail and Outlook sections now point at the new Compose + paste mode instead of the manual Preview → Copy workflow.
+
+### Editor rendering bugs (the long tail)
+
+While smoke-testing the mail path, Chris kept hitting list-rendering bugs. Wound up burning down a pile:
+
+**Setext heading on `-`** — typing a paragraph, Enter, then `- ` re-rendered the paragraph above as an H2 (Setext-style underline). Fixed with `{ remove: ['SetextHeading'] }` in the markdown extension config. CaptainsLog only emits ATX (`#`) headings; Setext is pure conflict-with-list-syntax with no upside for us.
+
+**Tab inserts literal `\t` instead of focus-traversing** — replaced `indentWithTab` from `@codemirror/commands` with a custom `listAwareTab` KeyBinding. Walks the lezer tree from the cursor head; inside `BulletList` / `OrderedList` / `ListItem` it calls `indentMore` / `indentLess`. Outside it returns `false` so the browser handles native Tab focus traversal. Fallback regex on the current line text for the cursor-on-blank-line-inside-list edge case where the tree resolves above the marker.
+
+**Auto-continue Enter regression** — first pass disabled the markdown package's keymap (`addKeymap: false`) because I incorrectly attributed an empty-list rendering bug to it. The actual culprit was hang-indent CSS clipping bullets (next section). Re-enabled by importing `markdownKeymap` and slotting it into our `keymap.of` array AFTER `listAwareTab` but BEFORE `defaultKeymap`. Without that precise ordering, `defaultKeymap`'s `insertNewline` swallows Enter first and the auto-continue never fires.
+
+**Hang-indent for wrapped list lines — second attempt** — first attempt was `padding-left: <depth>*2ch; text-indent: -2ch` on the line. Looked mathematically sound but ended up clipping the inline-block bullet widget in WebKit (the digits in numbered lists also went missing). Mechanism still unclear to me — text-indent should shift the inline-block by the negative amount but keep its width visible. Empirically: it doesn't, at least with how the bullet widget is structured.
+
+Second attempt: `padding-left: <depth>*2ch` on the line, `margin-left: -2ch` on the marker widget itself. The marker pulls ITSELF back out of the padding to sit at the line's left edge. Content area starts at the padding boundary; wrapped rows naturally align there. Bullet widget keeps its full visible width — no clipping. Works for bullets and single-digit numbered lists; double-digit (`10.+`) ordered items visually overlap the content by 1ch — acceptable for now.
+
+**Numbered list digits illegible in dark mode** — CodeMirror's default-highlight style colors `tags.processingInstruction` (which lezer-markdown assigns to every ListMark) with a near-background-color value. Bullet glyphs sidestepped this because BulletWidget is a Decoration.replace — the source `-` is gone, the widget is the only thing rendering. Numbered markers stayed as source text and inherited the unreadable color.
+
+Tried two failed fixes first: (1) override `tags.processingInstruction` in our HighlightStyle, (2) wrap with `Decoration.mark` + class + inline style. Both got out-cascaded by CodeMirror's default-highlight selector for reasons I never fully traced.
+
+Third attempt: full mirror of the bullet pattern. New `OrderedListMarkerWidget` class. `Decoration.replace` swaps the source digits for a `<span class="cm-md-list-num">{markerText}</span>`. Same DOM shape as the bullet, same CSS hooks (`color: --text-secondary; opacity: 0.75`). The widget's span is the ONLY thing the cascade sees — no syntax-highlight rule to fight against. Worked first try.
+
+Lesson worth keeping: **when CodeMirror's default highlight style wins the cascade against your custom CSS, replace the source with a widget instead of wrapping it.** Replacement gives you sole authority over the rendering. Wrapping leaves CM's classes in play.
+
+**Task list double-marker** — `- [ ] foo` was rendering as `• ☐ foo` (bullet AND checkbox). Fixed in two parts: (a) detect task list items by checking the parent `ListItem` for a `Task` child node, (b) when a task, still emit a `Decoration.replace({})` to hide the source `-`, but with NO widget — so the checkbox alone is the visual marker. First pass landed without (b) and left `- ☐ foo` (source dash visible). Quick follow-up fixed that.
+
+### Verification
+
+- `cargo test`: 191 passed, 0 failed (5 new tests for the empty-body URL/AppleScript builders + back-compat for `mail_body_delivery`).
+- `svelte-check`: 0 errors, 0 warnings, 196 files (one false positive midway — Svelte's parser tripped on a literal `<style>` inside a script comment; rephrased the comment).
+- Manual: smoke-tested Gmail / Native Mac / Outlook modes in both Prefilled and Compose + paste. Send-to-self in Gmail mode confirmed end-to-end. Real-world mail testing will surface anything we missed.
+
+### Tomorrow
+
+Chris's call: ship Phase 2.9c, start using the mail flow in earnest. **Phase 2.8 — Custom Themes** is the next planned phase (still as designed in the 2026-06-26 entry). Real-world mail use will likely surface bugs; if they accumulate they get folded into a 2.9d cleanup pass.
+
+One known limitation worth tracking: ordered-list hang-indent for double-digit markers (`10.+`) visually overlaps the content by 1ch. Punted intentionally; revisit if anyone actually writes a 10+ item ordered list in a weekly summary.
+
+## 2026-06-30 — Phase 2.8 (Custom Themes) + Colorful Labels
+
+Long session. Custom Themes shipped in 6 build slices + 2 follow-on fixes; Colorful Labels rode on top of it as a small feature with its own 4 slices + 3 blocker fixes. By end of day Chris was using a Custom palette in the live app, smoke-testing without finding crash-level bugs.
+
+### Phase 2.8 — Custom Themes
+
+**Token surface.** 12 user-editable primaries (3 backgrounds, 3 text, 2 borders, 4 accents) feeding into ~23 OKLCH-derived dependents. The plan workflow surfaced the audit + algorithm + UI shape in parallel; the lens reports converged on culori (~12 KB, MIT, OKLCH-native) for the color math. Chris locked the 4 design questions (sapphire as the 12th editable accent, `.captheme.json` extension, error palette re-derives from user's `--accent-pink`, first-time activation seeds from active theme silently with an inline hint) — all "Recommended" defaults.
+
+**Engine.** `$lib/theme.ts` exports `deriveTokens(primaries, base) → DerivedTokens`, `applyCustomTheme(derived)`, `clearCustomTheme()`, `contrastRatio(fg, bg)`, plus `SHIPPING_DARK_PRIMARIES` / `SHIPPING_LIGHT_PRIMARIES` constants. Walks OKLCH: detect base polarity from `--bg-surface` luminance, inherit hue from the surface (warm-cream surfaces → brown-black text automatically), iterate L until AA hits (4.5:1 text, 3:1 focus/UI). 38 vitest cases pin the behavior — including the reproduction tests (shipping Light and Dark are reproduced within OKLab dE ≤ 0.04 when seeded with their primaries).
+
+**Convergence fallback.** The first iteration of `iterateForContrast` silently returned the last candidate when it couldn't hit the target — that violated the locked "AA on every derivation" constraint. Fix: return `{value, ratio, converged}` and on non-convergence swap in better-of-`{#000, #fff}` against the host surface. Independently derive `targetEnd` from `inferBaseFromSurface(host)` rather than the global base arg, so a pale surface marked Dark still walks toward black. New test case at `bgSurface = #7e7e7e` (true mid-grey, where the walk bottoms out) actually exercises the fallback path. Earlier `#aaaaaa` would converge on the primary walk path and never hit the fallback — coverage gap caught by the recheck.
+
+**Persistence.** `AppSettings.theme` widened to `Light | Dark | Custom`. New `CustomTheme` struct with 12 hex fields. Per-field deserializer (`deserialize_hex6`) accepts only `^#[0-9a-fA-F]{6}$`, normalizes to lowercase. `serde(default)` so older `app-settings.json` files load cleanly with `theme: Dark, custom_theme: None`. Switching to a preset preserves the saved `custom_theme` payload — verified explicitly by `update_settings`.
+
+**Editor UI.** 4 section groups in the Theme tab (Backgrounds / Text / Borders / Accents), per-token row with 28×28 swatch + monospace hex input + inline AA contrast warnings under offending rows. Live preview on every keystroke. `customEditorDirty` flag flips on first edit, cleared on save/cancel. Re-clicking the active radio is a no-op. Switching Custom → Light → Custom preserves in-flight edits.
+
+**Export / Import.** `.captheme.json` schema (`$schema`, `name`, `author`, `base`, `tokens` with 12 hex keys). Tauri save/open dialogs. Strict validation on import. An "import pending" flag triggers a Cancel-guard prompt — clicking Cancel before Done asks before discarding the imported palette (the toast wording also shifted from "Theme loaded." to "Theme loaded — click Done to keep it." to set the right expectation).
+
+**Day-pill regression chase.** The token prep pass missed `.day-pill.active` hardcoded `color: #1f0a02`. First fix swapped to `var(--btn-primary-text)` — clean on Dark, but Light theme's `--btn-primary-text: #ffffff` defaulted to white on orange at ~3.1:1 (caption text fails AA). Fix landed: Light theme block now defines `--btn-primary-text: #1f0a02` so day-pills + primary buttons stay legible in both shipping themes. Custom themes still get the derived dark-or-white based on accent saturation.
+
+**Tray-menu escape hatch.** Chris noted "you can really get yourself into trouble making literally everything the same color" — added a **Preset Theme** submenu to the tray icon's right-click menu with Dark / Light items. Loads `AppSettings`, flips `theme`, broadcasts `settings-changed`. `custom_theme` payload survives — escape is reversible from Settings once the user can see again. Helper runs on the Tauri async runtime since `on_menu_event` is sync.
+
+### Colorful Labels (2.8 follow-on)
+
+Same session, layered on Custom Themes. The toggle gives each label a per-name hue (djb2 hash → 0-360 hue, fixed chroma 0.12, theme-aware lightness).
+
+**Design pivot mid-build.** The first slice plan persisted generated colors lazily — render a chip, fire-and-forget `set_label_color` to bake the hex into `labels.json`. Skeptic caught the theme-burn: a Dark-generated hue at L=0.70 becomes invisible under Light (~1.6-2.1:1 contrast). Pivot: **no lazy-persist.** `colorfulChipStyle` computes via `generateLabelColor()` at render time using the active theme's surface; `labels.json` `color` field is reserved for explicit user overrides from the future Label Manager. The `set_label_color` Tauri command stays in place for that future use. Same name → same hue across sessions (deterministic hash) but adapts to whichever theme is active when rendered.
+
+**Concurrency hardening.** Two label-mutating commands (`create_note` and `set_label_color`) both load-mutate-save `labels.json`. They were taking `storage.read()` locks; a fire-and-forget color write racing a count bump could lose one or both. Fix: both now take `storage.write()` locks. Also: `LocalFilesystem::write_metadata` now stages to `<name>.tmp` and renames over the target — readers either see pre-write or post-write content, never a torn file. 3 new concurrency tests (10 parallel `set_label_color` calls all persist; color + count both survive on overlapping label; stranded `.tmp` doesn't corrupt the destination).
+
+**Svelte 5 reactivity gap.** `colorfulChipStyle` reads `document.documentElement` at render time for the active theme + `--bg-surface`. Svelte can't track DOM reads as reactive dependencies, so a Custom-theme `bgSurface` tweak left chips painted with stale colors until remount. Fix: `themeNonce = $state(0)`; `settings-changed` listener bumps it on every emit; `colorfulChipStyle` reads `themeNonce` at the top of its body (bare expression, enough to register the dep). Now the chain reactively propagates: `update_settings` → `settings-changed` → `themeNonce++` → `colorfulChipStyle` re-runs → fresh DOM read → fresh chip color.
+
+**Concurrency test coverage caveat.** The new tests reach past the Tauri command wrappers and call the `_impl` helpers directly. They prove the lock pattern's data integrity but not that the wrappers themselves take a write lock — verifiable by inspection. A future refactor that downgrades to `.read()` wouldn't be caught. Acceptable for now; a real wrapper test would need `tauri::test::mock_builder`.
+
+### Lessons worth keeping
+
+- **When CodeMirror's default highlight style wins the cascade against your custom CSS, replace the source with a widget instead of wrapping it.** (Already in the 2026-06-29 entry; came up again today indirectly when designing the OKLCH widget approach for label hues.)
+- **For derivation engines, return `{value, converged}` not just `value`.** A silent best-effort that misses the target is the worst failure mode — looks like a bug, gets shipped, gets discovered by a user. Make non-convergence a typed result; fall back to a known-good value.
+- **Lazy-persist is theme-coherence's enemy.** Any computed value that's a function of the active theme should be RE-computed on theme change, not cached to disk. The "save it once, read forever" pattern only works when the inputs to computation never change.
+
+### Verification
+
+- `cargo test`: 207 passed, 0 failed.
+- `vitest run`: 38 passed (theme.test.ts).
+- `svelte-check`: 412 files, 0 errors, 0 warnings.
+- Manual: Chris ran the app with a Custom theme end-of-day, switched between Light/Dark/Custom via the in-app picker AND the tray menu, toggled Colorful Labels on/off, didn't surface anything crash-level. Real-world use will keep flushing bugs.
+
+### Tomorrow
+
+Chris is using 2.8 + Colorful Labels in earnest and will report bugs as they appear. **Phase 3 — Search & Navigation** is the next planned phase (full-text across weekly files, label/date/file filters, click-to-jump, year/week tree at scale). If 2.8 bugs accumulate they get folded into a 2.8c cleanup pass before Phase 3 starts.
+
+## 2026-06-30 (later) — Phase 2.8c: onboarding polish + Preview modal refactor
+
+Same day, later session. Chris asked for a settings-file delete to retrigger the first-run wizard and also flagged a Gmail + Compose+paste clipboard-skip he'd hit "but couldn't reproduce." Both threads turned into a small polish phase that absorbed a shared-component extraction pass and a SendToManagerButton Preview refactor onto the shared Modal.
+
+### The Gmail clipboard-skip bug
+
+Root cause was a tighter-than-it-looks frontend condition. `confirmSend` had:
+
+```ts
+if (mailBodyDelivery === 'clipboard-paste' && !mailNativeHtml) {
+  await writeHtml(html, text);
+}
+```
+
+Reads correctly at first glance — "if clipboard-paste mode and not Native HTML, write HTML to clipboard." The bug: the backend's peer-override is `mode == NativeMail && native_html`, NOT `native_html` alone. If `mailNativeHtml` had ever been flipped to true (e.g. from Chris experimenting with Native Mac mode earlier), the Mail tab's UI hid the toggle whenever the user wasn't in Native Mac mode — so once it was stuck on, there was no way back from Gmail mode to flip it off. Frontend skipped `writeHtml`, backend correctly emitted an empty-body Gmail URL (because `body_in_clipboard` was true), result: open compose, paste nothing, send empty. Silent failure mode is the worst kind.
+
+Fix: drop the `&& !mailNativeHtml` guard. Clipboard always populates in clipboard-paste mode. Backend keeps its existing peer-override handling for the Native Mac `.eml` path (where the styled body's already in the message, no clipboard needed). Updated `previewShowsHtml` to match (so the Preview iframe also reflects what'll actually be on the clipboard).
+
+Lesson worth keeping: **when frontend and backend each have their own version of "should I do X?" logic for the same setting, they will eventually disagree.** The fix is to make the frontend ask the backend (or share a derivation), not to manually re-derive it. Filed mentally for the next time this comes up — for 2.8c we just patched the divergence point.
+
+### Shared component extractions
+
+Onboarding had grown 5 steps; settings had 3 tabs each with their own modal patterns; send-to-manager had its own inline backdrop. Component duplication was getting silly. Extracted:
+
+- **`Modal.svelte`** — backdrop dim + 8px blur, body-scroll lock, topmost-Escape stack (so a nested Modal closes before the parent), focus restore on close, `zLayer` prop (`base` / `nested`) for the rare case of stacked modals, `maxWidth` prop. Owns the chrome; consumer slots body markup + actions row.
+- **`ConfirmDialog.svelte`** — thin wrapper that hands Modal `zLayer="nested"` and a standard message + actions row shape. Used by the unsaved-work-prompt-at-quit + Theme tab's "discard pending import" prompt + the Discard-draft confirmation.
+- **`LoadingOverlay.svelte`** — reusable spinner with optional message string. Sits inside a Modal when shown.
+- **`PointerFinger.svelte`** — 32×32 sprite (from `ui-guide-hands`) + bob animation. Restored from an earlier-refactor regression where someone (probably me) inlined the sprite into a single step and the abstraction got lost.
+- **`StepHeader.svelte`** — h1/h2 + `.lead` block shared across all 5 wizard steps. Levels chosen per-step: h1 on Intro + Complete (top-of-flow page titles), h2 on the three form steps in the middle. Tried tightening h1's `.lead` margin during the extraction; regressed the Welcome / All-set screens visually; reverted to a single rule. Note in the file explains why; if anyone tries that "optimization" again the comment will catch it.
+- **`PathPickerField.svelte`** — label + text input + Browse… button + hint + warning microcopy. Wraps the Tauri `tauri-plugin-dialog` open-folder invocation. Onboarding step 4 + `/settings` journal-location row use it; future backup/export destinations can plug in for free.
+
+Cross-app side-effects of having the chrome centralized: dim+blur backdrops applied everywhere (some surfaces had a flat scrim before); Title Case button labels became the universal convention (was inconsistent); btn-emerald / ruby / marble color tokens carried through every confirm dialog. Also fixed the radio-circle treatment in Theme and Mail tabs — both were rolling their own; replaced with a `:has()` pure-CSS selector that hooks into the standard input + label markup so future radio groups inherit it automatically.
+
+### SendToManagerButton Preview refactor
+
+Chris's four asks (verbatim):
+1. Is the Preview popup using our shared popup components? (No — it had its own inline backdrop.)
+2. "Close preview" → "Close", "Copy to clipboard" → "Copy To Clipboard".
+3. Buttons side-by-side, lower-right, Close immediately to the left of Copy — like every other modal.
+4. Show the fully formatted HTML render when Body delivery is Compose + paste (was falling back to plaintext).
+5. Add a "From:" line at the top showing the user's email address.
+
+Refactored the markup to wrap with `<Modal zLayer="nested" maxWidth="min(640px, calc(100vw - 32px))">`. From line is gated on `userEmail` being set — falls off cleanly when it isn't. `previewShowsHtml` derived widened to include `clipboard-paste`, so Compose+paste now shows the iframe render and Chris can see what the recipient will actually get.
+
+Button placement got an iteration. First pass: `justify-content: space-between` so Close was far-left and Copy was far-right. Chris pushed back — the convention everywhere else is Close + Copy together in the lower-right corner, like a system dialog. Reshuffled the DOM so the status pill renders FIRST in the actions row, gave it `margin-right: auto`, and let the row inherit `.modal-actions`' `justify-content: flex-end`. Result: pill anchors left when present, Close + Copy hug right with their normal `gap-3` spacing between them. Works for the 2-button (no pill) case AND the 3-element (pill present) case without needing per-child overrides.
+
+Cleanup: removed `.preview-backdrop`, `.preview-modal`, `.preview-modal iframe`, `.preview-recipient`, `.preview-close` CSS (Modal owns those concerns now). Added `.preview-header-line` (the From: + To: text) and `.preview-iframe` (carried over the iframe styling from `.preview-modal iframe`). Kept `.preview-plaintext`, `.preview-note`, `.preview-actions`, `.copy-status` — still in use.
+
+### Confirm-modal refactor (the "one last fix" of the day)
+
+Chris caught at end of day that the OTHER popup in `SendToManagerButton` — the "Send weekly summary?" confirm that opens BEFORE the Preview — was still on its own inline `.modal-backdrop` + `.modal` markup. Embarrassing miss on my part during the first 2.8c pass; the Preview refactor was the obvious target and the confirm hid behind it.
+
+Same pattern as Preview: wrap with `<Modal open={true} onClose={dismissConfirm} title="Send weekly summary?" maxWidth="min(520px, calc(100vw - 32px))">`. Title prop carries the heading so the inner `<h2>` goes away. The body's prose, conditional warnings/errors, and 3-button actions row (Send / Cancel / Preview, or Send anyway / Cancel / Preview in the truncation-warn case) all move inside the Modal's children slot wrapped in a `.send-confirm-body` div. Paragraph styling + `<strong>` font-treatment re-scoped to `.send-confirm-body p` / `.send-confirm-body p :global(strong)` so they don't drift across the component's other contexts.
+
+The cleanup-side benefit: dropped a window-level `escListener` block + its `let escListener` declaration + the `onDestroy` removal. Modal's topmost-stack Escape listener owns it now for both Confirm AND Preview. Preview's `onClose={closePreview}` already bumps `previewToken` (which is the bookkeeping the legacy listener existed for), so deleting the local handler doesn't lose any cancellation behavior — `closePreview` was the right home for that logic all along.
+
+Verified `dismissConfirm`'s `if (isSending) return;` guard still works correctly: Modal's backdrop click + Escape both route through `onClose={dismissConfirm}`, so the existing guard keeps the modal sticky while a send is in flight. No new state needed.
+
+Lesson: **when refactoring "one of two popups in this file," check the other one in the same pass.** Chris had to flag it as a separate ask. Five-minute fix, but a polish phase isn't really "done" if half the chrome is still inline.
+
+### Lessons worth keeping
+
+- **When frontend and backend each derive "should I do X?" from the same setting, they will eventually disagree.** Share the derivation or have one ask the other. Don't re-implement the logic on both sides.
+- **`justify-content: space-between` is not the same as "lower-right corner buttons."** Close + Copy together on the right is the convention; status pills get their own anchor (`margin-right: auto` on the pill is cleaner than `margin-left: auto` on a button).
+- **A bug that only reproduces with stale state from a prior session is the worst kind to debug** — Chris said "I'm not sure how it happened to be honest." It happened because Native Mac mode hid the toggle that would have let him un-stick the flag. Defensive UX wins: never hide a control that's currently affecting behavior.
+
+### Verification
+
+- `svelte-check`: 420 files, 0 errors, 0 warnings.
+- Manual: deleted `~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` to retrigger the first-run wizard; walked through all 5 steps with the new shared components in place; smoke-tested the Preview modal on Gmail / Native Mac / Outlook in both Prefilled and Compose+paste modes; verified Close + Copy placement matches `/journal` + `/summary` + ConfirmDialog buttons; confirmed From line only renders when `user_email` is set.
+
+### Tomorrow
+
+Chris is going to use the app end-to-end with the new chrome + Preview refactor in earnest. **Phase 3a — Label Library viewer + bulk management** is still the next planned phase. Any 2.8/2.8b/2.8c bugs that surface get folded into a small cleanup pass before 3a kicks off.
+

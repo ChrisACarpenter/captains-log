@@ -10,6 +10,7 @@
 
 pub mod commands;
 pub mod email;
+pub mod email_html;
 pub mod labels;
 pub mod notes;
 pub mod reminders;
@@ -25,7 +26,7 @@ use tauri::{
     image::Image,
     menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_window_state::StateFlags;
@@ -80,6 +81,19 @@ const QUIT_MENU_ID: &str = "quit-app";
 /// before unhiding the main window so the Dock icon reappears.
 const SHOW_MAIN_MENU_ID: &str = "show-main";
 
+/// Tray-menu escape hatch for the "I painted myself into a corner with
+/// Custom themes" case — if the user picks colors that make the in-app
+/// theme picker unreadable, they can still right-click the tray icon
+/// and flip back to a preset. Pair of ids lives under the
+/// `Preset Theme` submenu in the tray context menu.
+///
+/// The handler intentionally does NOT clear the saved Custom payload —
+/// `AppSettings.custom_theme` survives the switch so the user can
+/// re-activate Custom (via the Settings UI, once they can see it again)
+/// without re-entering their 12 tokens.
+const SET_THEME_LIGHT_MENU_ID: &str = "set-theme-light";
+const SET_THEME_DARK_MENU_ID: &str = "set-theme-dark";
+
 // ---------------------------------------------------------------------------
 // Close-flow helpers
 // ---------------------------------------------------------------------------
@@ -100,17 +114,129 @@ fn hide_main_to_accessory(app: &AppHandle) {
 /// `.Regular` BEFORE `.show()` — otherwise the Dock icon stays hidden and
 /// the window appears in a half-state (visible window, no Cmd-Tab presence).
 ///
+/// Also re-asserts the bundle's icon on the Dock. The macOS
+/// `.Accessory` → `.Regular` transition can leave NSApplication with a
+/// default icon image instead of the bundle's (Tauri-level quirk: the
+/// policy flip nukes NSApp.applicationIconImage). Without this call,
+/// Show Captain's Log from the tray would bring back the window with a
+/// generic gray "default app" icon in the Dock instead of the pet-book.
+///
 /// Called from the tray "Show Captain's Log" menu item AND from the
 /// notification "Write" action (so opening the summary from a notification
 /// while the app is hidden does the right thing).
 pub(crate) fn restore_main_window(app: &AppHandle) {
     #[cfg(target_os = "macos")]
-    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    {
+        let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+        restore_dock_icon();
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Re-load the bundle's `icon.icns` and assign it to
+/// `NSApplication.sharedApplication.applicationIconImage`. Called from
+/// `restore_main_window` to recover the Dock icon after a
+/// `.Accessory` → `.Regular` activation-policy flip.
+///
+/// No-op when the app is running from a bare binary (`cargo tauri dev`):
+/// `NSBundle.mainBundle pathForResource:ofType:` returns nil because
+/// the binary isn't wrapped in an `.app` and has no Resources/ folder.
+/// Logged silently and returns; dev mode never had the right Dock icon
+/// to begin with, so there's nothing to restore.
+#[cfg(target_os = "macos")]
+fn restore_dock_icon() {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSBundle, NSString};
+
+    // SAFETY: All msg_send! calls below are to documented AppKit
+    // selectors with stable signatures since macOS 10.0
+    // (NSBundle.pathForResource:ofType:, NSImage.initWithContentsOfFile:,
+    // NSApplication.sharedApplication, NSApplication.setApplicationIconImage:).
+    // Return values are typed at the call sites. Nil-checks gate every
+    // pointer before dereference.
+    unsafe {
+        let bundle = NSBundle::mainBundle();
+        let resource_name = NSString::from_str("icon");
+        let resource_type = NSString::from_str("icns");
+        let icon_path: *mut AnyObject = msg_send![
+            &*bundle,
+            pathForResource: &*resource_name,
+            ofType: &*resource_type
+        ];
+        if icon_path.is_null() {
+            // Likely running unbundled (cargo tauri dev). Nothing to do.
+            return;
+        }
+
+        let nsimage_class = objc2::runtime::AnyClass::get(c"NSImage")
+            .expect("NSImage class must be available on macOS");
+        let alloc: *mut AnyObject = msg_send![nsimage_class, alloc];
+        let image: *mut AnyObject = msg_send![alloc, initWithContentsOfFile: icon_path];
+        if image.is_null() {
+            eprintln!("[dock-icon] icon.icns failed to load from bundle");
+            return;
+        }
+
+        let nsapp_class = objc2::runtime::AnyClass::get(c"NSApplication")
+            .expect("NSApplication class must be available on macOS");
+        let nsapp: *mut AnyObject = msg_send![nsapp_class, sharedApplication];
+        let _: () = msg_send![nsapp, setApplicationIconImage: image];
+    }
+}
+
+/// Tray-menu handler for the Preset Theme submenu. Loads AppSettings,
+/// flips the `theme` field to Light or Dark, saves, and broadcasts the
+/// usual `settings-changed` event so the open windows re-apply.
+///
+/// Deliberately does NOT touch `AppSettings.custom_theme`: switching to
+/// a preset via the tray is the escape hatch for when the Custom palette
+/// is broken/unreadable, NOT a request to throw the palette away. Same
+/// invariant the `update_settings` Tauri command holds.
+///
+/// Runs the I/O on the Tauri async runtime since `on_menu_event` is
+/// synchronous and `AppSettings::load/save` are async (tokio::fs).
+/// Errors are logged but not surfaced to the user — the tray menu has
+/// no way to show a dialog, and failures here are extremely rare
+/// (settings file gone / disk full).
+fn set_preset_theme_from_tray(app: &AppHandle, theme: settings::Theme) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let app_data_dir = match app.path().app_data_dir() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("[tray] preset-theme: no app_data_dir: {e}");
+                return;
+            }
+        };
+        let mut settings_value = match settings::AppSettings::load(&app_data_dir).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                // First-run state — no settings file yet. The wizard will
+                // pick up the user's choice when they reach the theme step.
+                // Tray-menu intervention here would create a half-formed
+                // settings file before the wizard runs.
+                eprintln!("[tray] preset-theme: skipped (first-run, no settings file)");
+                return;
+            }
+            Err(e) => {
+                eprintln!("[tray] preset-theme: load failed: {e}");
+                return;
+            }
+        };
+        settings_value.theme = theme;
+        if let Err(e) = settings_value.save(&app_data_dir).await {
+            eprintln!("[tray] preset-theme: save failed: {e}");
+            return;
+        }
+        // Tell open windows to re-read settings + re-apply the theme.
+        // Matches the broadcast the `update_settings` Tauri command does.
+        let _ = app.emit("settings-changed", ());
+    });
 }
 
 /// Quit flow: check the dirty registry, prompt if any surface has unsaved
@@ -252,7 +378,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // Auto-saves and restores window size/position/maximized state across
         // launches. VISIBLE flag dropped (the default would force-show every
         // window on launch, overriding tauri.conf.json's `"visible": false`
@@ -275,6 +403,8 @@ pub fn run() {
         .on_menu_event(|app, event| match event.id().as_ref() {
             SHOW_MAIN_MENU_ID => restore_main_window(app),
             QUIT_MENU_ID => try_quit(app),
+            SET_THEME_LIGHT_MENU_ID => set_preset_theme_from_tray(app, settings::Theme::Light),
+            SET_THEME_DARK_MENU_ID => set_preset_theme_from_tray(app, settings::Theme::Dark),
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
@@ -284,6 +414,11 @@ pub fn run() {
             commands::list_years,
             commands::list_weeks,
             commands::get_labels,
+            commands::set_label_color,
+            commands::rebuild_label_index,
+            commands::get_label_stats,
+            commands::rename_label,
+            commands::delete_label_cascade,
             commands::get_settings,
             commands::complete_first_run,
             commands::update_settings,
@@ -298,6 +433,8 @@ pub fn run() {
             commands::compose_weekly_email,
             commands::mark_weekly_summary_sent,
             commands::get_summary_hash,
+            commands::render_weekly_summary_preview,
+            commands::run_applescript,
         ])
         .setup(|app| {
             // Seed NSUserDefaults so WKWebView's continuous spell-checker
@@ -473,8 +610,23 @@ pub fn run() {
             // toggles the capture popup (existing behavior). The Quit item
             // shares `QUIT_MENU_ID` with the app menu's Cmd+Q; the unified
             // on_menu_event listener routes both to `try_quit`.
+            //
+            // The "Preset Theme" submenu is the escape hatch for the
+            // Custom-theme-painted-myself-into-a-corner case: if the user
+            // picks colors that make the in-app theme picker unreadable,
+            // they can right-click the tray and flip back to a preset
+            // without ever needing to see the Settings UI. AppSettings's
+            // `custom_theme` payload survives the switch so they can
+            // re-activate Custom once they can see again.
+            let theme_submenu = SubmenuBuilder::new(app, "Preset Theme")
+                .text(SET_THEME_DARK_MENU_ID, "Dark Mode")
+                .text(SET_THEME_LIGHT_MENU_ID, "Light Mode")
+                .build()?;
+
             let tray_menu = MenuBuilder::new(app)
                 .text(SHOW_MAIN_MENU_ID, "Show Captain's Log")
+                .separator()
+                .item(&theme_submenu)
                 .separator()
                 .text(QUIT_MENU_ID, "Quit Captain's Log")
                 .build()?;

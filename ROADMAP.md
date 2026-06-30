@@ -1,10 +1,12 @@
 # Captain's Log — Roadmap
 
-## Current phase: 2.5 + 2.5b ✅ done — next up Phase 2.7 (onboarding + Settings revisit)
+## Current phase: Phase 2.8 ✅ done — next up Phase 3a (Label library viewer + bulk management)
 
-Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session.
+Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
-**Next up: Phase 2.7** — onboarding wizard expansion + Settings layout revisit. Phase 2.5 Steps 5-7 (HTML email body + preview modal) remain deferred behind 2.7 since the Send flow already works in plaintext via 2.6.
+Phase 2.8 (Custom Themes) shipped 2026-06-30 — 12 user-editable primaries → ~23 OKLCH-derived tokens via culori, Theme = Light / Dark / Custom, AA contrast warnings, hex-input editor, `.captheme.json` export/import via Tauri dialogs, plus a "Colorful Labels" follow-on that gives each label a per-name hue (theme-aware, regenerates on switch — no lazy-persist, so no theme-burn). A tray-menu "Preset Theme" submenu (Dark / Light) is the escape hatch for when a Custom palette makes the in-app theme picker unreadable. Phase 2.8c (2026-06-30) layered a shared-component pass on top — `Modal`, `ConfirmDialog`, `LoadingOverlay`, `PointerFinger`, `StepHeader`, `PathPickerField` extracted out of onboarding / settings / send-to-manager — refactored the SendToManagerButton Preview popup onto the shared Modal (From: line gated on `user_email`, HTML render now shown in Compose+paste mode too, Close + Copy buttons placed side-by-side at the lower-right), and fixed a Gmail + Compose+paste clipboard-skip bug where a stale `mailNativeHtml` flag short-circuited the `writeHtml` call.
+
+**Next up: Phase 3a — Label Library viewer + bulk management.** Browse / filter all labels, drill from a label into the Notes that use it, surface the per-label color override picker that closes the loop on Phase 2.8b's `set_label_color` plumbing, plus bulk rename / merge / delete with atomic writes. Phase 3b then layers full-text search + date/file filters + click-to-jump on top of the same plumbing.
 
 ---
 
@@ -138,10 +140,68 @@ Slack/Typora-style live-preview editor on CodeMirror 6, markdown stays on disk b
 
 - [x] `ARCHITECTURE.md` (~4000 words): overview, three surfaces, storage model, live-preview architecture, toolbar + commands, multi-instance routing lesson, known limitations.
 
-### Deferred from Phase 2.5 (rolled into Phase 2.7 or later)
+### Phase 2.9 — HTML email body + Preview modal ✅ (shipped 2026-06-26, re-enabled via 2.9b)
 
-- [ ] **HTML email body via `pulldown-cmark`** — original Step 5. Send flow already works in plaintext via 2.6; HTML upgrade is non-blocking.
-- [ ] **Preview modal on `/summary`** — original Step 6. Same renderer as the send path, iframe srcdoc for isolation.
+The HTML renderer (pulldown-cmark + ammonia), multipart `.eml` writer, Preview modal, request-token lifecycle hardening. Initial release was dark — Apple Mail opens `.eml` read-only, regressing the 1-click flow. Re-enabled in 2.9b through the Native Mac Mail mode's HTML toggle and a universal Preview modal that works across all three send modes.
+
+### Phase 2.9b — Mail tab in Settings, user picks send mode ✅ (shipped 2026-06-29)
+
+Shipped as 9 slices in a single session. Mail tab in Settings + three first-class send modes + a universal Preview + two scheduler/rollover fixes that surfaced during the work.
+
+- [x] **`JournalSettings.user_email` field** — pins Gmail's `/mail/u/{address}` slot for multi-account routing and feeds AppleScript's `sender` so Native Mac Mail sends from the right account.
+- [x] **Settings → Mail tab** — radio group for send mode (Gmail / Native Mac Mail / Outlook), body-format toggle (Clean text / Markdown source), Native-only HTML toggle, Outlook flavor (Business / Personal). `serde(default)` on every field so older settings.json files load cleanly with Gmail defaults — no migration code.
+- [x] **Gmail compose dispatch** — URL template `https://mail.google.com/mail/u/{ACCOUNT}/?view=cm&tf=cm&to={TO}&su={SUBJECT}&body={BODY}`. `ACCOUNT = user_email` when set, else `0`. All params URL-encoded with `NON_ALPHANUMERIC`. Warn-and-allow modal when encoded URL > 2000 chars (Gmail silently truncates above that).
+- [x] **Outlook compose dispatch** — Business host `outlook.office.com/mail/deeplink/compose`, Personal host `outlook.live.com/mail/0/deeplink/compose`. Subject param is `subject` (distinct from Gmail's `su`).
+- [x] **Native Mac Mail via AppleScript** — spawn `osascript -` and pipe the script via stdin (sidesteps argv length cap). `sender` set when `user_email` configured. Permission-denied detection on `-1743` / `Not authorised` in stderr surfaces an "Open Automation Settings" link to `x-apple.systempreferences:com.apple.preference.security?Privacy_Automation`. Escapes backslashes and double quotes in substituted values.
+- [x] **Send-button rewire** — single dispatch point on `/summary` + `/journal` routes through `compose_weekly_email` then branches on `mail_send_mode`. Sent-log mark-as-sent fires only on confirmed dispatch.
+- [x] **Universal Preview modal** — always available regardless of mode. Native HTML mode shows the rich render in a sandboxed iframe; Gmail / Outlook / Native-plaintext modes show plaintext in a `<pre>`. Heads-up tip on the modal points at Automation Settings when Native Mac Mail is the chosen mode (style matches Reminders-tab notification-permission tip exactly).
+- [x] **Clipboard button on Preview** — `tauri-plugin-clipboard-manager` `writeHtml` (HTML + plaintext fallback) in Native HTML mode, `writeText` in plaintext modes. Inline confirmation in the modal.
+- [x] **Week-rollover fix** — `/capture` and the reminder scheduler now resolve the current ISO week at the moment of write, not at app boot. Previously, after a weekend system-sleep, the first Monday capture would write into the prior week's file. Backed by new round-trip tests around ISO-week boundaries.
+- [x] **Reminder sleep-drift fix** — scheduler loop wakes from `tokio::time::sleep_until` recomputes "now" from `chrono::Local::now()` and re-derives the next-fire instant rather than trusting the elapsed timer. macOS hibernation no longer leaves the next fire stuck in the past.
+- [x] **Gmail as default for new installs** — `MailSendMode::default() = Gmail`. Doesn't need Automation permission, works on any machine where the user already has a Gmail tab.
+
+**Out of scope (intentional):**
+- AppleScript + HTML via UI-scripting / RTF conversion. Known fragile; not worth the maintenance tax.
+- Cross-platform send paths (Windows / Linux). macOS-only while CaptainsLog stays on macOS.
+- Custom signatures, BCC, scheduling, multi-recipient.
+- Migration code for pre-2.9b settings.json. No users yet; `serde(default)` handles new installs cleanly.
+
+### Phase 2.9c — Compose + paste mode + Settings restructure + editor polish ✅ (shipped 2026-06-29)
+
+Layered on top of 2.9b in the same session. Started as a brainstorm about how to get formatted Gmail sends without losing 1-click ergonomics; grew to absorb a Settings UI restructure and a long tail of editor-rendering bugs that surfaced during smoke testing.
+
+**Compose + paste body-delivery mode**
+
+- [x] **Global `MailBodyDelivery` setting** — new enum (`Prefilled` / `ClipboardPaste`, default `Prefilled`). Orthogonal to send mode: the user picks once and it applies to all three clients (Gmail, Native Mac Mail, Outlook).
+- [x] **Send dispatch honors the mode** — `MailSend.body_in_clipboard` on the Rust struct. When set, Gmail/Outlook URL builders emit empty `body=` and AppleScript emits `content:""`. Truncation warning is auto-suppressed (an empty body can't overflow). Native Mac HTML `.eml` mode takes precedence (peer override).
+- [x] **Frontend writeHtml-before-openUrl** — `confirmSend` in `SendToManagerButton.svelte` calls `render_weekly_summary_preview` then `writeHtml(html, text)` BEFORE the compose invoke. If clipboard write throws, we abort the openUrl and surface an in-modal recovery block with "Open Preview" link. No silent empty-draft sends.
+- [x] **Send button label + hint flip** — `Copy + Open Gmail` / `Copy + Open Mac Mail` / `Copy + Open Outlook` when clipboard mode active. Modal mode-tip swaps to "Opens X with an empty body and copies the formatted message. Press Cmd+V in the draft, then Send."
+- [x] **Loosened Clipboard button** — the Preview-modal Copy button now ALWAYS calls `writeHtml(html, text)` regardless of mode (was branching on `previewShowsHtml` before). HTML-aware paste targets get rich content; plaintext targets get the plaintext fallback via OS pasteboard negotiation.
+
+**Settings → Mail tab restructure**
+
+- [x] **"How should Send work?" consolidated section at the top** — Send-to-manager path dropdown FIRST, then Body delivery radio, then Body format radio (conditional). Replaces the previous split where Body delivery sat above the send-mode picker as its own section.
+- [x] **Body format hidden in clipboard-paste mode** — the radio only renders when Body delivery is Prefilled. When clipboard-paste is active, plaintext flavor doesn't matter (recipient sees rendered HTML from the paste).
+- [x] **Native Mac HTML toggle promoted to a standalone checkbox** — was a 3-way radio (Clean text / Markdown source / Styled HTML) coupling `mail_body_format` to `mail_native_html`. Split into a separate "Send as Styled HTML draft (.eml)" checkbox under the Native Mac section, clearly labeled as an independent peer override.
+- [x] **Forward-pointer tips** — Gmail and Outlook tip bullets that used to point at the manual Preview → Copy workflow now point at the new Compose + paste mode. Native Mac tip unchanged (HTML toggle is the direct path there).
+
+**Editor rendering fixes** (surfaced during smoke testing)
+
+- [x] **Setext heading disable** — `markdown({ extensions: [GFM, { remove: ['SetextHeading'] }] })`. Typing a paragraph then a `-` on the next line no longer parses as an H2 underline (which retroactively re-rendered the paragraph above as a heading).
+- [x] **Tab key as focus traversal outside lists** — custom `listAwareTab` KeyBinding replaces `indentWithTab`. Walks the lezer tree from the cursor: inside a `BulletList` / `OrderedList` / `ListItem` it indents (nests). Outside it returns `false` so the browser handles native Tab focus traversal (fixes a keyboard-trap accessibility issue).
+- [x] **Markdown keymap re-enabled with explicit precedence** — imported `markdownKeymap` from `@codemirror/lang-markdown` and slotted it into our `keymap.of([...])` array AFTER `listAwareTab` but BEFORE `defaultKeymap`. Gives back the auto-continue Enter behavior for bullet AND numbered lists without letting `defaultKeymap`'s `insertNewline` swallow the event first.
+- [x] **Hang-indent for wrapped list lines** — new technique: `padding-left: <depth>*2ch` on the line, `margin-left: -2ch` on the marker widget. Marker pulls itself back to column 0; content area starts at column 2; wrapped rows naturally align under row 1's content. Previous attempt with `text-indent: -2ch` was clipping the inline-block bullet widget in WebKit (mechanism still unclear).
+- [x] **Numbered list digits readable in dark mode** — new `OrderedListMarkerWidget` mirrors `BulletWidget`: replaces source `1.` / `2.` etc. with a styled span (`.cm-md-list-num`). Replacing-via-widget bypasses CodeMirror's default-highlight rule for `tags.processingInstruction`, which was winning the cascade against any class-level color rule and leaving digits illegibly faint. Same color + opacity as the bullet glyph for visual consistency.
+- [x] **Task list double-marker** — `- [ ] item` was rendering as `• ☐ item` (bullet AND checkbox). Now suppresses the BulletWidget when the parent `ListItem` has a `Task` child node, AND still emits a `Decoration.replace({})` to hide the source `-`. Renders as just `☐ item`.
+
+**Out of scope (intentional):**
+- Per-line ordered-list padding to handle 10+ items (`12.` is 3 chars but padding-left assumes 2ch). Visual overlap for 10+ items accepted for now; lists in weekly summaries rarely run that long.
+- Hang-indent for blockquoted lists. The `.cm-md-list-line.cm-md-blockquote-line` joint selector is in place from 2.9b but untested under the new margin-left technique; punt to a real-world need.
+
+### Deferred from Phase 2.5
+
+- [x] **HTML email body via `pulldown-cmark`** — original Step 5 of 2.5. Landed in Phase 2.9 (renderer + sanitizer), re-enabled in 2.9b via Native Mac Mail's HTML toggle.
+- [x] **Preview modal on `/summary`** — original Step 6 of 2.5. Landed in Phase 2.9 inside the SendToManagerButton confirm modal; 2.9b made it universal across all send modes and added clipboard copy.
 
 ## Phase 2.5b — Editor follow-ups ✅ (shipped 2026-06-25, evening)
 
@@ -184,30 +244,97 @@ One-click handoff to the OS-default mail handler. No SMTP credentials, no OAuth 
 - [x] **`.eml` temp janitor** — startup task prunes `$TEMP/captainslog/*.eml` files older than 24h.
 - [x] **Backend ⇄ frontend label parity** — `format_week_label` matches the frontend's `weekLabel` exactly (full month names + en-dash), so the modal and the email subject read the same string.
 
-## Phase 2.7 — Onboarding + Settings revisit
+## Phase 2.7 — Onboarding + Settings revisit ✅ (shipped 2026-06-26)
 
 The first-run wizard captures the bare minimum today (name, journal location, reminder); after 2.6 the data model grew enough — and the Settings screen is long enough — that both deserve a polish pass.
 
-- [ ] **"Tell me about you" wizard step** — name, Bamboo title (with the word *Bamboo* linking to Prodigy's BambooHR site), Jira project keys (comma-separated, e.g. `MAGE`, multiple allowed).
-- [ ] **"Tell me about your manager" wizard step** — manager name + email. Both fields reuse the columns added in 2.6.
-- [ ] **Settings layout** — convert the single long-scroll form into tabs or section breaks (Your details / Manager / Journal location / Reminder / Theme). Adding 3+ new fields without grouping is the trigger.
-- [ ] **Persistence** — Bamboo title + Jira project keys join `JournalSettings`; same `.metadata/settings.json`.
+- [x] **"Tell me about you" wizard step** — name, Bamboo title (with the word *Bamboo* linking to Prodigy's BambooHR site), Jira project keys (comma-separated, e.g. `MAGE`, multiple allowed).
+- [x] **"Tell me about your manager" wizard step** — manager name + email. Both fields reuse the columns added in 2.6.
+- [x] **Settings layout** — single long-scroll form split into three tabs (General / Reminders / Theme), with General sub-sectioned ("Your details…" / "Manager details…" / "Journal location…").
+- [x] **Persistence** — Bamboo title + Jira project keys joined `JournalSettings`; same `.metadata/settings.json`.
+- [x] **Multi-day reminders** (added during 2.7, in response to a MAGE-dev feature request) — `dayOfWeek: u8` → `daysOfWeek: Vec<u8>`, day-pill picker in Settings; serde back-compat shim accepts legacy single-value files. DST-safe scheduling via `chrono` naive-date arithmetic + per-target localization (gap → bump by 7 days preserving weekday, ambiguous → earliest).
+- [x] **Dock icon restoration on `.Accessory → .Regular` flip** (incidental fix) — `restore_dock_icon()` re-sets `NSApplication.applicationIconImage` from the bundle's `icon.icns` via objc2 so the dock icon survives the activation-policy round-trip.
 
-## Phase 3 — Search & Navigation
+## Phase 2.7b — Cross-app UX polish ✅ (shipped 2026-06-26)
+
+Parallel polish pass that ran alongside 2.7 — UI legacy sweep, contrast audit, button/UX standardization, and component extractions to remove duplication ahead of Custom Themes.
+
+- [x] **Dark-theme contrast audit** — 30+ AA failures fixed across the app. Added `--accent-primary-text` (#ff8e51) and `--accent-pink-text` (#ff80c0) tokens for dark-surface readability; swept `text-muted` on `bg-elevated` to `text-secondary` where contrast failed; dropped `--accent-teal` from `LabelInput`'s palette (1.61:1 fail).
+- [x] **Button/UX standardization** — primary action always left, Cancel/Back/Discard always right and always `btn-ruby` (maroon). Save status always leftmost in the actions row on `/journal`, `/summary`, `/capture` for a unified scan location.
+- [x] **WeekStripe scrollbar-gutter fix** — `html { scrollbar-gutter: stable; }` so the day-of-week stripe doesn't shift between scrollable and non-scrollable routes.
+- [x] **`.actions-area` wrapper** — sent-status line lifted above the actions row on both `/journal` and `/summary`, right-justified, parent owns spacing via flex `gap` so the line spaces identically on both routes.
+- [x] **Shared component extractions** — `ExternalUpdateBanner`, `SaveStatus`, `InputField`, `SendToManagerButton` (the last brought send-to-manager to `/journal` for free, gated on a selected week).
+- [x] **`app.css` token & class promotion** — `.text-input`, `.card`, `.sent-status` promoted to global utility classes; error-tint tokens (`--bg-error-tint`, `--bg-error-tint-soft`, `--border-error`) added via `color-mix()`; four dead tokens removed.
+- [x] **Various fixes found by three rounds of adversarial verification** — own-save race in `pendingCommit`, `/summary` `onDestroy` missing `autoSaveTimer` cleanup, concurrent `saveNow` clobbering pending state, pre-normalization signature mismatch, undefined `var(--space-5)` in modal-actions, day-pill white-on-orange at 13px (3.25:1).
+
+## Phase 2.8 — Custom Themes ✅ (shipped 2026-06-30)
+
+Wide-token-surface OKLCH-derived themes. The user picks 12 primaries (3 bg + 3 text + 2 borders + 4 accents); the engine derives ~23 dependent tokens to hit WCAG AA against the chosen surfaces. Theme picker grows from Light/Dark to Light/Dark/Custom. Themes serialize as `.captheme.json` (schema v1) and round-trip via Tauri save/open dialogs.
+
+- [x] **Token prep pass** — promoted 4 hardcoded literals in `app.css` to tokens so derivation can override them (`--btn-primary-text`, `--accent-green-text`, `--brand-orange`/`--brand-maroon` aliases).
+- [x] **Derivation engine in TypeScript** (`$lib/theme.ts`) — culori (~12 KB, MIT, OKLCH-native) parses primaries to OKLCH, iterates L until AA ratios hit (4.5:1 text, 3:1 focus/UI). Reproduces shipping Light + Dark within OKLab dE ≤ 0.04 when seeded with their primaries (verified via 38 vitest cases).
+- [x] **`iterateForContrast` convergence guarantee** — returns `{value, ratio, converged}`; on non-convergence falls back to better-of-{black, white} against the host surface so AA-required tokens never paint a low-contrast value. `targetEnd` derives from `inferBaseFromSurface(host)` rather than the global base arg, so a pale surface marked Dark still walks toward black.
+- [x] **Rust persistence** — `AppSettings.theme` widened to `Light | Dark | Custom`. New `CustomTheme` struct with 12 hex fields; strict `^#[0-9a-fA-F]{6}$` deserializer normalizes to lowercase. `serde(default)` so legacy `app-settings.json` files load with `theme: Dark, custom_theme: None`. Switching theme to Light/Dark does NOT clobber the saved `custom_theme` payload (verified by `update_settings` invariant).
+- [x] **Theme tab editor** — 4 section groups (Backgrounds / Text / Borders / Accents), per-token row with 28×28 swatch + monospace hex input + AA contrast warning under offending rows. Live preview on every keystroke. First-time activation seeds from the currently active Light/Dark with an inline hint.
+- [x] **Edit lifecycle** — `customEditorDirty` flag flips on first edit, cleared on save/cancel. Re-clicking the active radio is a no-op. Switching Custom → Light → Custom preserves in-flight edits.
+- [x] **Export / Import** — `.captheme.json` schema (`{ $schema, name, author, base, tokens: { 12 keys } }`). Tauri save/open dialogs. Strict validation on import (schema version, required keys, hex format) with specific error messages. Imported themes are guarded by an "import pending" flag — clicking Cancel before Done prompts before discarding.
+- [x] **Polish + edge cases** — `--selection-fg` derived for legibility on pale accents. Mid-grey surface (L 0.50-0.60 OKLCH) forces explicit base pick. Saturated-surface warning when chroma > 0.15.
+- [x] **Tray-menu "Preset Theme" escape hatch** — right-click the tray icon → Preset Theme submenu → Dark Mode / Light Mode. Safety net when a Custom palette makes the in-app theme picker unreadable. `AppSettings.custom_theme` survives the swap so the user can re-activate Custom from Settings once they can see it again.
+
+### Phase 2.8b — Colorful Labels ✅ (shipped 2026-06-30)
+
+Layered on top of 2.8. Each label gets a per-name hue when the toggle is on; deterministic by name (same label → same hue across sessions), theme-aware (regenerates against the active surface so Dark-tuned hues don't burn into disk and become invisible under Light).
+
+- [x] **`JournalSettings.colorful_labels: bool`** (default `false`) — per-journal toggle. `serde(default)` for back-compat.
+- [x] **Settings → Theme tab checkbox** — "Colorful labels" with helper copy explaining the per-name determinism.
+- [x] **`generateLabelColor()` in `$lib/theme.ts`** — djb2 hash on label name → hue (0-360), fixed chroma 0.12, theme-aware lightness (0.70 dark / 0.45 light; Custom keys off `--bg-surface` OKLCH L).
+- [x] **No-lazy-persist design** — chip rendering computes via `generateLabelColor()` at render time. `labels.json` `color` field is reserved for explicit user overrides from the future Label Manager (the `set_label_color` Tauri command already ships and is preserved). Eliminates the theme-burn problem: a Dark-generated hue never gets written to disk where it would become invisible under Light.
+- [x] **Atomic labels.json writes** — `LocalFilesystem::write_metadata` stages to `<name>.tmp` in the same `.metadata/` directory then renames over the target. Combined with `storage.write().await` locks on `create_note` and `set_label_color`, concurrent mutations no longer race.
+- [x] **`themeNonce` reactivity** — `LabelInput.svelte` subscribes to `settings-changed`; on emit, `themeNonce += 1`. `colorfulChipStyle` reads `themeNonce` at the top of its body so Svelte tracks it as a dependency — Custom-theme `--bg-surface` tweaks propagate to chip colors on the next paint, no remount needed.
+
+**Known limitation:** double-digit ordered-list markers (`10.+`) visually overlap content by 1ch under the hang-indent technique from Phase 2.9c — unchanged in 2.8. Revisit if anyone writes a 10+ item ordered list.
+
+### Phase 2.8c — Onboarding polish + Preview modal refactor ✅ (shipped 2026-06-30)
+
+Layered on top of 2.8 / 2.8b in the same day. Started as a "delete my settings file" first-run smoke test that surfaced a Gmail clipboard-skip bug; grew to absorb a shared-component extraction pass and a SendToManagerButton Preview refactor onto the shared Modal.
+
+- [x] **Gmail + Compose+paste clipboard-skip fix** — `confirmSend` in `SendToManagerButton.svelte` had condition `if (mailBodyDelivery === 'clipboard-paste' && !mailNativeHtml)` — too broad. Once `mailNativeHtml` had ever been true (from earlier Native Mac exploration), the Mail-tab UI hid the toggle while in Gmail mode so the user couldn't turn it back off; frontend skipped the `writeHtml` call, backend correctly emitted an empty-body Gmail URL → silent empty-draft send. Dropped `&& !mailNativeHtml` from the condition: clipboard always populates in clipboard-paste mode. Backend still handles the Native Mac HTML `.eml` peer override correctly.
+- [x] **Shared component extractions** — `$lib/Modal.svelte` (backdrop dim+blur, body-scroll lock, topmost-Escape stack, focus management, `zLayer` + `maxWidth` props); `$lib/ConfirmDialog.svelte` (wraps Modal with `zLayer="nested"`); `$lib/LoadingOverlay.svelte` (reusable spinner); `$lib/PointerFinger.svelte` (32×32 sprite + bob animation, restored from an earlier-refactor regression); `$lib/onboarding/StepHeader.svelte` (h1/h2 + `.lead` pattern shared across all 5 wizard steps); `$lib/PathPickerField.svelte` (label + path input + Browse button + Tauri dialog plumbing, used by onboarding step 4 + `/settings` journal-location row). Replaces ~5 duplicated implementations across onboarding, settings, and send-to-manager surfaces.
+- [x] **Visual unification** — dim+blur backdrops everywhere, btn-emerald / ruby / marble color tokens, Title Case button labels, consistent radio-circle treatment across Theme and Mail tabs via `:has()` pure-CSS.
+- [x] **SendToManagerButton Preview refactor** — replaced the bespoke inline backdrop/modal markup with `<Modal>` (`zLayer="nested"`, `maxWidth=min(640px, calc(100vw - 32px))`). Added a `From:` line gated on `userEmail` (mirrors what mail clients hide by default — useful for the manager-facing preview). Widened the `previewShowsHtml` derived to include `mailBodyDelivery === 'clipboard-paste'` so Compose+paste users now see the fully rendered HTML in the iframe instead of plaintext. Buttons retitled (`Close preview` → `Close`, `Copy to clipboard` → `Copy To Clipboard`) and reordered so Close + Copy sit side-by-side at the lower-right matching every other modal in the app; the status pill (Copied! / error) sits at the row's left edge via `margin-right: auto` so the two buttons stay glued together.
+- [x] **SendToManagerButton Confirm refactor** — the "Send weekly summary?" confirm dialog was still on its own inline `.modal-backdrop` + `.modal` markup. Refactored onto `<Modal>` with the title prop carrying the dialog heading. Dropped the redundant window-level Escape listener and `escListener` plumbing — Modal's topmost-stack listener owns Escape for both Confirm and Preview now (Preview's `onClose={closePreview}` already does the `previewToken` bump that the legacy handler was responsible for). Removed `.modal-backdrop`, `.modal`, `.modal h2` rules from the component; re-scoped the paragraph + `<strong>` body styles under a `.send-confirm-body` wrapper.
+- [x] **StepHeader regression cleanup** — an earlier slice-3 onboarding extraction had tightened h1 `.lead` margin-bottom from `var(--space-6)` to `var(--space-4)` (violating "no behavior change" mandate; Welcome + All-set screens regressed). Dropped the level-based split, single `.lead { margin-bottom: var(--space-6) }` rule for both h1 and h2.
+- [x] **PathPickerField hint color unified** — was using `--text-muted` while InputField used `--text-secondary`. Switched to `--text-secondary` to match.
+
+**Verification:**
+- `svelte-check`: 420 files, 0 errors, 0 warnings.
+- Manual: deleted `app-settings.json` to retrigger first-run wizard, walked through all 5 steps; smoke-tested the Preview modal across Gmail / Native Mac / Outlook in both Prefilled and Compose+paste delivery modes; confirmed From line renders only when `user_email` is set and HTML preview renders for clipboard-paste mode.
+
+## Phase 3 — Label Library + Search & Navigation
+
+Sequenced intentionally: the Label library viewer (3a) is the natural starter because it needs label→Notes navigation, which is just a constrained search. Phase 3b's full-text search then generalizes that result-list + week-jump plumbing across all weekly content.
+
+### Phase 3a — Label library viewer + bulk management
+
+- [ ] **Browse + filter all labels** in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). Filter input (substring + maybe tag-cloud-by-recency).
+- [ ] **Drill from a label into the matching Notes / Summaries** — first surface that needs a label→content lookup. The plumbing here becomes Phase 3b's result-list + week-jump foundation.
+- [ ] **Per-label color override picker** — surfaces the `set_label_color` Tauri command that Phase 2.8b already shipped. When Colorful Labels is on, the picker shows the auto-generated hue (from `generateLabelColor`) AND a Set / Reset button. "Set" persists a user override to `labels.json`; "Reset" clears `color: None`. Closes the loop on the design Chris locked in — auto-derived for new labels, explicitly overridable here.
+- [ ] **Bulk rename / merge / delete** — natural extension of the same screen. Merge: pick 2+ labels, choose one as canonical, rewrites every occurrence across weekly files. Delete: remove a label from `labels.json` AND strip it from every Note/Summary that references it. Rename: in-place across files. All three need careful atomic-write semantics — reuse the staged `.tmp` + rename pattern from 2.8b's labels.json hardening.
+
+### Phase 3b — Search & Navigation
 
 - [ ] Full-text search across all weekly files
 - [ ] Filter by label, date range, file
 - [ ] Click search result → opens correct week, scrolls to correct Note
 - [ ] Year/week tree handles many years gracefully
 
-## Phase 4 — Link Enrichment + Label Library
+## Phase 4 — Link Enrichment
 
 - [ ] Detect URLs in Notes (Jira, GitHub, Slack, Confluence to start)
 - [ ] Fetch metadata via MCP connectors
 - [ ] Store enriched metadata inline or in a `.metadata/links/` cache
 - [ ] Display enriched cards in the rendered view (status, title, last update)
 - [ ] Room to grow to other systems beyond the initial four
-- [ ] **Label library viewer + bulk management** — browse + filter all labels in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). UX TBD; will need at minimum a filter input (substring + maybe tag-cloud-by-recency) and a way to drill from a label into the matching Notes/Summaries. Depends on Phase 3 search so labels can reuse the same result-list + week-jump plumbing. **Bulk rename/merge/delete** is a natural extension of the same screen — do both at once if it shapes up as one cohesive workflow.
 
 ## Phase 5 — Performance Review Module
 

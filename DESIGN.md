@@ -9,7 +9,7 @@ High-level architecture and key design decisions. Detailed specs live under [doc
 | App framework | Tauri 2.0 | Lightweight (~5MB), uses native WebKit on macOS, Rust backend, cross-platform |
 | Backend | Rust (via Tauri) | Memory-safe, fast, no GC overhead |
 | Frontend | TypeScript + Svelte 5 | Smaller bundle than React, less boilerplate, plays well with Tauri's lightweight philosophy |
-| Markdown editor | CodeMirror 6 (planned) | Mature, lightweight, good markdown support |
+| Markdown editor | CodeMirror 6 | Mature, lightweight, good markdown support; live-preview decorations layered on top (Phase 2.5) |
 | Storage (v1) | Plain markdown files on disk | Portable, future-proof, grep-able, git-friendly |
 | Sync (future) | Google Drive | Everyone at Prodigy has a Google account |
 | Encryption (future) | Layered on top of storage backend | Plug-in stage between content and disk/sync |
@@ -30,8 +30,10 @@ High-level architecture and key design decisions. Detailed specs live under [doc
 │      └─ GoogleDrive      (Phase 6)               │
 └──────────────────────────────────────────────────┘
                   ↕
-        Disk: journals/YYYY/YYYY-Www.md
-              + journals/.metadata/
+        Disk: <root>/YYYY/YYYY-Www.md
+              + <root>/.metadata/
+            (<root> defaults to ~/Documents/CaptainsLog,
+             user-picked during onboarding)
 ```
 
 ## Key design decisions
@@ -62,7 +64,7 @@ No date picker, no week picker, no category — it always goes to "now" in the c
 
 ### Two label inputs, one index
 
-See [docs/label-system.md](docs/label-system.md). Labels can come from a dedicated field OR from inline `#hashtags` in body text. Both feed `journals/.metadata/labels.json`. The autocomplete pool is the union of all labels ever used.
+See [docs/label-system.md](docs/label-system.md). Labels can come from a dedicated field OR from inline `#hashtags` in body text. Both feed `<root>/.metadata/labels.json`. The autocomplete pool is the union of all labels ever used.
 
 ### Markdown is the source of truth
 
@@ -77,8 +79,11 @@ This guarantees:
 
 ## Open architectural questions
 
-- **Editor:** CodeMirror 6 vs TipTap vs Milkdown. CodeMirror is more "code editor with markdown"; TipTap/Milkdown is more "WYSIWYG markdown." Leaning CodeMirror 6 for the power user feel, but final pick at start of Phase 2.
 - **State management:** Probably keep it simple — Svelte stores + Tauri IPC. Avoid heavy state libraries unless we hit a real need.
+
+## Resolved decisions
+
+- **Editor (Phase 2.5):** CodeMirror 6 shipped — markdown stays byte-identical on disk, Slack/Typora-style live-preview decorations hide markers (`**`, `*`, `~~`, `#`, etc.) without mutating the source. WYSIWYG approaches (TipTap, Milkdown) were considered but lose source fidelity.
 
 ## Voice & brand
 
@@ -92,4 +97,4 @@ UI copy follows Prodigy's brand voice (per the Prodigy deck template):
 
 Colors are defined in [STYLE-GUIDE.md](STYLE-GUIDE.md). Typography is TBD — see [ROADMAP.md](ROADMAP.md) "Deferred / TBD."
 
-The app supports dark and light themes. Dark is the default; a toggle lives in Settings (Phase 2). Theme infrastructure (CSS variables) ships in Phase 1.
+The app supports **Light, Dark, and Custom** themes. Dark is the default; the picker lives in Settings → Theme. Custom themes (Phase 2.8) let the user edit 12 primary colors; the engine derives ~23 dependent tokens via OKLCH with WCAG AA contrast validation, and themes export/import as `.captheme.json`. A tray-menu "Preset Theme" submenu is the escape hatch if a Custom palette makes the in-app picker unreadable. Phase 2.8b's "Colorful Labels" toggle gives each label a per-name hue that regenerates against the active surface (no theme-burn).

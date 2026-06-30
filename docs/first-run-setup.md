@@ -4,90 +4,114 @@ What happens the first time a user opens Captain's Log.
 
 ## Goal
 
-Get the user from "just installed" to "captured my first Note" in under 60 seconds.
+Get the user from "just installed" to "ready to capture" in under 90 seconds. Most fields are optional and skippable.
 
 ## Flow
 
-### Step 1 — Welcome
+The wizard ships as 5 steps. Implementation lives in [`app/src/lib/onboarding/`](../app/src/lib/onboarding/) — `Wizard.svelte` owns the orchestration; each step has its own component (`StepIntro`, `StepAboutYou`, `StepAboutManager`, `StepSettings`, `StepComplete`). Shared chrome: [StepHeader](../app/src/lib/onboarding/StepHeader.svelte), [TipBubble](../app/src/lib/onboarding/TipBubble.svelte), [PathPickerField](../app/src/lib/PathPickerField.svelte), [InputField](../app/src/lib/InputField.svelte), [PointerFinger](../app/src/lib/PointerFinger.svelte), [WizardFrame](../app/src/lib/onboarding/WizardFrame.svelte).
 
-Single screen, brand voice, sets the stage.
-
-> **Welcome to Captain's Log.**
->
-> A weekly work journal that makes self-reviews painless.
-> Capture what you do as you do it — Captain's Log handles the rest.
-
-Single button: **Get started**
-
-### Step 2 — Your name
+### Step 1 — Welcome (Intro)
 
 ```
-What should we call you?
+Welcome to Captain's Log.
 
-[ Chris ____________________ ]
+A weekly work journal with tools to help you write self reviews.
 
-This is just for the app — your journal stays on your machine.
-
-[ Back ]    [ Continue ]
+  [ Let's get started ]
 ```
 
-Used for:
+Brand-voice intro. Single CTA. No fields.
 
-- UI greetings ("Welcome back, Chris")
-- Future multi-user scenarios, if we ever go there
-- The auto-generated README at the journal root
-
-### Step 3 — Where should we store your journal?
+### Step 2 — Tell me about you
 
 ```
-Where should we store your journal files?
+Tell me about you.
 
-📁 ~/Documents/CaptainsLog/  (recommended)
-   └─ [ Use this location ]
+Helps personalize the app. Anything you skip you can always set later
+in Settings.
 
-📁 Choose another location...
-   └─ [ Browse ]
+  What should we call you?            [ ____________________ ]
+  Your email                          [ ____________________ ]
+  Your job title (Bamboo)             [ ____________________ ]
+  Jira project keys (comma-separated) [ ____________________ ]
 
-Your journal is yours. Everything is plain markdown on your machine.
-You can move it later in Settings.
+  Tip: These show up later in features like the weekly Send-to-Manager
+  email (your title in the signature) and link enrichment for Jira
+  tickets.
 
-[ Back ]    [ Continue ]
+  [ Back ]                          [ Continue ]
 ```
 
-- If the chosen location doesn't exist, create it.
-- If it exists and already contains journal data, offer to "use existing data" or "pick a different folder."
+All four fields optional. The Bamboo link in the tip opens BambooHR in the system browser. Jira keys normalize to all-caps on save (whitespace-trimmed, empties dropped).
 
-### Step 4 — Reminders (optional)
-
-```
-Want a weekly nudge to fill in your Weekly Summary?
-
-[ Yes, remind me ]    [ No thanks ]
-
-(If yes:)
-What day and time?
-[ Friday  ▾ ] at [ 4:00 PM ▾ ]
-
-[ Back ]    [ Continue ]
-```
-
-Default: Friday at 4:00 PM (end-of-week reflection time). User can change or disable later in Settings.
-
-### Step 5 — You're set
+### Step 3 — Tell me about your manager
 
 ```
-🚀 You're set.
+Tell me about your manager.
 
-Click the 🧭 icon in your menu bar (top right) to capture a Note.
-The Captain's Log window is in your Dock if you want to browse.
+For the weekly Send-to-Manager email flow. Optional.
 
-[ Open Captain's Log ]
+  Manager's name                      [ ____________________ ]
+  Manager's email                     [ ____________________ ]
+
+  Tip: Used to personalize the Send weekly summary button on the
+  /summary screen — name in the greeting, email in the To: field.
+
+  [ Back ]                          [ Continue ]
 ```
+
+### Step 4 — Settings (journal location + reminders)
+
+```
+Settings.
+
+Your journal lives in one folder. Pick where, then decide if you want
+a weekly nudge.
+
+  Folder        [ ~/Documents/CaptainsLog/ ] [ Browse… ]
+                Plain markdown on your machine.
+
+  ☑ Send me a weekly reminder to fill in the Weekly Summary
+    Day(s)     [ M T W T F S S — multi-select pills ]
+    Time       [ 4:00 PM ]
+
+  [ Back ]                          [ Finish setup ]
+```
+
+- Folder picker uses the shared [PathPickerField](../app/src/lib/PathPickerField.svelte) component (label + path input + Browse button + Tauri dialog). If the chosen folder doesn't exist, it's created. If it exists and already contains journal data, the existing data is used as-is.
+- Reminders default to off. When on, the day picker is multi-select pills (Phase 2.7 widened from a single dropdown). Time defaults to 4:00 PM (end-of-week reflection time).
+- "Finish setup" calls `complete_first_run` on the Rust side — writes settings, hot-swaps the storage layer, requests notification permission if reminders are enabled, and starts the scheduler.
+
+### Step 5 — All set
+
+```
+You're all set, Chris.
+
+Captain's Log is ready when you are.
+
+A few places to start:
+  - Tap the menu-bar icon (top-right) to capture a quick Note.
+  - Open the /summary screen at the end of the week.
+  - Browse past weeks from the sidebar in the journal window.
+
+  [ Start journaling… ]
+```
+
+Heading personalizes when a name was provided ("You're all set, {name}.") and falls back to "You're all set." otherwise.
 
 ## After setup
 
-- `settings.json` is written
-- `journals/2026/2026-Www.md` (current week) is created with an empty Weekly Summary scaffold
-- `.metadata/labels.json` initialized as an empty array
-- Menu bar and Dock icons appear
-- (If reminders enabled) Notification scheduler kicks off
+Triggered by `complete_first_run`:
+
+- `~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` written (theme, journal root pointer, `firstRunComplete: true`)
+- `<root>/.metadata/settings.json` written (per-journal — user details, manager, reminder, mail mode)
+- `<root>/.metadata/labels.json` initialized (empty `labels` array, version 1)
+- Storage layer hot-swaps to the chosen journal root (no app restart needed)
+- Notification permission requested via macOS UN if reminders enabled
+- Scheduler started; the first reminder fires at the next matching day/time
+- Activation policy flips to `.Regular` so the Dock icon appears
+- Menu-bar tray icon already present from launch
+
+## Re-running the wizard
+
+The wizard re-shows when `app-settings.json` is missing or `firstRunComplete` is false. For QA / iteration, deleting `~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` retriggers it on next launch.

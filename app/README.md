@@ -17,17 +17,29 @@ For project overview, vision, and roadmap, see the [top-level README](../README.
 app/
 ├── src/                  # Svelte frontend
 │   ├── app.html
-│   └── routes/           # SvelteKit file-based routing
+│   ├── app.css           # Global tokens, theme variables, utility classes
+│   ├── lib/              # Shared components (Modal, TipBubble, InputField, etc.)
+│   │   └── onboarding/   # Wizard frame + steps + shared StepHeader/TipBubble
+│   └── routes/           # SvelteKit file-based routing (+page, +layout per route)
 ├── src-tauri/            # Rust backend
 │   ├── src/
 │   │   ├── main.rs       # Entry point
-│   │   └── lib.rs        # Library + Tauri builder
+│   │   ├── lib.rs        # Library + Tauri builder
+│   │   ├── commands.rs   # Tauri IPC commands
+│   │   ├── storage.rs    # StorageBackend trait + LocalFilesystem
+│   │   ├── settings.rs   # AppSettings + JournalSettings structs
+│   │   ├── labels.rs     # Label index + parsing
+│   │   ├── email.rs      # Send-to-manager dispatch
+│   │   └── scheduler.rs  # Weekly-reminder scheduler
 │   ├── Cargo.toml
 │   └── tauri.conf.json   # Window config, bundle settings
-├── static/               # Static assets (favicons, fonts)
+├── static/               # Static assets (favicons, branded sprites, fonts)
+│   └── branded/          # Noot, guide hand, etc. — copied from RPG game atlas
 ├── package.json
 └── vite.config.js
 ```
+
+A full per-component index for the `lib/` directory lives at [`docs/components.md`](../docs/components.md).
 
 ## Prerequisites
 

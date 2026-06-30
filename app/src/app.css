@@ -34,7 +34,7 @@
 
   /* Brand accents */
   --accent-primary: #ff5c08;
-  --accent-primary-text: #ff7a3a; /* For orange text on dark elevated surfaces */
+  --accent-primary-text: #ff8e51; /* For orange text on dark surfaces. Lifted from #ff7a3a — that hue was 4.41:1 on bg-elevated, just under WCAG AA. This value clears ~5:1 on bg-elevated and ~6.6:1 on bg-base while staying recognisably "Prodigy orange". */
   --accent-maroon: #6c1e38;
 
   /* Lines & focus */
@@ -59,20 +59,41 @@
   /* Sapphire button (tokenized — was hardcoded #3a82c8) */
   --btn-sapphire: #3a82c8;
 
-  /* Palette — raw brand colors. Prefer semantic tokens above. */
-  --brand-orange: #ff5c08;
-  --brand-maroon: #6c1e38;
+  /* Primary-button text override. Tokenized so a custom theme with a very
+     pale --accent-primary can swap to dark text for AA. Stays #ffffff for
+     both shipping themes since the primary fill is always saturated orange. */
+  --btn-primary-text: #ffffff;
+
+  /* Emerald-button text override. Dark text is required because white-on-
+     emerald fails AA. Tokenized so custom themes can re-derive when
+     --accent-green changes. */
+  --accent-green-text: #1a2b0a;
+
+  /* Brand palette — aliases onto the semantic accent tokens above so that
+     custom-theme accent edits propagate to every `--brand-*` callsite. */
+  --brand-orange: var(--accent-primary);
+  --brand-maroon: var(--accent-maroon);
 
   --accent-pink: #eb018b;
+  /* For pink text on any dark surface — raw --accent-pink fails WCAG AA
+     across bg-base (3.57:1), bg-surface (2.73:1), and bg-elevated
+     (2.35:1). #ff80c0 clears ~6.5:1 on bg-base and ~5:1 on bg-elevated
+     (the toughest dark surface). Earlier shape used #ff5fb2 which was
+     enough for bg-base but still failed on bg-elevated (4.10:1). */
+  --accent-pink-text: #ff80c0;
   --accent-yellow: #fec702;
   --accent-sky: #aae6f5;
   --accent-lavender: #beaeed;
   --accent-green: #95c13b;
-  --accent-teal: #235151;
+
+  /* Semantic error-state tints derived from --accent-pink. Five
+     route files used to hand-roll these as raw rgba(235, 1, 139, ...)
+     literals — one token swap if the brand pink ever shifts now. */
+  --bg-error-tint: color-mix(in srgb, var(--accent-pink) 12%, transparent);
+  --bg-error-tint-soft: color-mix(in srgb, var(--accent-pink) 8%, transparent);
+  --border-error: color-mix(in srgb, var(--accent-pink) 40%, transparent);
 
   --neutral-cream: #f7e7db;
-  --neutral-tan: #c8ac92;
-  --neutral-near-black: #2b2a28;
 
   /* Spacing — 4px grid */
   --space-1: 4px;
@@ -121,6 +142,7 @@
   --text-muted: #7a5e48; /* Darkened: passes AA on cream (5.0:1) and white (5.8:1) */
 
   --accent-primary-text: #c44400; /* For orange text on light surfaces (4.6:1 on cream) */
+  --accent-pink-text: #b50079; /* For pink text on cream surfaces (5.5:1 on bg-base) */
 
   --border-decorative: rgba(255, 92, 8, 0.18);
   --border-structural: rgba(28, 22, 18, 0.12);
@@ -136,6 +158,17 @@
   --btn-marble-bg: #ffffff;
   --btn-marble-text: #1c1612;
   --btn-marble-border: rgba(255, 92, 8, 0.22); /* Dropped from 0.35 — less brand-loud on utility buttons */
+
+  /* Primary button / day-pill text on the orange --accent-primary fill.
+   * In Dark theme the default #ffffff clears AA against the saturated
+   * orange because of the surrounding dark surface contrast; in Light
+   * theme that same white drops to ~3.1:1 against the orange fill at
+   * 13px (caption size) — below AA's 4.5:1. The dark warm-black here
+   * is what .day-pill.active and .force-base-pill.active used to
+   * hardcode before they were tokenized in Phase 2.8 Slice 1. Custom
+   * themes override this via deriveTokens (pale accents get a derived
+   * dark; saturated accents stay #ffffff). */
+  --btn-primary-text: #1f0a02;
 }
 
 /* ---------- Base reset ---------- */
@@ -150,6 +183,65 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+}
+
+/* Reserve the scrollbar gutter always, even on routes that fit in the
+ * viewport. Without this, routes that scroll (/summary, /settings) get
+ * ~15px shaved off the right edge by macOS WKWebView's non-overlay
+ * scrollbars, while routes that don't scroll (home, /journal) get the
+ * full viewport. WeekStripe is `position: fixed; left: 0; right: 0`,
+ * so the same percentage values for the fill width + Noot left landed
+ * at different pixel positions on different routes — the bar visibly
+ * "lost time" and Noot drifted left on the scrolling routes. Reserving
+ * the gutter on the html element keeps the viewport width identical
+ * across every route. */
+html {
+  scrollbar-gutter: stable;
+}
+
+/* ---------- Scrollbars ----------
+ *
+ * Apply a consistent scrollbar treatment to every scrollable surface in
+ * the app. Without this, WebKit defaults vary based on the surface's
+ * background — the Labels list (inside a modal on bg-elevated) and the
+ * /summary content (on bg-surface) end up with visibly different
+ * scrollbar colors out of the box.
+ *
+ * Targets `*` so any overflow:auto / overflow:scroll element picks up
+ * the same look — modal bodies, panels, dropdowns, the editor scroller,
+ * everything. Tuned to be subtle (token-driven, semi-transparent thumb)
+ * so the bar reads as page chrome, not as a visual emphasis.
+ *
+ * WebKit (Safari + Tauri's WKWebView) honors `::-webkit-scrollbar-*`.
+ * Firefox (not currently a target, but defensive) uses the standard
+ * `scrollbar-width` + `scrollbar-color` properties. Both are set so
+ * the look stays consistent if we ever ship outside macOS.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 40%, transparent) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--text-muted) 35%, transparent);
+  border-radius: var(--radius-pill);
+  /* Inset transparent border gives the thumb visual padding against
+   * the track without taking width from the gutter. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-muted) 60%, transparent);
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 body {
@@ -186,7 +278,12 @@ p {
 
 ::selection {
   background: var(--accent-primary);
-  color: var(--neutral-cream);
+  /* --selection-fg is a custom-theme override that picks whichever of
+     {cream, near-black} reads cleanly against accent-primary blended at
+     30% over bg-surface. Falls back to --neutral-cream for Light/Dark
+     where the shipping orange is dark/saturated enough that cream is
+     always the right call. */
+  color: var(--selection-fg, var(--neutral-cream));
 }
 
 :focus-visible {
@@ -202,7 +299,9 @@ p {
  *   .btn .btn-sapphire  — primary navigation
  *   .btn .btn-ruby      — cancel / destructive (Esc/Backspace bound to these later)
  *   .btn .btn-marble    — secondary / neutral (default)
- * Disabled state uses .btn-stone treatment (no shadow, greyed).
+ * Disabled state is handled by the `.btn:disabled` selector below
+ * (no shadow, dimmed) — the earlier shape used a separate `.btn-stone`
+ * class which was never wired up.
  */
 .btn {
   display: inline-flex;
@@ -216,7 +315,7 @@ p {
   font-family: var(--font-display);
   font-size: var(--text-button);
   line-height: var(--text-button-lh);
-  color: #ffffff;
+  color: var(--btn-primary-text);
   background: var(--brand-orange);
   box-shadow: var(--btn-shadow);
   cursor: pointer;
@@ -240,7 +339,7 @@ p {
 }
 
 /* Button variants */
-.btn-emerald  { background: var(--accent-green); color: #1a2b0a; } /* Dark text — white-on-emerald fails AA */
+.btn-emerald  { background: var(--accent-green); color: var(--accent-green-text); } /* Dark text — white-on-emerald fails AA */
 .btn-sapphire { background: var(--btn-sapphire); }
 .btn-ruby     { background: var(--brand-maroon); }
 .btn-marble   {
@@ -251,6 +350,106 @@ p {
 
 .btn-sm { min-height: 36px; padding: 0 var(--space-3); }
 .btn-lg { min-height: 56px; padding: 0 var(--space-6); }
+
+/* Surface card — the basic "block of content on a tinted panel" shape.
+ * Used on the home welcome card and on /settings + /summary load-error
+ * placeholders. Promoted to a global utility because the same rule body
+ * lived in 3 separate route files. `.card.is-narrow` clamps width to
+ * 480px (matches the load-error variant); leave un-modified for the
+ * full-width welcome card variant. */
+.card {
+  padding: var(--space-6);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-lg);
+}
+.card.is-narrow {
+  max-width: 480px;
+}
+.card h2 {
+  margin-bottom: var(--space-3);
+}
+.card p {
+  color: var(--text-secondary);
+  margin-bottom: var(--space-3);
+}
+.card p:last-child {
+  margin-bottom: 0;
+}
+
+/* Sent-status line — the small italic "Sent Jun 26 at 4:12 PM" / "Last
+ * sent … (edited since)" affordance that surfaces above the actions
+ * row on /summary and /journal whenever a week has been sent to the
+ * manager. Right-justified so it sits at the right edge of the form,
+ * mirroring the right-aligned button cluster directly below it.
+ * --accent-primary on the is-stale variant draws attention that the
+ * content has changed since the last send (re-sending will deliver a
+ * different message). */
+.sent-status {
+  /* Zero margins — vertical spacing is owned by the parent wrapper
+   * (.actions-area on both /summary and /journal). Pinning the spacing
+   * to a parent flex container with explicit `gap` avoids the
+   * block-vs-flex margin-collapse difference between the two routes,
+   * which had /summary rendering with ~double the visual gap because
+   * its .page parent is block-flow (margins collapse) while
+   * /journal's .content is flex-column (margins don't). */
+  margin: 0;
+  font-size: var(--text-caption);
+  line-height: var(--text-caption-lh);
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: right;
+}
+.sent-status.is-stale {
+  color: var(--accent-primary);
+}
+
+/* Status-alert pill — the generic error-message affordance used across
+ * routes (capture submit errors, summary autosave failures, send-to-
+ * manager dispatch errors, etc.). Pink-tinted background + border carry
+ * the "needs attention" signal; text uses text-primary so the message
+ * itself is AA-legible against bg-error-tint in both themes (bare pink
+ * text on tinted pink fails contrast at 3.33:1).
+ *
+ * Same shape every route uses — promoted out of per-file style blocks
+ * so all error banners look identical and pick up the same token shifts
+ * if --bg-error-tint / --border-error ever change. */
+.status {
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--text-body);
+}
+.status-error {
+  background: var(--bg-error-tint);
+  color: var(--text-primary);
+  border: 1px solid var(--border-error);
+}
+
+/* Text-input utility — the standard form-field appearance used across
+ * /settings, /capture, and the onboarding wizard.
+ *
+ * The background is controlled by --input-bg with a default of
+ * --bg-surface. Surfaces sitting on bg-surface (e.g. the wizard card)
+ * should override to --input-bg: var(--bg-base) so the input has
+ * visible contrast against its parent card. */
+.text-input {
+  width: 100%;
+  padding: var(--space-3);
+  background: var(--input-bg, var(--bg-surface));
+  color: var(--text-primary);
+  border: 1px solid var(--border-structural);
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: var(--text-body);
+  line-height: var(--text-body-lh);
+  transition: border-color var(--transition-fast);
+}
+.text-input:focus-visible {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px var(--focus-glow);
+}
 
 /* Keyboard-key chip. Inline `<kbd>⌘⇧S</kbd>` in prose renders as a tiny
  * pill so the shortcut reads as a "key on a keyboard" affordance, not a

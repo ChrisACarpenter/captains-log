@@ -8,7 +8,21 @@
     "opener:default",
     "core:window:allow-hide",
     "dialog:allow-open",
+    "dialog:allow-save",
     "dialog:allow-confirm",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-write-html",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    {
+      "identifier": "fs:scope",
+      "allow": [
+        { "path": "$HOME/**" },
+        { "path": "$DOCUMENT/**" },
+        { "path": "$DESKTOP/**" },
+        { "path": "$DOWNLOAD/**" }
+      ]
+    },
     {
       "identifier": "opener:allow-open-url",
       "allow": [

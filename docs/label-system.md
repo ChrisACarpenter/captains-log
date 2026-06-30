@@ -56,7 +56,7 @@ Total label set for this Note: `{journal-app, label}`.
 
 - Labels line: `/^\*\*Labels:\*\*\s+(.+)$/m`
 - Tokens within the labels line: `/#([\w-]+)/g`
-- Inline body labels: `/(?:^|\s)#([\w-]+)\b/g` — only match `#` after whitespace or at start of line, so URLs and other contexts don't false-positive
+- Inline body labels: `#` token preceded by a boundary character — start of line, whitespace, OR an opening bracket / brace / parenthesis / comma (`(`, `[`, `{`, `,`). The Rust parser (`labels.rs::extract_inline_labels`) uses an explicit boundary check rather than a single regex, so prose like `(see #release-notes)` correctly picks up `release-notes` as a label while URLs (`https://example.com/#section`) don't false-positive.
 
 Allowed characters in a label name: `[\w-]+` (letters, digits, underscores, hyphens). No spaces.
 
@@ -71,7 +71,7 @@ No raw-file ambiguity, no UX confusion.
 
 ## Index file
 
-`journals/.metadata/labels.json` is the source of truth for autocomplete.
+`<root>/.metadata/labels.json` is the source of truth for autocomplete. JSON keys are camelCase (the Rust struct uses `#[serde(rename_all = "camelCase")]`); snake-case keys from older files are accepted as a back-compat alias on read.
 
 ```json
 {
@@ -80,12 +80,15 @@ No raw-file ambiguity, no UX confusion.
     {
       "name": "release",
       "count": 47,
-      "first_used": "2026-01-12",
-      "last_used": "2026-06-18"
+      "firstUsed": "2026-01-12",
+      "lastUsed": "2026-06-18",
+      "color": null
     }
   ]
 }
 ```
+
+The optional `color` field (Phase 2.8b) is an explicit per-label hex override; absent or `null` means the chip color is derived at render time from the label name + active theme via `generateLabelColor()`.
 
 ### Update rules
 
@@ -107,13 +110,14 @@ When the user types in either input location:
 3. Show top 10 in the dropdown
 4. If the typed string doesn't match any existing label, show a "Create new label: `<name>`" option at the bottom
 
-## Bulk label management (Phase 2 or later)
+## Per-label management (shipped)
 
-A "Manage Labels" view in Settings shows:
+Settings → Labels lists every label with count + first/last used dates. Clicking a row opens the [LabelDetailsModal](../app/src/lib/LabelDetailsModal.svelte) (Phase 2.8b) with:
 
-- All labels with count + first/last used dates
-- **Rename:** change a label everywhere it's referenced (updates all weekly files + the index)
-- **Merge:** combine two labels into one (e.g., `release` + `releases` → `release`)
-- **Delete:** remove from all files + the index
+- **Color override** — when Colorful Labels is on, override the auto-generated hue with a hex value, or **Reset** back to auto
+- **Rename** — change the label everywhere it's referenced (updates all weekly files + the index). Confirm via [ConfirmDialog](../app/src/lib/ConfirmDialog.svelte)
+- **Delete** — remove the label from every Note and Weekly Summary's labels list (inline `#hashtag` text in note bodies is left alone)
 
-Deferred because the JIRA-style autocomplete keeps the list manageable without explicit cleanup most of the time.
+## Bulk label management (Phase 3a — planned, not yet shipped)
+
+The library viewer that lets you operate on many labels at once — browse / filter, drill into Notes that use a label, and bulk **rename / merge / delete** with atomic writes. Builds on the per-label plumbing above; Phase 3a is next on the roadmap.

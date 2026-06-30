@@ -20,7 +20,7 @@ A small, native Mac (cross-platform later) app that:
 
 ## Status
 
-In active development. Currently in **Phase 0 — Planning & Scaffolding**.
+In active development. Phase 2.8c shipped 2026-06-30 — see [ROADMAP.md](ROADMAP.md) for the full phase history. Next up: **Phase 3a — Label library viewer + bulk management**.
 
 ## Project vocabulary
 
@@ -35,16 +35,19 @@ In active development. Currently in **Phase 0 — Planning & Scaffolding**.
 ## Key documents
 
 - [ROADMAP.md](ROADMAP.md) — phased feature plan
-- [DESIGN.md](DESIGN.md) — architecture, tech stack, data model
+- [ARCHITECTURE.md](ARCHITECTURE.md) — system architecture (storage, live-preview, IPC, etc.)
+- [DESIGN.md](DESIGN.md) — design rationale + product decisions
+- [STYLE-GUIDE.md](STYLE-GUIDE.md) — visual design language + brand
 - [DEVELOPMENT-JOURNAL.md](DEVELOPMENT-JOURNAL.md) — running log of decisions and progress
-- [docs/](docs/) — detailed design specs
+- [docs/components.md](docs/components.md) — shared Svelte component library index
+- [docs/](docs/) — detailed design specs (data format, file structure, label system, UX flows, first-run setup)
 
-## Tech stack (planned)
+## Tech stack
 
-- **App framework:** Tauri 2.0 (Rust backend + web frontend)
-- **Frontend:** TypeScript + Svelte 5
-- **Editor:** CodeMirror 6 or similar
-- **Storage:** Plain markdown files on disk
+- **App framework:** Tauri 2.x (Rust backend + WebKit frontend)
+- **Frontend:** TypeScript + Svelte 5 + SvelteKit (static adapter)
+- **Editor:** CodeMirror 6 with live-preview decorations + custom markdown extensions
+- **Storage:** Plain markdown files on disk + sidecar `.metadata/` JSON
 
 ## Brand & voice
 

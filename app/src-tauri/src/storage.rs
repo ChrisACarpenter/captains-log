@@ -157,9 +157,7 @@ impl StorageBackend for LocalFilesystem {
                 .await
                 .map_err(|e| io(parent, e))?;
         }
-        tokio::fs::write(&path, content)
-            .await
-            .map_err(|e| io(&path, e))
+        atomic_write(&path, content.as_bytes()).await
     }
 
     async fn list_weeks(&self, year: u32) -> StorageResult<Vec<u32>> {
@@ -237,9 +235,7 @@ impl StorageBackend for LocalFilesystem {
                 .await
                 .map_err(|e| io(parent, e))?;
         }
-        tokio::fs::write(&path, content)
-            .await
-            .map_err(|e| io(&path, e))
+        atomic_write(&path, content.as_bytes()).await
     }
 
     async fn delete_metadata(&self, name: &str) -> StorageResult<()> {
@@ -255,6 +251,39 @@ impl StorageBackend for LocalFilesystem {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Write `content` to `path` atomically: stage to `<path>.tmp` next to the
+/// destination, then rename into place.
+///
+/// Rename is atomic on POSIX + on NTFS via `ReplaceFileW` — readers either
+/// see the pre-write content or the new content, never a partially-written
+/// file. Survives a crash between write and rename (the original is intact;
+/// the orphan `.tmp` is harmless and gets overwritten next time the same
+/// destination is written).
+///
+/// The tmp file sits in the same directory as `path` so the rename stays on
+/// the same filesystem — cross-device renames would fall back to copy+unlink
+/// and break atomicity.
+///
+/// Caller is responsible for ensuring the parent directory exists.
+async fn atomic_write(path: &Path, content: &[u8]) -> StorageResult<()> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| StorageError::InvalidFilename(path.display().to_string()))?;
+    let mut tmp_name = file_name.to_string();
+    tmp_name.push_str(".tmp");
+    let tmp_path = match path.parent() {
+        Some(parent) => parent.join(&tmp_name),
+        None => PathBuf::from(&tmp_name),
+    };
+    tokio::fs::write(&tmp_path, content)
+        .await
+        .map_err(|e| io(&tmp_path, e))?;
+    tokio::fs::rename(&tmp_path, path)
+        .await
+        .map_err(|e| io(path, e))
+}
 
 /// Parse a weekly filename of the form `YYYY-Www.md` and return the week
 /// number, or `None` if the format doesn't match the expected year.
@@ -404,6 +433,46 @@ mod tests {
         matches!(err, StorageError::InvalidWeek { .. });
         let err = backend.read_week(2026, 54).await.unwrap_err();
         matches!(err, StorageError::InvalidWeek { .. });
+    }
+
+    #[tokio::test]
+    async fn write_week_leaves_original_intact_on_crash_before_rename() {
+        // Simulate a crash that left a stray `.tmp` in the year directory
+        // before the rename completed. The previously-written week file
+        // must remain untouched, and a subsequent successful write must
+        // still produce the new content (with the stray .tmp cleaned up by
+        // the rename's overwrite).
+        let (dir, backend) = make_backend();
+        backend
+            .write_week(2026, 25, "original content")
+            .await
+            .unwrap();
+
+        let year_dir = dir.path().join("2026");
+        let week_path = year_dir.join("2026-W25.md");
+        let stray_tmp = year_dir.join("2026-W25.md.tmp");
+        tokio::fs::write(&stray_tmp, "half-written garbage")
+            .await
+            .unwrap();
+
+        // The original file is intact despite the orphaned .tmp.
+        let read_back = backend.read_week(2026, 25).await.unwrap();
+        assert_eq!(read_back, Some("original content".to_string()));
+        assert!(stray_tmp.is_file(), "stray .tmp should still exist pre-write");
+
+        // A subsequent write overwrites the stray .tmp and atomically swaps
+        // in the new content.
+        backend
+            .write_week(2026, 25, "new content")
+            .await
+            .unwrap();
+        let read_back = backend.read_week(2026, 25).await.unwrap();
+        assert_eq!(read_back, Some("new content".to_string()));
+        assert!(week_path.is_file());
+        assert!(
+            !stray_tmp.exists(),
+            "stray .tmp should have been consumed by the rename"
+        );
     }
 
     #[test]

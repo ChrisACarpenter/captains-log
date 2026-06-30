@@ -21,7 +21,10 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.52.3", features = ["fs", "rt", "macros", "time"] }
+# `process` (Phase 2.9b) lets `run_applescript` spawn `osascript -` and stream
+# the AppleScript source over stdin — avoids argv length caps and keeps the
+# command async so a slow Mail.app prompt doesn't block the runtime.
+tokio = { version = "1.52.3", features = ["fs", "rt", "macros", "time", "process"] }
 async-trait = "0.1.89"
 thiserror = "2.0.18"
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -46,6 +49,36 @@ urlencoding = "2.1"
 # Transitively present already (via tauri's dep tree); declared explicitly so
 # `use base64::*` resolves.
 base64 = "0.22"
+# Markdown -> HTML for the Send-to-manager HTML email body (Phase 2.9).
+# Pinned with `=` because future minor releases could change the event stream
+# or default rendering shape; we want explicit upgrades, not silent drift.
+# `default-features = false` drops the `simd` feature so the SIMD fast-path's
+# C bindings aren't pulled in — `html` is all we need.
+pulldown-cmark = { version = "=0.13", default-features = false, features = ["html"] }
+# HTML sanitizer applied to the pulldown-cmark output before it ships in
+# multipart/alternative email. Strips <script>, javascript: links, raw HTML
+# the user might paste into the markdown, etc. Pinned for the same reason.
+ammonia = "=4"
+# Quoted-printable encoder for the text/plain and text/html parts of the
+# multipart/alternative .eml body (Phase 2.9). Hand-rolling QP is a known
+# foot-gun (soft line breaks, `=` escaping, 76-char wrap). Pinned for the
+# same drift-control reason as the other Phase 2.9 deps.
+quoted_printable = "=0.5"
+# RFC 3986 percent-encoding for Gmail/Outlook compose URLs (Phase 2.9b).
+# urlencoding (above) handles mailto: bodies, but Gmail's `view=cm` deeplink
+# is finicky about which characters are escaped — we want the AsciiSet-based
+# `NON_ALPHANUMERIC` set (everything except [A-Za-z0-9] escaped) so `+`,
+# `&`, `?`, `#` and friends all become %xx in the query string. Pinned to
+# `=2.3` to match the other Phase 2.9 deps' drift-control convention.
+percent-encoding = "=2.3"
+# Clipboard plugin (Phase 2.9b slice 8). Powers the "Copy to clipboard"
+# button on the Preview modal — writeHtml(html, text) for the Native Mac
+# Mail HTML mode (HTML + plaintext fallback for plaintext targets like
+# Slack), writeText for the plaintext modes (Gmail / Outlook web compose /
+# Native Mac Mail plaintext). Pinned `=2.3` to match the Phase 2.9 deps'
+# drift-control convention.
+tauri-plugin-clipboard-manager = "=2.3"
+tauri-plugin-fs = "2.5.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Modern macOS notification API — wraps UNUserNotificationCenter and gives us

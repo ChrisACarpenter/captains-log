@@ -7,7 +7,43 @@
   import { page } from '$app/state';
   import WeekStripe from '$lib/WeekStripe.svelte';
   import HelpButtons from '$lib/HelpButtons.svelte';
+  import {
+    applyCustomTheme,
+    clearCustomTheme,
+    deriveTokens,
+    type PrimaryTokens,
+    type ThemeBase,
+  } from '$lib/theme';
+  import { parse } from 'culori';
   import '../app.css';
+
+  // Phase 2.8 — CustomTheme wire shape mirrors Rust's struct and the
+  // Settings page's local type. Keep in sync with both if the token list
+  // changes. (Layout doesn't import from settings/+page to avoid a routes
+  // ↔ routes cycle.)
+  type CustomTheme = {
+    bgBase: string;
+    bgSurface: string;
+    bgElevated: string;
+    textPrimary: string;
+    textSecondary: string;
+    textMuted: string;
+    borderStructural: string;
+    borderDecorative: string;
+    accentPrimary: string;
+    accentGreen: string;
+    accentPink: string;
+    btnSapphire: string;
+  };
+
+  // Infer the derivation base from bg-base luminance — light themes have
+  // light backgrounds. Matches the heuristic in /settings.
+  function inferBase(bgBaseHex: string): ThemeBase {
+    const c = parse(bgBaseHex);
+    if (!c || c.mode !== 'rgb') return 'dark';
+    const sum = (c.r ?? 0) + (c.g ?? 0) + (c.b ?? 0);
+    return sum >= 1.5 ? 'light' : 'dark';
+  }
 
   // Decorative-companion cat: clicking opens a YouTube search for cat
   // content as a small breather. Multiple search variants so the
@@ -39,10 +75,40 @@
   // Apply the persisted theme to <html>. Both windows (main + capture) run
   // this layout, so the capture popup picks up theme changes too — via the
   // "settings-changed" event the backend emits after update_settings saves.
+  //
+  // Custom theme handling: the data-theme attribute is set to the
+  // inferred BASE ('dark' or 'light') so any rule that didn't get
+  // overridden by deriveTokens still picks up the correct branch (light
+  // surfaces, light shadows, etc.). The 30-odd derived overrides then
+  // overlay via inline styles on :root.
   async function applyTheme() {
     try {
-      const settings = await invoke<{ theme: 'dark' | 'light' }>('get_settings');
-      document.documentElement.setAttribute('data-theme', settings.theme);
+      const settings = await invoke<{
+        theme: 'dark' | 'light' | 'custom';
+        customTheme: CustomTheme | null;
+      }>('get_settings');
+      if (settings.theme === 'custom' && settings.customTheme) {
+        const base = inferBase(settings.customTheme.bgBase);
+        document.documentElement.setAttribute('data-theme', base);
+        try {
+          const derived = deriveTokens(
+            { ...settings.customTheme } as PrimaryTokens,
+            base,
+          );
+          applyCustomTheme(derived);
+        } catch {
+          // Bad payload — strip overrides so the base theme isn't half-
+          // applied. Settings panel can let the user re-pick colors.
+          clearCustomTheme();
+        }
+      } else {
+        // Switching out of Custom (or never had one) — strip overrides.
+        clearCustomTheme();
+        document.documentElement.setAttribute(
+          'data-theme',
+          settings.theme === 'light' ? 'light' : 'dark',
+        );
+      }
     } catch {
       // First launch / pre-storage: dark stays default.
     }
@@ -153,9 +219,11 @@
     transform: translateY(-50%);
     padding: 4px 10px;
     background: var(--bg-elevated);
-    color: var(--accent-primary);
+    /* Lifted orange variant — raw accent-primary on bg-elevated at 14px
+       only hits 3.70:1, failing AA. */
+    color: var(--accent-primary-text);
     border: 1px solid var(--border-structural);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     font-size: 14px;
     font-weight: 600;
     line-height: 1.2;

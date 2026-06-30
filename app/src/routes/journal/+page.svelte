@@ -3,8 +3,13 @@
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { refreshCurrentWeek, type YearWeek as RolloverYearWeek } from '$lib/weekRollover';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
+  import ExternalUpdateBanner from '$lib/ExternalUpdateBanner.svelte';
+  import SaveStatus from '$lib/SaveStatus.svelte';
+  import SendToManagerButton from '$lib/SendToManagerButton.svelte';
 
   const MARKDOWN_CHEAT_SHEET_URL = 'https://www.markdownguide.org/cheat-sheet/';
 
@@ -96,6 +101,14 @@
   // the UI can warn instead of clobbering their work.
   let externalUpdate = $state(false);
   let weeklyFileUnlisten: UnlistenFn | null = null;
+  let focusUnlisten: UnlistenFn | null = null;
+
+  // Week-rollover dirty-conflict. Set when the system clock crossed into
+  // a new ISO week while the user has unsaved edits in the SELECTED note
+  // (which is typically — but not always — the previously-current week).
+  // Resolved by either saving the dirty content to the old week + moving
+  // the "current" highlight, or discarding + moving the highlight.
+  let rolloverPending = $state<RolloverYearWeek | null>(null);
 
   // Own-save event suppression. The `weekly-file-changed` event Rust
   // emits after our own write travels a separate IPC channel from the
@@ -112,6 +125,14 @@
   // `pendingCommit` (pre-baseline) as our own emit and no-ops. The slot
   // is cleared in saveNow's finally so it can't leak across saves.
   let pendingCommit = $state<string | null>(null);
+
+  // Send-to-manager status mirror. The SendToManagerButton component
+  // owns the underlying state (sentRecord, currentHash). It pushes the
+  // computed "Sent Jun 26 …" / "Last sent … (edited since)" text out
+  // here so we can render the line above the actions row, matching
+  // /summary's layout.
+  let sentStatusText = $state('');
+  let sentStatusIsStale = $state(false);
 
   // ---------- derived ----------
   const isDirty = $derived(
@@ -142,25 +163,7 @@
     return `Week of ${fmt(monday)}, ${monday.getFullYear()} – ${fmt(sunday)}, ${sunday.getFullYear()}`;
   }
 
-  function formatTime(d: Date): string {
-    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  }
-
-  const saveStatusText = $derived.by(() => {
-    switch (saveStatus) {
-      case 'saving':
-        return 'Saving…';
-      case 'dirty':
-        return 'Unsaved changes';
-      case 'saved':
-        return lastSavedAt ? `Saved ${formatTime(lastSavedAt)}` : 'Saved';
-      case 'error':
-        return "Couldn't save — retry?";
-      case 'idle':
-      default:
-        return '';
-    }
-  });
+  // formatTime + saveStatusText now live inside <SaveStatus>.
 
   // ---------- load tree on mount ----------
   onMount(async () => {
@@ -196,6 +199,15 @@
     } finally {
       loadingTree = false;
     }
+
+    // Week-rollover triggers. Same three signals as /summary:
+    // window focus, document visibility, and the WeekStripe tick's
+    // CustomEvent broadcast. See /summary for the rationale.
+    focusUnlisten = await getCurrentWindow().listen('tauri://focus', () => {
+      void handleWeekRollover();
+    });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('captainslog:week-changed', onWeekChangedEvent);
 
     // Subscribe to the cross-route file-changed broadcast. Anything that
     // writes to a weekly markdown file (write_week, update_weekly_summary,
@@ -294,6 +306,10 @@
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     weeklyFileUnlisten?.();
     weeklyFileUnlisten = null;
+    focusUnlisten?.();
+    focusUnlisten = null;
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('captainslog:week-changed', onWeekChangedEvent);
   });
 
   // ---------- tree interactions ----------
@@ -346,6 +362,118 @@
     } finally {
       editorLoading = false;
     }
+  }
+
+  // ---------- week rollover ----------
+  //
+  // When the ISO (year, week) advances while /journal is open, we need
+  // to keep two things in sync with reality:
+  //   1. `currentYearWeek` — drives the "current" dot in the sidebar.
+  //   2. The sidebar tree itself — the new week may belong to a year
+  //      that doesn't yet have a node (Dec 31 → Jan 1), or to the same
+  //      year but with a week number that wasn't yet present in
+  //      `nodes[].weeks`.
+  //
+  // We do NOT auto-select the new week — journal selection is always an
+  // explicit user act. We only refresh the highlight + tree.
+
+  async function refreshTreeForNewWeek(next: RolloverYearWeek): Promise<void> {
+    // Same year — just reload its weeks if loaded, so the new week appears.
+    let node = nodes.find((n) => n.year === next.year);
+    if (node) {
+      if (node.loaded) {
+        try {
+          const weeks = await invoke<number[]>('list_weeks', { year: next.year });
+          node.weeks = [...weeks].sort((a, b) => b - a);
+        } catch (err) {
+          console.error('[journal] refresh weeks failed:', err);
+        }
+      }
+      return;
+    }
+    // New year — fetch the full list_years again so the prior year's
+    // node order (newest-first) stays consistent if a backfill happened.
+    try {
+      const years = await invoke<number[]>('list_years');
+      const sorted = [...years].sort((a, b) => b - a);
+      // Preserve expanded/loaded state for years we already know about.
+      const byYear = new Map(nodes.map((n) => [n.year, n] as const));
+      nodes = sorted.map((y) => {
+        const existing = byYear.get(y);
+        if (existing) return existing;
+        return {
+          year: y,
+          weeks: [],
+          loaded: false,
+          expanded: y === next.year
+        };
+      });
+      // Eagerly load the new current year's weeks so the dot lands on
+      // a visible row.
+      const fresh = nodes.find((n) => n.year === next.year);
+      if (fresh && !fresh.loaded) await loadYearWeeks(fresh);
+    } catch (err) {
+      console.error('[journal] list_years on rollover failed:', err);
+    }
+  }
+
+  async function handleWeekRollover(): Promise<void> {
+    // The selected note is dirty? Treat as conflict — the user's edits
+    // may have been intended for last week (the previously-current week).
+    const dirtyConflict = selected !== null && isDirty;
+    await refreshCurrentWeek({
+      currentYearWeek,
+      isDirty: dirtyConflict,
+      onWeekChange: async (next) => {
+        currentYearWeek = next;
+        await refreshTreeForNewWeek(next);
+      },
+      onDirtyConflict: ({ newYearWeek }) => {
+        rolloverPending = newYearWeek;
+      }
+    });
+  }
+
+  /// "Save to last week" — flush dirty edits to the currently-selected
+  /// week's file, then advance the highlight to the new week.
+  async function rolloverSaveOldThenSwap(): Promise<void> {
+    if (!rolloverPending) return;
+    const next = rolloverPending;
+    // saveNow can return synchronously when a save is already in flight
+    // (it reschedules via autoSaveTimer). Poll until the save fully
+    // settles so the swap doesn't run before the user's dirty edits
+    // actually hit disk.
+    await saveNow();
+    const settleStart = Date.now();
+    while (saveStatus === 'saving' || saveStatus === 'dirty') {
+      if (Date.now() - settleStart > 10_000) {
+        console.warn('[journal] rollover-save timed out waiting for save to settle');
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (saveStatus === 'error') return;
+    currentYearWeek = next;
+    await refreshTreeForNewWeek(next);
+    rolloverPending = null;
+  }
+
+  /// Discard dirty edits and advance the highlight.
+  async function rolloverDiscardAndSwap(): Promise<void> {
+    if (!rolloverPending) return;
+    const next = rolloverPending;
+    // Drop in-memory edits by re-baselining content to disk.
+    await reloadFromDisk();
+    currentYearWeek = next;
+    await refreshTreeForNewWeek(next);
+    rolloverPending = null;
+  }
+
+  function onVisibilityChange(): void {
+    if (!document.hidden) void handleWeekRollover();
+  }
+  function onWeekChangedEvent(): void {
+    void handleWeekRollover();
   }
 
   // ---------- auto-save ----------
@@ -459,9 +587,6 @@
   <aside class="sidebar">
     <header>
       <h2>Journal</h2>
-      <button class="link-button" onclick={() => goto('/')} type="button">
-        ← Home
-      </button>
     </header>
 
     {#if loadingTree}
@@ -529,11 +654,15 @@
         </p>
         {#if currentYearWeek}
           <p class="lead">
-            For the current week's structured weekly summary view, go to
-            <button type="button" class="link-button" onclick={() => goto('/summary')}>
-              Write Weekly Summary →
-            </button>
+            Or write up the current week's structured summary:
           </p>
+          <button
+            type="button"
+            class="btn btn-emerald"
+            onclick={() => goto('/summary')}
+          >
+            Write Weekly Summary
+          </button>
         {/if}
       </div>
     {:else}
@@ -604,27 +733,31 @@
           the toggle. Earlier shape used `{#key viewMode}` to force a
           remount, which lost the cursor on every flip. -->
         {#if externalUpdate}
-          <div class="external-update-banner" role="status" aria-live="polite">
-            <span class="banner-text">
-              This week was modified outside this view. Your unsaved edits
-              would overwrite it on the next save.
-            </span>
-            <button
-              type="button"
-              class="banner-action"
-              onclick={() => void reloadFromDisk()}
-            >Reload (lose my edits)</button>
-            <button
-              type="button"
-              class="banner-dismiss"
-              onclick={() => (externalUpdate = false)}
-              aria-label="Dismiss warning"
-            >×</button>
-          </div>
+          <ExternalUpdateBanner
+            onReload={() => void reloadFromDisk()}
+            onDismiss={() => (externalUpdate = false)}
+          >
+            This week was modified outside this view. Your unsaved edits
+            would overwrite it on the next save.
+          </ExternalUpdateBanner>
+        {/if}
+
+        {#if rolloverPending}
+          <!-- Week-rollover dirty-conflict banner. Reload = save the dirty
+               edits to the week the user has open (presumed previously-
+               current); Dismiss = discard them. Either way the "current"
+               highlight advances to the new ISO week. -->
+          <ExternalUpdateBanner
+            onReload={() => void rolloverSaveOldThenSwap()}
+            onDismiss={() => void rolloverDiscardAndSwap()}
+          >
+            A new week started. Save these edits to last week, or discard?
+            Reload saves them to the week you have open; Dismiss discards
+            them. Either way the current-week highlight advances.
+          </ExternalUpdateBanner>
         {/if}
 
         <MarkdownEditor
-          class="editor"
           value={content}
           onChange={(v) => (content = v)}
           livePreview={viewMode === 'preview'}
@@ -642,28 +775,56 @@
         />
 
 
-        <div class="actions">
-          {#if saveStatus === 'error'}
-            <button
-              type="button"
-              class="save-status is-error"
-              onclick={() => void saveNow()}
-            >
-              {saveStatusText}
-            </button>
-          {:else}
-            <span class="save-status is-{saveStatus}">{saveStatusText}</span>
-          {/if}
-          <button
-            class="btn btn-emerald btn-save"
-            onclick={() => void saveNow()}
-            disabled={saveStatus === 'saving' || !isDirty}
-          >
-            {saveStatus === 'saving' ? 'Saving…' : 'Save'}
-          </button>
-        </div>
       {/if}
     {/if}
+
+    <!-- Actions area = sent-status (when present) + actions row stacked
+       with gap-based spacing. Same structure as /summary so the visual
+       rhythm matches. Back is ALWAYS visible (so the user can always
+       exit the journal browser). Save + Send-to-manager only appear
+       when a week is selected. The .button-cluster wrapper has
+       margin-left: auto, so the cluster sits flush-right regardless of
+       which children render — Back-only states still land on the right
+       edge. -->
+    <div class="actions-area">
+      {#if selected && sentStatusText}
+        <p class="sent-status" class:is-stale={sentStatusIsStale}>
+          {sentStatusText}
+        </p>
+      {/if}
+      <div class="actions">
+        {#if selected}
+          <SaveStatus
+            status={saveStatus}
+            lastSavedAt={lastSavedAt}
+            onRetry={() => void saveNow()}
+          />
+        {/if}
+        <div class="button-cluster">
+          {#if selected}
+            <button
+              class="btn btn-emerald"
+              onclick={() => void saveNow()}
+              disabled={saveStatus === 'saving' || !isDirty}
+            >
+              {saveStatus === 'saving' ? 'Saving…' : 'Save'}
+            </button>
+          {/if}
+          <button class="btn btn-ruby" onclick={() => goto('/')}>Back</button>
+          {#if selected}
+            <SendToManagerButton
+              year={selected.year}
+              week={selected.week}
+              weekLabel={formatWeekRange(selected)}
+              {isDirty}
+              {saveStatus}
+              bind:sentStatusText
+              bind:sentStatusIsStale
+            />
+          {/if}
+        </div>
+      </div>
+    </div>
   </section>
 </main>
 
@@ -861,7 +1022,9 @@
 
   .view-toggle-btn.is-active {
     background: var(--bg-surface);
-    color: var(--accent-primary);
+    /* accent-primary-text — raw accent-primary at 13px on bg-surface
+       only hits 4.20:1 which fails WCAG AA for normal text. */
+    color: var(--accent-primary-text);
     box-shadow: inset 0 0 0 1px var(--border-structural);
   }
 
@@ -876,92 +1039,37 @@
    * padding overrides are forwarded via the --md-* CSS variables on the
    * component invocation above. */
 
-  /* ---- External-update banner ---- */
+  /* External-update banner CSS lives in <ExternalUpdateBanner> now. */
 
-  .external-update-banner {
+  /* ---- Actions area ---- */
+
+  /* Actions area = sent-status + actions row stacked with gap-based
+     spacing. Mirrors /summary so the two routes look identical. */
+  .actions-area {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: var(--space-3);
-    margin-bottom: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    background: var(--bg-elevated);
-    border: 1px solid var(--accent-warning, var(--accent-primary));
-    border-left-width: 3px;
-    border-radius: var(--radius-sm);
-    font-size: var(--text-caption);
-    line-height: var(--text-caption-lh);
-    color: var(--text-primary);
+    margin-top: var(--space-6);
   }
-  .external-update-banner .banner-text {
-    flex: 1;
-  }
-  .external-update-banner .banner-action {
-    appearance: none;
-    background: transparent;
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm);
-    color: var(--text-primary);
-    font: inherit;
-    padding: 3px 10px;
-    cursor: pointer;
-    transition: background var(--transition-fast), border-color var(--transition-fast);
-  }
-  .external-update-banner .banner-action:hover {
-    background: var(--bg-surface);
-    border-color: var(--accent-primary);
-  }
-  .external-update-banner .banner-dismiss {
-    appearance: none;
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    font-size: 18px;
-    line-height: 1;
-    padding: 0 4px;
-    cursor: pointer;
-  }
-  .external-update-banner .banner-dismiss:hover {
-    color: var(--text-primary);
-  }
-
-  /* ---- Actions row ---- */
 
   .actions {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    margin-top: var(--space-3);
   }
-
-  .save-status {
-    font-size: var(--text-caption);
-    line-height: var(--text-caption-lh);
-    font-style: italic;
-    color: var(--text-muted);
-    background: none;
-    border: none;
-    padding: 0;
-    font-family: var(--font-body);
-  }
-
-  .save-status.is-saving,
-  .save-status.is-dirty {
-    color: var(--text-secondary);
-  }
-
-  .save-status.is-error {
-    color: var(--accent-pink);
-    cursor: pointer;
-    text-decoration: underline;
-  }
-
-  .save-status.is-error:hover {
-    filter: brightness(1.1);
-  }
-
-  .btn-save {
+  /* Button cluster lives flush-right; the SaveStatus (when rendered)
+     sits on the left of the row. With Back as the only button (no
+     week selected) the cluster still right-aligns correctly because
+     margin-left:auto applies to whichever element is the
+     button-cluster. */
+  .button-cluster {
     margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
   }
+
+  /* .save-status CSS lives in <SaveStatus> now. */
 
   /* ---- Shared ---- */
 
@@ -969,7 +1077,9 @@
     background: none;
     border: none;
     padding: 0;
-    color: var(--accent-primary);
+    /* accent-primary-text — raw accent-primary fails AA on bg-elevated
+       (sidebar header context) and is borderline on bg-base. */
+    color: var(--accent-primary-text);
     cursor: pointer;
     font-family: inherit;
     font-size: inherit;
@@ -981,13 +1091,16 @@
   }
 
   .muted {
-    color: var(--text-muted);
+    /* text-muted on bg-elevated (sidebar surface) is only 4.04:1;
+       text-secondary clears 5.41:1. The sidebar "Loading…" / empty
+       states are the only signal of state, not decorative. */
+    color: var(--text-secondary);
     font-size: var(--text-caption);
     margin: var(--space-2) 0;
   }
 
   .error {
-    color: var(--accent-pink);
+    color: var(--accent-pink-text);
     font-size: var(--text-caption);
     margin: var(--space-2) 0;
   }
