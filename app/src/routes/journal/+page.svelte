@@ -200,6 +200,28 @@
       loadingTree = false;
     }
 
+    // Deep-link support (Phase 3a Slice 1 — Label Library drill-down):
+    // if the URL carries ?year=Y&week=W, expand that year in the sidebar
+    // tree (loading its weeks if it isn't the current year) and select
+    // the target week. Parses defensively — bad values fall through
+    // silently and leave the user on the empty-state pane.
+    const params = new URLSearchParams(window.location.search);
+    const paramYear = Number(params.get('year'));
+    const paramWeek = Number(params.get('week'));
+    if (Number.isFinite(paramYear) && Number.isFinite(paramWeek) && paramYear > 0 && paramWeek > 0) {
+      let targetNode = nodes.find((n) => n.year === paramYear);
+      if (targetNode && !targetNode.loaded) {
+        await loadYearWeeks(targetNode);
+      }
+      // Verify the requested week actually exists in the loaded node
+      // before selecting — protects against stale deep-links pointing
+      // at a week that no longer has a file on disk.
+      if (targetNode && targetNode.weeks.includes(paramWeek)) {
+        targetNode.expanded = true;
+        await selectWeek({ year: paramYear, week: paramWeek });
+      }
+    }
+
     // Week-rollover triggers. Same three signals as /summary:
     // window focus, document visibility, and the WeekStripe tick's
     // CustomEvent broadcast. See /summary for the rationale.

@@ -31,6 +31,7 @@
   import { formatHex, parse } from 'culori';
   import TipBubble from '$lib/onboarding/TipBubble.svelte';
   import ConfirmDialog from '$lib/ConfirmDialog.svelte';
+  import Modal from '$lib/Modal.svelte';
   import InputField from '$lib/InputField.svelte';
   import LabelDetailsModal from '$lib/LabelDetailsModal.svelte';
   import LoadingOverlay from '$lib/LoadingOverlay.svelte';
@@ -989,6 +990,18 @@
       labelsError = String(err);
       return;
     }
+    // Prune the bulk-selection set — labels renamed or deleted via the
+    // Details modal should drop out so they don't ghost in the toolbar
+    // count or resurface in a subsequent bulk op.
+    const currentNames = new Set(labels.map((l) => l.name));
+    let pruned: Set<string> | null = null;
+    for (const name of selectedLabelNames) {
+      if (!currentNames.has(name)) {
+        if (!pruned) pruned = new Set(selectedLabelNames);
+        pruned.delete(name);
+      }
+    }
+    if (pruned) selectedLabelNames = pruned;
     if (!selectedLabel) return;
     // Try same-name lookup first — covers color updates + the "no-op"
     // refresh after rename when the popup is still open with the OLD name
@@ -1045,6 +1058,190 @@
     });
     return filtered;
   });
+
+  // -------------------------------------------------------------------------
+  // Phase 3a Slice 2 — multi-select + bulk delete / bulk merge
+  // -------------------------------------------------------------------------
+
+  // Selection is a Set of label names, not indices — resilient to filter
+  // changes, sort changes, and mutations from the Details modal. Prune on
+  // every onLabelMutated so stale entries (renamed/deleted-out-from-under-us
+  // via Details) don't linger.
+  let selectedLabelNames = $state<Set<string>>(new Set());
+
+  // Bulk-delete UI state.
+  let showBulkDeleteConfirm = $state(false);
+  let bulkDeleteInFlight = $state(false);
+
+  // Bulk-merge UI state. Picker uses shared Modal (not ConfirmDialog)
+  // because we need a disabled state on the primary action when no
+  // canonical target has been chosen yet.
+  let showBulkMergePicker = $state(false);
+  let bulkMergeCanonical = $state<string | null>(null);
+  let bulkMergeInFlight = $state(false);
+
+  // Result / error banner. Persists above the list until the user acts
+  // again or explicitly dismisses. Cleared whenever a new bulk op starts.
+  let bulkOpMessage = $state('');
+  let bulkOpError = $state('');
+
+  // Derived count for cheap template reads without recomputing Set.size
+  // in three places.
+  const selectionCount = $derived(selectedLabelNames.size);
+
+  // "Select all visible" checkbox state — true only when every visible
+  // label is currently selected (partial selection reads as unchecked
+  // for MVP; we don't set the indeterminate DOM property to keep this
+  // simple. Two-state toggle: click to select all, click again to clear.)
+  const allVisibleSelected = $derived(
+    visibleLabels.length > 0 &&
+      visibleLabels.every((l) => selectedLabelNames.has(l.name))
+  );
+
+  function toggleLabelSelection(name: string): void {
+    // Svelte 5 tracks Set identity, not internal mutation — assign a new
+    // Set so the reactive derivations recompute.
+    const next = new Set(selectedLabelNames);
+    if (next.has(name)) {
+      next.delete(name);
+    } else {
+      next.add(name);
+    }
+    selectedLabelNames = next;
+    // Clear any lingering result banner as soon as the user modifies
+    // their selection — otherwise "Deleted 3 labels" text hangs around
+    // while they build the next batch.
+    bulkOpMessage = '';
+    bulkOpError = '';
+  }
+
+  function toggleSelectAllVisible(): void {
+    if (allVisibleSelected) {
+      // Deselect only the currently-visible labels — keep any selection
+      // that's outside the filter (rare but possible; user filters,
+      // selects, unfilters, filters again, hits "clear filtered").
+      const next = new Set(selectedLabelNames);
+      for (const l of visibleLabels) next.delete(l.name);
+      selectedLabelNames = next;
+    } else {
+      const next = new Set(selectedLabelNames);
+      for (const l of visibleLabels) next.add(l.name);
+      selectedLabelNames = next;
+    }
+    bulkOpMessage = '';
+    bulkOpError = '';
+  }
+
+  function clearBulkSelection(): void {
+    selectedLabelNames = new Set();
+    bulkOpMessage = '';
+    bulkOpError = '';
+  }
+
+  function startBulkDelete(): void {
+    if (selectionCount === 0) return;
+    bulkOpError = '';
+    showBulkDeleteConfirm = true;
+  }
+
+  async function confirmBulkDelete(): Promise<void> {
+    if (bulkDeleteInFlight) return;
+    bulkDeleteInFlight = true;
+    bulkOpError = '';
+    const names = Array.from(selectedLabelNames);
+    const failed: string[] = [];
+    // Sequential — one Tauri command per label. Continue past failures
+    // to match the per-label commands' locked posture (Phase 2.8b
+    // decision #7: don't roll back on partial failure, surface what
+    // couldn't be touched).
+    for (const name of names) {
+      try {
+        await invoke('delete_label_cascade', { name });
+      } catch (err) {
+        failed.push(`${name} (${String(err)})`);
+      }
+    }
+    const succeeded = names.length - failed.length;
+    bulkOpMessage =
+      failed.length === 0
+        ? `Deleted ${succeeded} label${succeeded === 1 ? '' : 's'}.`
+        : `Deleted ${succeeded} of ${names.length}. Failed: ${failed.join('; ')}.`;
+    if (failed.length > 0) bulkOpError = bulkOpMessage;
+    showBulkDeleteConfirm = false;
+    bulkDeleteInFlight = false;
+    selectedLabelNames = new Set();
+    try {
+      await fetchLabels();
+    } catch (err) {
+      labelsError = String(err);
+    }
+  }
+
+  function startBulkMerge(): void {
+    if (selectionCount < 2) return;
+    // Default the canonical pick to the highest-count label so the
+    // "obvious" answer is pre-selected; user can flip it before hitting
+    // Merge. Ties broken by name asc (stable + predictable).
+    const selectedList = labels.filter((l) => selectedLabelNames.has(l.name));
+    selectedList.sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      return a.name.localeCompare(b.name);
+    });
+    bulkMergeCanonical = selectedList[0]?.name ?? null;
+    bulkOpError = '';
+    showBulkMergePicker = true;
+  }
+
+  function cancelBulkMerge(): void {
+    if (bulkMergeInFlight) return;
+    showBulkMergePicker = false;
+    bulkMergeCanonical = null;
+  }
+
+  async function confirmBulkMerge(): Promise<void> {
+    if (bulkMergeInFlight || !bulkMergeCanonical) return;
+    const canonical = bulkMergeCanonical;
+    const sources = Array.from(selectedLabelNames).filter(
+      (n) => n !== canonical
+    );
+    if (sources.length === 0) {
+      bulkOpError = 'Pick a canonical different from the merge sources.';
+      return;
+    }
+    bulkMergeInFlight = true;
+    bulkOpError = '';
+    const failed: string[] = [];
+    // rename_label auto-merges when the target name already exists
+    // (Phase 2.8b behavior — dedup happens inside the Rust command).
+    // Loop each source into canonical; continue past failures.
+    for (const src of sources) {
+      try {
+        await invoke('rename_label', { oldName: src, newName: canonical });
+      } catch (err) {
+        failed.push(`${src} (${String(err)})`);
+      }
+    }
+    const succeeded = sources.length - failed.length;
+    bulkOpMessage =
+      failed.length === 0
+        ? `Merged ${succeeded} label${succeeded === 1 ? '' : 's'} into "${canonical}".`
+        : `Merged ${succeeded} of ${sources.length} into "${canonical}". Failed: ${failed.join('; ')}.`;
+    if (failed.length > 0) bulkOpError = bulkOpMessage;
+    showBulkMergePicker = false;
+    bulkMergeInFlight = false;
+    bulkMergeCanonical = null;
+    selectedLabelNames = new Set();
+    try {
+      await fetchLabels();
+    } catch (err) {
+      labelsError = String(err);
+    }
+  }
+
+  function dismissBulkOpBanner(): void {
+    bulkOpMessage = '';
+    bulkOpError = '';
+  }
 
   // ---------- Tab persistence ----------
 
@@ -2161,9 +2358,90 @@
                   No labels match "{labelFilter.trim()}".
                 </p>
               {:else}
+                <!-- Bulk actions toolbar. Left side owns selection state
+                     (select-all + counter + clear); right side owns the
+                     batch actions and stays empty until N > 0 so the
+                     toolbar doesn't shout at users who aren't selecting. -->
+                <div class="bulk-actions" role="toolbar" aria-label="Bulk label actions">
+                  <label class="bulk-select-all">
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onchange={toggleSelectAllVisible}
+                      aria-label="Select all visible labels"
+                    />
+                    <span class="bulk-select-all-text">
+                      {#if selectionCount > 0}
+                        {selectionCount} selected
+                      {:else}
+                        Select all
+                      {/if}
+                    </span>
+                  </label>
+                  {#if selectionCount > 0}
+                    <button
+                      type="button"
+                      class="link-button bulk-clear"
+                      onclick={clearBulkSelection}
+                    >
+                      Clear
+                    </button>
+                  {/if}
+                  <div class="bulk-actions-spacer"></div>
+                  {#if selectionCount > 0}
+                    <button
+                      type="button"
+                      class="btn btn-marble btn-sm"
+                      disabled={selectionCount < 2}
+                      title={selectionCount < 2
+                        ? 'Pick at least 2 labels to merge'
+                        : ''}
+                      onclick={startBulkMerge}
+                    >
+                      Merge into…
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-ruby btn-sm"
+                      onclick={startBulkDelete}
+                    >
+                      Delete {selectionCount}
+                    </button>
+                  {/if}
+                </div>
+
+                <!-- Result / error banner from the most recent bulk op.
+                     Persists until the user dismisses OR modifies the
+                     selection (a new op is about to start; the old
+                     receipt is stale). -->
+                {#if bulkOpMessage}
+                  <div
+                    class="bulk-op-banner"
+                    class:is-error={bulkOpError !== ''}
+                    role={bulkOpError ? 'alert' : 'status'}
+                  >
+                    <span>{bulkOpMessage}</span>
+                    <button
+                      type="button"
+                      class="link-button"
+                      onclick={dismissBulkOpBanner}
+                      aria-label="Dismiss"
+                    >
+                      ×
+                    </button>
+                  </div>
+                {/if}
+
                 <ul class="label-list" role="list">
                   {#each visibleLabels as entry (entry.name)}
                     <li class="label-row">
+                      <input
+                        type="checkbox"
+                        class="label-select"
+                        checked={selectedLabelNames.has(entry.name)}
+                        onchange={() => toggleLabelSelection(entry.name)}
+                        aria-label="Select {entry.name}"
+                      />
                       <span
                         class="label-chip"
                         style={labelChipStyle(entry)}
@@ -2222,6 +2500,88 @@
       onClose={closeLabelModal}
       onLabelMutated={() => void onLabelMutated()}
     />
+  {/if}
+
+  <!-- Slice 2 — bulk delete confirm. ConfirmDialog owns backdrop + Escape
+       + focus. `activeTab === 'labels'` guard mirrors the details modal
+       pattern so tab-switching mid-dialog can't leave a floating confirm. -->
+  {#if showBulkDeleteConfirm && activeTab === 'labels'}
+    <ConfirmDialog
+      title="Delete {selectionCount} label{selectionCount === 1 ? '' : 's'}?"
+      confirmLabel={bulkDeleteInFlight ? 'Deleting…' : 'Delete'}
+      confirmVariant="ruby"
+      cancelVariant="marble"
+      onConfirm={() => void confirmBulkDelete()}
+      onCancel={() => (showBulkDeleteConfirm = false)}
+      body={bulkDeleteBody}
+    />
+  {/if}
+
+  {#snippet bulkDeleteBody()}
+    <p>
+      This removes the selected labels from every Note and Weekly Summary
+      across your journal. Inline <code>#hashtag</code> text in prose is
+      left alone.
+    </p>
+  {/snippet}
+
+  <!-- Slice 2 — bulk merge picker. Plain Modal (not ConfirmDialog) because
+       the primary action must stay disabled until a canonical is picked,
+       which ConfirmDialog's slim API doesn't expose. -->
+  {#if showBulkMergePicker && activeTab === 'labels'}
+    <Modal
+      open={true}
+      onClose={cancelBulkMerge}
+      title="Merge {selectionCount} labels"
+      maxWidth="min(480px, calc(100vw - 32px))"
+      zLayer="nested"
+    >
+      <div class="bulk-merge-body">
+        <p>
+          Pick the canonical label. Every other selected label will be
+          renamed to match across your journal (inline <code>#hashtag</code>
+          text in prose is left alone).
+        </p>
+        <ul class="bulk-merge-list" role="radiogroup" aria-label="Canonical label">
+          {#each Array.from(selectedLabelNames).sort((a, b) => a.localeCompare(b)) as name (name)}
+            <li>
+              <label class="bulk-merge-option">
+                <input
+                  type="radio"
+                  name="bulk-merge-canonical"
+                  value={name}
+                  checked={bulkMergeCanonical === name}
+                  onchange={() => (bulkMergeCanonical = name)}
+                  disabled={bulkMergeInFlight}
+                />
+                <span class="bulk-merge-name">{name}</span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+        {#if bulkOpError}
+          <p class="hint hint-warning">{bulkOpError}</p>
+        {/if}
+        <div class="modal-actions">
+          <button
+            type="button"
+            class="btn btn-emerald"
+            onclick={() => void confirmBulkMerge()}
+            disabled={bulkMergeInFlight || !bulkMergeCanonical}
+          >
+            {bulkMergeInFlight ? 'Merging…' : 'Merge'}
+          </button>
+          <button
+            type="button"
+            class="btn btn-marble"
+            onclick={cancelBulkMerge}
+            disabled={bulkMergeInFlight}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </Modal>
   {/if}
 
   <!-- Cancel-with-imported-theme guard. Renders only when the user
@@ -2905,14 +3265,135 @@
   }
 
   .label-row {
+    /* Columns: [checkbox] [chip] [name] [count] [Details]. Checkbox
+       column added in Phase 3a Slice 2 — the auto sizing keeps it
+       flush with the chip while name grows to 1fr. */
     display: grid;
-    grid-template-columns: auto 1fr auto auto;
+    grid-template-columns: auto auto 1fr auto auto;
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);
     background: var(--bg-surface);
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
+  }
+  .label-select {
+    /* Native checkbox scales fine at 16px; give it a bit of tap area
+       vertically so mouse targeting isn't finicky. */
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  /* Phase 3a Slice 2 — multi-select toolbar. Renders above the label list
+     when any labels are present. Left side owns selection state; right
+     side owns batch actions (hidden until N > 0). */
+  .bulk-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-3);
+  }
+  .bulk-actions-spacer {
+    flex: 1;
+  }
+  .bulk-select-all {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    cursor: pointer;
+  }
+  .bulk-select-all input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+  }
+  .bulk-select-all-text {
+    font-family: var(--font-display);
+    font-size: var(--text-caption);
+    color: var(--text-secondary);
+  }
+  .bulk-clear {
+    font-size: var(--text-caption);
+  }
+
+  /* Result / error banner after a bulk op. Persists until dismissed or
+     until the user modifies selection. .is-error swaps in the error
+     tokens so failures read as needs-attention rather than success. */
+  .bulk-op-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border-radius: var(--radius-md);
+    border-left: 3px solid var(--accent-primary);
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    line-height: var(--text-caption-lh);
+    margin-bottom: var(--space-3);
+  }
+  .bulk-op-banner.is-error {
+    background: var(--bg-error-tint-soft, var(--bg-error-tint));
+    border-left-color: var(--border-error, var(--accent-pink));
+    color: var(--text-primary);
+  }
+
+  /* Merge picker body — radio list of the selected labels. Radio group
+     is bounded height + scrolls internally so a 50-label merge (unlikely
+     but possible) doesn't push the actions off-screen. */
+  .bulk-merge-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .bulk-merge-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm, 4px);
+  }
+  .bulk-merge-list li + li {
+    border-top: 1px solid var(--border-structural);
+  }
+  .bulk-merge-option {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    cursor: pointer;
+  }
+  .bulk-merge-option:hover {
+    background: var(--bg-elevated);
+  }
+  .bulk-merge-option input[type='radio'] {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .bulk-merge-name {
+    font-family: var(--font-body);
+    color: var(--text-primary);
+  }
+  /* Actions row inside the merge picker Modal body slot. Modal's slot
+     renders children with Settings' scoped classes, so this rule reaches
+     the <div class="modal-actions"> inside the bulk-merge-body. Standard
+     right-aligned button row, matches the shape ConfirmDialog uses. */
+  .modal-actions {
+    display: flex;
+    gap: var(--space-3);
+    justify-content: flex-end;
+    margin-top: var(--space-2);
   }
 
   .label-chip {

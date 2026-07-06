@@ -1,12 +1,14 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 2.8 ✅ done — next up Phase 3a (Label library viewer + bulk management)
+## Current phase: Phase 3a ✅ done — next up Phase 3b (Search & Navigation)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
 Phase 2.8 (Custom Themes) shipped 2026-06-30 — 12 user-editable primaries → ~23 OKLCH-derived tokens via culori, Theme = Light / Dark / Custom, AA contrast warnings, hex-input editor, `.captheme.json` export/import via Tauri dialogs, plus a "Colorful Labels" follow-on that gives each label a per-name hue (theme-aware, regenerates on switch — no lazy-persist, so no theme-burn). A tray-menu "Preset Theme" submenu (Dark / Light) is the escape hatch for when a Custom palette makes the in-app theme picker unreadable. Phase 2.8c (2026-06-30) layered a shared-component pass on top — `Modal`, `ConfirmDialog`, `LoadingOverlay`, `PointerFinger`, `StepHeader`, `PathPickerField` extracted out of onboarding / settings / send-to-manager — refactored the SendToManagerButton Preview popup onto the shared Modal (From: line gated on `user_email`, HTML render now shown in Compose+paste mode too, Close + Copy buttons placed side-by-side at the lower-right), and fixed a Gmail + Compose+paste clipboard-skip bug where a stale `mailNativeHtml` flag short-circuited the `writeHtml` call.
 
-**Next up: Phase 3a — Label Library viewer + bulk management.** Browse / filter all labels, drill from a label into the Notes that use it, surface the per-label color override picker that closes the loop on Phase 2.8b's `set_label_color` plumbing, plus bulk rename / merge / delete with atomic writes. Phase 3b then layers full-text search + date/file filters + click-to-jump on top of the same plumbing.
+Phase 3a shipped 2026-07-06 — the Label Library viewer got its "Referenced In" drill-down (new `get_notes_for_label` Rust command + a bounded list inside `LabelDetailsModal` capped at 50 rows, click-to-navigate into `/journal?year=Y&week=W`), plus multi-select on the Labels tab with a bulk toolbar (Delete N / Merge into…). The merge picker is a radio-select Modal that pre-fills the highest-count label as the canonical target and reuses `rename_label`'s auto-merge-on-collision. Bulk-rename was dropped from the original scope — rename-into-existing already covers the merge case, so a distinct bulk-rename mode was redundant.
+
+**Next up: Phase 3b — Search & Navigation.** Full-text search across every weekly file, filter by label / date range / file, click-to-jump into the right week. Builds on the label→notes drill-down plumbing from 3a (the same result-list + week-jump shape generalizes to arbitrary content matches).
 
 ---
 
@@ -310,16 +312,20 @@ Layered on top of 2.8 / 2.8b in the same day. Started as a "delete my settings f
 - `svelte-check`: 420 files, 0 errors, 0 warnings.
 - Manual: deleted `app-settings.json` to retrigger first-run wizard, walked through all 5 steps; smoke-tested the Preview modal across Gmail / Native Mac / Outlook in both Prefilled and Compose+paste delivery modes; confirmed From line renders only when `user_email` is set and HTML preview renders for clipboard-paste mode.
 
-## Phase 3 — Label Library + Search & Navigation
+## Phase 3 — Label Library + Search & Navigation + Task List
 
-Sequenced intentionally: the Label library viewer (3a) is the natural starter because it needs label→Notes navigation, which is just a constrained search. Phase 3b's full-text search then generalizes that result-list + week-jump plumbing across all weekly content.
+Sequenced intentionally: the Label library viewer (3a) is the natural starter because it needs label→Notes navigation, which is just a constrained search. Phase 3b's full-text search generalizes that result-list + week-jump plumbing across all weekly content. Phase 3c layers a task-list aggregator on top — pulls `- [ ]` items out of every weekly file's "Plans and priorities for next week" section into a live view on the landing page, with bidirectional sync back to source markdown and an opt-in week-rollover mechanic that folds completed tasks into the new week's Key Accomplishments.
 
-### Phase 3a — Label library viewer + bulk management
+### Phase 3a — Label library viewer + bulk management ✅ (shipped 2026-07-06)
 
-- [ ] **Browse + filter all labels** in use across the journal. Sits on top of the existing `.metadata/labels.json` index (already maintained by `record_note_labels`). Filter input (substring + maybe tag-cloud-by-recency).
-- [ ] **Drill from a label into the matching Notes / Summaries** — first surface that needs a label→content lookup. The plumbing here becomes Phase 3b's result-list + week-jump foundation.
-- [ ] **Per-label color override picker** — surfaces the `set_label_color` Tauri command that Phase 2.8b already shipped. When Colorful Labels is on, the picker shows the auto-generated hue (from `generateLabelColor`) AND a Set / Reset button. "Set" persists a user override to `labels.json`; "Reset" clears `color: None`. Closes the loop on the design Chris locked in — auto-derived for new labels, explicitly overridable here.
-- [ ] **Bulk rename / merge / delete** — natural extension of the same screen. Merge: pick 2+ labels, choose one as canonical, rewrites every occurrence across weekly files. Delete: remove a label from `labels.json` AND strip it from every Note/Summary that references it. Rename: in-place across files. All three need careful atomic-write semantics — reuse the staged `.tmp` + rename pattern from 2.8b's labels.json hardening.
+- [x] **Browse + filter all labels** — substring filter input on the Settings → Labels tab, sorted by count desc then name asc. Shipped in Phase 2.8b's original Labels tab; still current.
+- [x] **Drill from a label into the matching Notes / Summaries** — new `get_notes_for_label` Rust command walks every weekly file, returns one `LabelReference` per site (newest-first) with the enclosing Note's timestamp + optional title. New "Referenced In" section in `LabelDetailsModal` renders the list with kind badges, week labels, and click-to-navigate that closes the modal and `goto('/journal?year=Y&week=W')`. `/journal` reads those URL params on mount, expands the target year in the sidebar tree, and selects the week. List is capped at 50 rows in the DOM with a `TipBubble` explaining truncation; the modal itself stays scrollable within the shared Modal shell.
+- [x] **Per-label color override picker** — already shipped in Phase 2.8b's `LabelDetailsModal` (swatch + hex input + Reset-to-auto). No 3a work needed.
+- [x] **Bulk delete + bulk merge** — multi-select checkboxes added to every Labels-tab row plus a select-all in the toolbar above the list. Toolbar's right side surfaces **Delete N** (ruby, opens a shared ConfirmDialog) and **Merge into…** (marble, disabled until 2+ labels are selected). Merge picker is a nested Modal with radio-select of the currently-selected label names, pre-selected to the highest-count label; on confirm, loops `rename_label(source, canonical)` for every non-canonical — `rename_label` already auto-merges when the target exists, so no new backend needed for the merge case. Delete loops `delete_label_cascade`. Both ops continue past individual failures and aggregate results into a persistent banner above the list ("Deleted 3 labels" / "Deleted 2 of 3. Failed: bugX (error…)."). `onLabelMutated` prunes stale names out of the selection set when a bulk-selected label gets renamed or deleted through the Details modal.
+
+**Dropped from original scope:** bulk-rename as a distinct mode. The design converged on rename-into-existing = merge, so the multi-select bulk-rename UI was redundant. Single-label rename stays accessible via the Details button on any row.
+
+**Verification:** 6 new Rust tests (4 for the `extract_note_heading_before` helper, 2 integration tests against `LocalFilesystem` covering cross-year ordering + both site kinds with note metadata); full suite 248/248. `svelte-check` clean at 420/0/0 across all Slice 1 + Slice 2 changes.
 
 ### Phase 3b — Search & Navigation
 
@@ -327,6 +333,73 @@ Sequenced intentionally: the Label library viewer (3a) is the natural starter be
 - [ ] Filter by label, date range, file
 - [ ] Click search result → opens correct week, scrolls to correct Note
 - [ ] Year/week tree handles many years gracefully
+
+### Phase 3c — Task list aggregator
+
+Aggregate `- [ ]` items from every weekly file's "Plans and priorities for next week" section into a live task view on the landing page. Bidirectional sync — checking a task on the main screen rewrites the source markdown line. Opt-in week-rollover mechanic appends completed tasks to the new week's Key Accomplishments. Design derived from a prior-art sweep (Obsidian Tasks / Logseq / Things 3 / Bullet Journal); decision brief captured in the DEVELOPMENT-JOURNAL entry for 2026-07-06.
+
+**Task identity model (locked)**
+
+Markdown is the sole source of truth for checkbox state. A sidecar (`.metadata/task-completions.json`) is a rebuildable cache that stores `completedAt` timestamps and nothing else.
+
+- Composite key: `(weekId, normalizedTextHash)`. Normalization: trim, collapse internal whitespace, lowercase, strip trailing punctuation.
+- Duplicate task text within the same week's Plans section: append an `ordinal` disambiguator (kicks in only when duplicates exist, so single occurrences stay stable across reordering).
+- Reconciliation on load: markdown wins for checkbox state, sidecar wins for timestamps. `[x]` in file + no sidecar entry → backfill `completedAt` from file mtime (em-dash display if unreadable). `[ ]` in file + sidecar entry → drop the entry. Sidecar entry with no matching file line → garbage-collect.
+- Text rewritten externally → treated as a new task; old sidecar entry GC'd on next scan. User mental model: *"A task is a `- [ ]` line I wrote. Rename it substantially and it becomes a new task — same as crossing it out and writing fresh."*
+
+**Landing-page task view**
+
+- [ ] Scrollable task list below the three primary buttons (weekly summary / browse journal / settings). Visual treatment based on the Labels viewer in Settings → Labels.
+- [ ] Tasks grouped by **"From Week N"** headers — the week the task was written in, not planned for. BuJo's model: the date of a task is its origin, not its deadline.
+- [ ] Per-task **"Written in Week N"** badge always visible — doubles as the staleness signal without needing a separate overdue concept.
+- [ ] **+ Add task** button centered under the list. Opens a shared-Modal popup with a single text-input field; on submit, appends `- [ ]` to the current week's Plans section (creates the file / section if missing).
+- [ ] Empty state: shared `<TipBubble>` directing the user to add `- [ ]` items in the Plans and priorities for next week section of their journal.
+
+**Bidirectional sync**
+
+- [ ] Check off task on main screen → matching line in source markdown rewritten to `- [x]` via the existing `write_week` Tauri command.
+- [ ] Emits the standard `weekly-file-changed` event so `/journal` + `/summary` reconcile if open on the same week (uses the Phase 2.5b `pendingCommit` guard to prevent own-save race).
+
+**Sidecar (`.metadata/task-completions.json`)**
+
+- [ ] Atomic writes via staged `.tmp` + rename (same pattern as `labels.json` from Phase 2.8b).
+- [ ] Full rebuild-from-source on load: scan every weekly file's Plans section, reconcile against sidecar per the locked identity model.
+- [ ] **Rebuild task index** button in Settings → Task List, with a tip explaining when to use it (rare escape hatch: "if things look off, click here"). Discoverable but not intrusive — no hotkey.
+- [ ] Handles sidecar deletion / tampering: on next load, mtime backfill for existing `[x]` tasks; nothing worse than losing precise completion timestamps for pre-existing checks.
+
+**Week rollover**
+
+Fires on the first day of the ISO week (per user's reminder day-of-week convention). Lazy trigger: no background writes while the app is closed. Two entry points hit the same handler:
+
+- [ ] Scheduler tick at midnight of the first-day boundary (handles app-left-open case) — dispatches the rollover.
+- [ ] On-mount check when the main window opens (handles fresh-launch-in-new-week case) — compares last-known-rollover-week against current week; if we're behind, run rollover.
+- [ ] Rollover action: for each `- [x]` task in the previous week's Plans section, append `- ` + task text to that week's `### Key accomplishments` section under a **"Rolled over from Week N"** subheading. Appends below any existing user-written content in that section so the user's own writing stays first.
+- [ ] Receipt toast on `/summary` with an **Undo** affordance (removes the appended block + reverts source-task check state). Undo available until dismissed or until the next rollover fires.
+- [ ] Per-line **"Rolled over from Week N"** badge in the rendered Key Accomplishments list so the lineage survives visually even after the toast is gone.
+
+**Settings → Task List tab**
+
+- [ ] **Use task list** (default on) — master toggle. When off, hides the main-screen list AND every other option in this tab.
+- [ ] **Add completed tasks to next week's Key accomplishments** (default on).
+- [ ] **Hide completed tasks** (default on) — checked-off tasks vanish from the main-screen list immediately. When off, completed tasks remain visible; add a tip noting all history will appear (older completed tasks stay in the list forever unless re-checked).
+- [ ] **Rebuild task index** button + tip.
+
+**Out of scope (intentional — parked for later)**
+
+- Due dates on tasks (`📅 2026-07-15` syntax). Deliberately deferred — Obsidian Tasks' emoji-metadata approach was flagged by their own docs for Unicode/non-breaking-space fragility.
+- Sourcing tasks from anywhere besides "Plans and priorities for next week" (Note bodies, other Weekly Summary sections). Narrow scope for v1; leave room to expand later if asked.
+- Task states beyond `- [ ]` / `- [x]` (BuJo has cancelled, migrated, scheduled — not yet).
+- Inline task editing in the aggregator (edit text without opening `/journal`).
+- Drag-reorder within the aggregated view.
+- Gamification (streaks, counts, achievements). BuJo's explicit anti-pattern: *"don't conflate task state with worth."*
+- Multiple task formats (emoji format vs. dataview format). Plain `- [ ]` only, no metadata sigils.
+
+**Verification approach**
+
+- Sidecar-deletion recovery: manually delete `.metadata/task-completions.json`, reload, all state rebuilt from markdown with mtime backfill.
+- External-editor toggle: open weekly file in TextEdit, flip a checkbox, reopen Captain's Log, sidecar reconciles per the locked rules.
+- Weekend-sleep rollover: leave app open Friday, wake Monday, verify rollover fires exactly once and receipt toast appears.
+- Cross-route dirty guard: `/journal` open on last week's file with unsaved edits, rollover fires — `externalUpdate` banner surfaces instead of silent clobber.
 
 ## Phase 4 — Link Enrichment
 

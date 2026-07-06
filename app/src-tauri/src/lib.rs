@@ -417,6 +417,7 @@ pub fn run() {
             commands::set_label_color,
             commands::rebuild_label_index,
             commands::get_label_stats,
+            commands::get_notes_for_label,
             commands::rename_label,
             commands::delete_label_cascade,
             commands::get_settings,

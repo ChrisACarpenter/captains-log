@@ -499,7 +499,11 @@ fn parse_tag_tokens(text: &str) -> Vec<String> {
 }
 
 /// Cheap check: does this 10-byte prefix look like `YYYY-MM-DD`?
-fn is_iso_date_prefix(b: &[u8]) -> bool {
+///
+/// `pub(crate)` so drill-down commands in `commands.rs` (Phase 3a Slice 1)
+/// can reuse it when discriminating Note headings from Summary subsection
+/// headings while walking backward from a `LabelSite` byte range.
+pub(crate) fn is_iso_date_prefix(b: &[u8]) -> bool {
     b.len() == 10
         && b[0].is_ascii_digit()
         && b[1].is_ascii_digit()

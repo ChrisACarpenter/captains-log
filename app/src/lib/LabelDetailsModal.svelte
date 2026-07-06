@@ -35,6 +35,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { openUrl } from '@tauri-apps/plugin-opener';
   import { chipStyleFor, type ChipEntry } from '$lib/labelChip';
@@ -61,6 +62,18 @@
     inNotes: number;
     inSummaries: number;
     indexCount: number;
+  };
+
+  // Phase 3a Slice 1 — Label Library drill-down. One entry per site where
+  // the label appears, newest-first. `kind` is a bare lowercase string
+  // (Rust: `#[serde(rename_all = "lowercase")]` on the enum) so the
+  // template can switch on the raw value with no mapping layer.
+  type LabelReference = {
+    year: number;
+    week: number;
+    kind: 'note' | 'summary';
+    noteTimestamp: string | null;
+    noteTitle: string | null;
   };
 
   // Rename surfaces RenameResult (camelCase) — we only read
@@ -130,6 +143,17 @@
   // on success. We don't gate the rest of the popup on stats — Color /
   // Rename / Delete are usable even if stats fail (e.g. transient FS hiccup).
   let stats = $state<LabelStats | null>(null);
+  // References ("Referenced In" section) — Phase 3a Slice 1.
+  //
+  // The backend command returns EVERY site the label appears in (newest-
+  // first). We cap the rendered rows at 50 so a heavily-used label
+  // (say, "todo" on a 2-year journal with 300+ hits) doesn't produce a
+  // 500-row DOM subtree or an unusable eyeball-and-scroll UX. When we
+  // truncate, a TipBubble below the list explains what's hidden.
+  const REFERENCES_VISIBLE_CAP = 50;
+  let references = $state<LabelReference[]>([]);
+  let referencesLoading = $state(true);
+  let referencesError = $state('');
   let statsLoading = $state(true);
   let statsError = $state('');
 
@@ -242,15 +266,39 @@
 
   onMount(async () => {
     // Modal owns focus management — no manual closeBtnEl.focus() here.
-    try {
-      const s = await invoke<LabelStats>('get_label_stats', { name: label.name });
-      stats = s;
-    } catch (err) {
-      statsError = String(err);
-    } finally {
-      statsLoading = false;
+    //
+    // Two independent read-only queries: stats + references. Fire them
+    // in parallel via Promise.allSettled so a slow one doesn't hold the
+    // other's spinner hostage, and a failure on one doesn't corrupt the
+    // other's success path.
+    const [statsResult, refsResult] = await Promise.allSettled([
+      invoke<LabelStats>('get_label_stats', { name: label.name }),
+      invoke<LabelReference[]>('get_notes_for_label', { name: label.name }),
+    ]);
+    if (statsResult.status === 'fulfilled') {
+      stats = statsResult.value;
+    } else {
+      statsError = String(statsResult.reason);
     }
+    statsLoading = false;
+
+    if (refsResult.status === 'fulfilled') {
+      references = refsResult.value;
+    } else {
+      referencesError = String(refsResult.reason);
+    }
+    referencesLoading = false;
   });
+
+  // Click handler for a "Referenced in" row. Closes this modal (parent
+  // owns the show/hide flag) then navigates to /journal with the target
+  // week baked into the URL — /journal picks it up on mount and selects
+  // that week in the sidebar. Order matters: close first so the parent
+  // state resets, then goto() takes us off the /settings route.
+  async function jumpToReference(ref: LabelReference): Promise<void> {
+    onClose();
+    await goto(`/journal?year=${ref.year}&week=${ref.week}`);
+  }
 
   // Escape + focus-trap handling moved to Modal. Modal's stack-aware
   // Escape listener routes Esc to the topmost open Modal, so a nested
@@ -427,6 +475,62 @@
             (label index shows {stats.indexCount} — drift detected, will
             reconcile on next rebuild)
           </p>
+        {/if}
+      {/if}
+    </section>
+
+    <!-- Referenced in — Phase 3a Slice 1 drill-down. Clicking a row closes
+         this modal and navigates to /journal on the target week. Height is
+         capped so a heavily-used label doesn't push the actions row off
+         the viewport; long lists scroll inside their own region. -->
+    <section class="section">
+      <h3 class="section-title">Referenced In</h3>
+      {#if referencesLoading}
+        <div class="stats-loading" role="status" aria-live="polite">
+          <span class="spinner" aria-hidden="true"></span>
+          <span>Loading references…</span>
+        </div>
+      {:else if referencesError}
+        <p class="hint hint-warning">Couldn't load references: {referencesError}</p>
+      {:else if references.length === 0}
+        <p class="hint">Not currently referenced in any Note or Weekly Summary.</p>
+      {:else}
+        <ul class="ref-list">
+          {#each references.slice(0, REFERENCES_VISIBLE_CAP) as ref, i (i)}
+            <li>
+              <button
+                type="button"
+                class="ref-row"
+                onclick={() => void jumpToReference(ref)}
+              >
+                <span class="ref-kind ref-kind-{ref.kind}">
+                  {ref.kind === 'note' ? 'Note' : 'Summary'}
+                </span>
+                <span class="ref-body">
+                  {#if ref.kind === 'note'}
+                    <span class="ref-title">{ref.noteTitle ?? '(untitled note)'}</span>
+                    {#if ref.noteTimestamp}
+                      <span class="ref-timestamp">{ref.noteTimestamp}</span>
+                    {/if}
+                  {:else}
+                    <span class="ref-title">Weekly Summary</span>
+                  {/if}
+                </span>
+                <span class="ref-week">
+                  {ref.year}-W{String(ref.week).padStart(2, '0')}
+                </span>
+                <span class="ref-chevron" aria-hidden="true">›</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+        {#if references.length > REFERENCES_VISIBLE_CAP}
+          <TipBubble>
+            Showing the {REFERENCES_VISIBLE_CAP} most recent references
+            (out of {references.length}). Older matches are hidden here —
+            the label is still on those Notes and Weekly Summaries, just
+            not listed in this popup.
+          </TipBubble>
         {/if}
       {/if}
     </section>
@@ -685,6 +789,90 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  /* References list — Phase 3a Slice 1 drill-down. Bounded height with
+     an internal scroll region so a heavily-used label doesn't push the
+     Rename/Delete actions off the viewport in tall modals. */
+  .ref-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 280px;
+    overflow-y: auto;
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-sm, 4px);
+  }
+  .ref-list li + li {
+    border-top: 1px solid var(--border-structural);
+  }
+  .ref-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    padding: var(--space-2) var(--space-3);
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--transition-base);
+  }
+  .ref-row:hover,
+  .ref-row:focus-visible {
+    background: var(--bg-elevated);
+    outline: none;
+  }
+  .ref-row:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--focus-ring);
+  }
+  .ref-kind {
+    font-family: var(--font-display);
+    font-size: var(--text-caption);
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+  }
+  .ref-kind-note {
+    /* Slightly warmer background so Notes and Summaries read as distinct
+       row categories at a glance without needing colored icons. */
+    background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-elevated));
+    color: var(--accent-primary-text);
+  }
+  .ref-body {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 2px;
+  }
+  .ref-title {
+    color: var(--text-primary);
+    font-size: var(--text-body);
+    line-height: var(--text-body-lh);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ref-timestamp {
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    line-height: var(--text-caption-lh);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  }
+  .ref-week {
+    color: var(--text-secondary);
+    font-size: var(--text-caption);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    white-space: nowrap;
+  }
+  .ref-chevron {
+    color: var(--text-muted, var(--text-secondary));
+    font-size: 18px;
+    line-height: 1;
   }
 
   /* Color row: 28×28 swatch + monospace hex input + reset button. */

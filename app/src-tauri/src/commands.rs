@@ -18,7 +18,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::email::{compose_weekly_email as compose, ComposeResult, MailSend};
 use crate::labels::{
-    record_note_labels, scan_label_sites, LabelEntry, LabelIndex, LabelSite, LabelSiteKind,
+    is_iso_date_prefix, record_note_labels, scan_label_sites, LabelEntry, LabelIndex, LabelSite,
+    LabelSiteKind,
 };
 use crate::notes::{
     append_note, iso_week_start, iso_year_week, parse_weekly_summary,
@@ -567,6 +568,175 @@ pub async fn get_label_stats(
         in_summaries,
         index_count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// get_notes_for_label (Phase 3a Slice 1 — Label Library drill-down)
+// ---------------------------------------------------------------------------
+
+/// Which surface a single label reference lives on. Serialized as bare
+/// lowercase strings so the frontend can `switch` on the raw value with
+/// no mapping layer — `"note"` for a Note's `**Labels:**` line, `"summary"`
+/// for a Weekly Summary `### Labels` subsection.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LabelReferenceKind {
+    Note,
+    Summary,
+}
+
+/// A single site where a label appears, enriched with the metadata the
+/// Label Library drill-down needs to render a "jump to this note" list
+/// entry. For Note references, `note_timestamp` and `note_title` come
+/// from the enclosing `### YYYY-MM-DD HH:MM — Title` heading so the user
+/// can disambiguate multiple Notes in the same week. For Summary
+/// references both fields are `None` (there's only one Weekly Summary
+/// per week; the year/week combo is enough).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelReference {
+    pub year: u32,
+    pub week: u32,
+    pub kind: LabelReferenceKind,
+    pub note_timestamp: Option<String>,
+    pub note_title: Option<String>,
+}
+
+/// Walk every weekly file, return one `LabelReference` per site where
+/// `name` appears. Ordered newest-first: years descending, weeks
+/// descending within a year, and source-document order preserved
+/// within a single file (so multiple Note references in the same week
+/// list top-to-bottom as written).
+///
+/// Read-only — never mutates `labels.json`. Per-file read errors are
+/// logged via `eprintln` and skipped (locked-decision #7 from Phase
+/// 2.8b's rename/delete work).
+#[tauri::command]
+pub async fn get_notes_for_label(
+    storage_state: State<'_, SharedStorage>,
+    name: String,
+) -> Result<Vec<LabelReference>, String> {
+    let storage = storage_state.read().await;
+    let mut refs: Vec<LabelReference> = Vec::new();
+
+    let mut years = storage.list_years().await.map_err(|e| e.to_string())?;
+    years.sort_unstable();
+    years.reverse();
+
+    for year in years {
+        let mut weeks = match storage.list_weeks(year).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[label-refs] list_weeks({year}) failed: {e}");
+                continue;
+            }
+        };
+        weeks.sort_unstable();
+        weeks.reverse();
+
+        for week in weeks {
+            let content = match storage.read_week(year, week).await {
+                Ok(Some(c)) => c,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("[label-refs] read_week({year},{week}) failed: {e}");
+                    continue;
+                }
+            };
+            for site in scan_label_sites(&content) {
+                if !site.names.iter().any(|n| n == &name) {
+                    continue;
+                }
+                let reference = match site.kind {
+                    LabelSiteKind::SummaryLabelsSubsection => LabelReference {
+                        year,
+                        week,
+                        kind: LabelReferenceKind::Summary,
+                        note_timestamp: None,
+                        note_title: None,
+                    },
+                    LabelSiteKind::NoteLabelsLine => {
+                        let (ts, title) =
+                            extract_note_heading_before(&content, site.byte_range.start)
+                                .unwrap_or((String::new(), None));
+                        LabelReference {
+                            year,
+                            week,
+                            kind: LabelReferenceKind::Note,
+                            note_timestamp: if ts.is_empty() { None } else { Some(ts) },
+                            note_title: title,
+                        }
+                    }
+                };
+                refs.push(reference);
+            }
+        }
+    }
+
+    Ok(refs)
+}
+
+/// Walk backward from `byte_offset` in `content` and extract the nearest
+/// Note heading (`### YYYY-MM-DD HH:MM[ — Title]`). Returns `(timestamp,
+/// optional_title)`; the timestamp is whatever text appears between the
+/// `### ` prefix and the ` — ` title separator (or end-of-line), verbatim,
+/// so it round-trips as-written and the frontend just displays the string.
+///
+/// Returns `None` when no `### ` heading precedes the offset OR when the
+/// nearest one is a Summary subsection (`### Key accomplishments`, etc.)
+/// rather than a Note — filtered via `is_iso_date_prefix` on the first
+/// ten bytes after the `### ` marker, mirroring how `scan_label_sites`
+/// discriminates in the forward direction.
+fn extract_note_heading_before(
+    content: &str,
+    byte_offset: usize,
+) -> Option<(String, Option<String>)> {
+    if byte_offset > content.len() {
+        return None;
+    }
+    let preceding = &content[..byte_offset];
+    // Match `\n### ` so we don't false-match a hash mid-line. Special-case:
+    // if the file happens to start with `### ` at byte 0 (no leading
+    // newline), we accept that too — rare but valid markdown.
+    let heading_line_start = if let Some(idx) = preceding.rfind("\n### ") {
+        idx + 1
+    } else if preceding.starts_with("### ") {
+        0
+    } else {
+        return None;
+    };
+    let rest_start = heading_line_start + 4; // skip "### "
+    let line_end = content[rest_start..]
+        .find('\n')
+        .map(|i| rest_start + i)
+        .unwrap_or(content.len());
+    let heading_rest = &content[rest_start..line_end];
+
+    // Confirm this is a Note heading, not a Summary subsection heading
+    // like "### Key accomplishments" or "### Labels" or "### Plans and
+    // priorities for next week". Note headings start with an ISO date.
+    let iso_check = heading_rest.as_bytes().get(..10)?;
+    if !is_iso_date_prefix(iso_check) {
+        return None;
+    }
+
+    // Parse "YYYY-MM-DD HH:MM[ — Title]". Timestamp = text before ` — `,
+    // title = text after (if any). Both trimmed.
+    let (ts, title) = if let Some(sep_idx) = heading_rest.find(" — ") {
+        let ts = heading_rest[..sep_idx].trim().to_string();
+        let title_str = heading_rest[sep_idx + " — ".len()..].trim();
+        (
+            ts,
+            if title_str.is_empty() {
+                None
+            } else {
+                Some(title_str.to_string())
+            },
+        )
+    } else {
+        (heading_rest.trim().to_string(), None)
+    };
+    Some((ts, title))
 }
 
 // ---------------------------------------------------------------------------
@@ -2905,6 +3075,181 @@ mod tests {
         let idx = LabelIndex::load(&backend).await.unwrap();
         let entry = idx.labels.iter().find(|e| e.name == "release").unwrap();
         assert_eq!(entry.count, 999, "stats call must not mutate labels.json");
+    }
+
+    // ----- get_notes_for_label (Phase 3a Slice 1 — Label Library drill-down) -----
+    //
+    // Same test seam as get_label_stats: the Tauri command wrapper takes a
+    // `State` we can't build without a full app, so we mirror the body
+    // inline via `compute_label_refs`. Coverage:
+    //   - extract_note_heading_before happy paths + rejection cases
+    //   - Cross-year / cross-week ordering (newest first)
+    //   - Both site kinds surface with correct metadata shape (Notes carry
+    //     timestamp + optional title; Summaries carry neither)
+
+    #[test]
+    fn extract_note_heading_before_parses_timestamp_and_title() {
+        let content = "\n### 2026-06-25 14:23 — My note title\n**Labels:** #foo\n";
+        let offset = content.find("**Labels:**").unwrap();
+        let (ts, title) = extract_note_heading_before(content, offset).unwrap();
+        assert_eq!(ts, "2026-06-25 14:23");
+        assert_eq!(title.as_deref(), Some("My note title"));
+    }
+
+    #[test]
+    fn extract_note_heading_before_no_title() {
+        let content = "\n### 2026-06-25 14:23\n**Labels:** #foo\n";
+        let offset = content.find("**Labels:**").unwrap();
+        let (ts, title) = extract_note_heading_before(content, offset).unwrap();
+        assert_eq!(ts, "2026-06-25 14:23");
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn extract_note_heading_before_rejects_summary_subsection() {
+        // "### Key accomplishments" is a Summary subsection, NOT a Note.
+        // If we accepted it, drill-down would wrongly attribute a
+        // SummaryLabelsSubsection site to a phantom Note.
+        let content = "\n### Key accomplishments\nfoo\n";
+        let offset = content.find("foo").unwrap();
+        assert!(extract_note_heading_before(content, offset).is_none());
+    }
+
+    #[test]
+    fn extract_note_heading_before_returns_none_with_no_heading() {
+        let content = "just a body with no heading above";
+        assert!(extract_note_heading_before(content, 5).is_none());
+    }
+
+    async fn compute_label_refs<B: crate::storage::StorageBackend + ?Sized>(
+        backend: &B,
+        name: &str,
+    ) -> Result<Vec<LabelReference>, String> {
+        // Mirror the command body — kept in lockstep with get_notes_for_label.
+        let mut refs: Vec<LabelReference> = Vec::new();
+
+        let mut years = backend.list_years().await.map_err(|e| e.to_string())?;
+        years.sort_unstable();
+        years.reverse();
+
+        for year in years {
+            let mut weeks = match backend.list_weeks(year).await {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("[label-refs] list_weeks({year}) failed: {e}");
+                    continue;
+                }
+            };
+            weeks.sort_unstable();
+            weeks.reverse();
+
+            for week in weeks {
+                let content = match backend.read_week(year, week).await {
+                    Ok(Some(c)) => c,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        eprintln!("[label-refs] read_week({year},{week}) failed: {e}");
+                        continue;
+                    }
+                };
+                for site in scan_label_sites(&content) {
+                    if !site.names.iter().any(|n| n == name) {
+                        continue;
+                    }
+                    let reference = match site.kind {
+                        LabelSiteKind::SummaryLabelsSubsection => LabelReference {
+                            year,
+                            week,
+                            kind: LabelReferenceKind::Summary,
+                            note_timestamp: None,
+                            note_title: None,
+                        },
+                        LabelSiteKind::NoteLabelsLine => {
+                            let (ts, title) =
+                                extract_note_heading_before(&content, site.byte_range.start)
+                                    .unwrap_or((String::new(), None));
+                            LabelReference {
+                                year,
+                                week,
+                                kind: LabelReferenceKind::Note,
+                                note_timestamp: if ts.is_empty() { None } else { Some(ts) },
+                                note_title: title,
+                            }
+                        }
+                    };
+                    refs.push(reference);
+                }
+            }
+        }
+
+        Ok(refs)
+    }
+
+    #[tokio::test]
+    async fn label_refs_orders_years_desc_and_weeks_desc() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Three files across two years, each carrying "release" in the Summary.
+        // Newest week/year should come first in the result list.
+        let f_2025 = build_weekly_file(2025, 10, &["release"], &[]);
+        backend.write_week(2025, 10, &f_2025).await.unwrap();
+        let f_2026_25 = build_weekly_file(2026, 25, &["release"], &[]);
+        backend.write_week(2026, 25, &f_2026_25).await.unwrap();
+        let f_2026_26 = build_weekly_file(2026, 26, &["release"], &[]);
+        backend.write_week(2026, 26, &f_2026_26).await.unwrap();
+
+        let refs = compute_label_refs(&backend, "release").await.unwrap();
+        assert_eq!(refs.len(), 3, "one Summary site per file");
+        assert_eq!((refs[0].year, refs[0].week), (2026, 26));
+        assert_eq!((refs[1].year, refs[1].week), (2026, 25));
+        assert_eq!((refs[2].year, refs[2].week), (2025, 10));
+        for r in &refs {
+            assert!(matches!(r.kind, LabelReferenceKind::Summary));
+            assert!(r.note_timestamp.is_none());
+            assert!(r.note_title.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn label_refs_returns_both_kinds_with_note_metadata() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Single file with BOTH a Summary subsection reference AND a Note
+        // labels-line reference to "release" — proves both site kinds land
+        // in the result list and the Note carries its heading metadata.
+        let f = build_weekly_file(2026, 25, &["release"], &["release"]);
+        backend.write_week(2026, 25, &f).await.unwrap();
+
+        let refs = compute_label_refs(&backend, "release").await.unwrap();
+        assert_eq!(refs.len(), 2, "one Summary + one Note site");
+
+        let has_summary = refs
+            .iter()
+            .any(|r| matches!(r.kind, LabelReferenceKind::Summary));
+        let has_note = refs
+            .iter()
+            .any(|r| matches!(r.kind, LabelReferenceKind::Note));
+        assert!(has_summary, "Summary site should surface");
+        assert!(has_note, "Note site should surface");
+
+        let note_ref = refs
+            .iter()
+            .find(|r| matches!(r.kind, LabelReferenceKind::Note))
+            .unwrap();
+        assert!(note_ref.note_timestamp.is_some(), "Note carries timestamp");
+        assert_eq!(
+            note_ref.note_title.as_deref(),
+            Some("scan-test note"),
+            "Note carries title from fixture heading"
+        );
     }
 
     // ----- rename_label (Phase 3a Slice 5) -----

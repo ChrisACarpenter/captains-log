@@ -1276,3 +1276,124 @@ Lesson: **when refactoring "one of two popups in this file," check the other one
 
 Chris is going to use the app end-to-end with the new chrome + Preview refactor in earnest. **Phase 3a — Label Library viewer + bulk management** is still the next planned phase. Any 2.8/2.8b/2.8c bugs that surface get folded into a small cleanup pass before 3a kicks off.
 
+## 2026-07-06 — Phase 3c task-list design brief
+
+Chris back after a week off — the app rolled the ISO week over cleanly, reminders fired, no crash reports. Built the .app for internal team testing (arm64, ad-hoc signed, 7 MB DMG). Passed a docs sanity check on the in-app Help + Nerds Only popups (`help-content.ts`) — added sections for send-to-manager, weekly reminders (merged with Noot), themes/colors, Rust backend modules, and the OKLCH walker; small factual fixes for the 4th summary field and Esc scope.
+
+Then Chris outlined Phase 3c: a task-list aggregator that pulls `- [ ]` items out of every weekly file's "Plans and priorities for next week" section, displays them on the main screen, checks them off with bidirectional sync back to markdown, and (opt-in) rolls completed tasks into next week's Key Accomplishments on ISO week boundary.
+
+### The core design questions
+
+Chris's spec was mostly locked but four things needed thinking:
+
+1. **Scope** — only source from Plans-for-next-week, or any `- [ ]` line anywhere? Chris: narrow scope, room to expand later if asked.
+2. **Task identity** — the load-bearing hard problem. Markdown has no stable task ID; line numbers drift; text can change externally. Needed something accurate, simple, easy-to-explain, robust.
+3. **Sidecar for completion timestamps** — must survive tampering / deletion.
+4. **Rollover trigger** — on ISO first-day-of-week. Handle both app-left-open-over-weekend AND app-opened-fresh-in-new-week.
+
+Ran a 4-way research workflow (Obsidian Tasks / Logseq / Things 3 / Bullet Journal) to see how prior art handles these. Findings:
+
+**Obsidian Tasks** is architecturally closest to us — parses `- [ ]` across markdown files. Their identity model is content-based (task text + file coordinate); they have NO persistent sidecar and NO external-edit detection. Their emoji-metadata format (📅, ✅, 🆔) has known Unicode / non-breaking-space fragility that breaks the parser — a specific don't-do that shipped for us.
+
+**Logseq** uses inline block-reference UUIDs (`((abc123))`) for identity. Powerful but noisy in the markdown; their own export tool strips them because they hurt portability. Off-target for our "keep the markdown clean for external editors" goal.
+
+**Things 3** doesn't use markdown so their storage is irrelevant, but their UX restraint is the lesson: no gamification, no metrics, no clever features. Their Logbook (completed tasks) is visible but muted — small but non-zero signal that hiding all completion history erases the satisfaction loop.
+
+**Bullet Journal** was the surprise-most-useful reference. Their signifier system (dot / x / arrow / angle-bracket for open / done / migrated / scheduled) shows a richer state model exists but v1 doesn't need it. Their migration ritual — the deliberate act of moving un-done tasks between periods — maps beautifully to our week-rollover feature, but they warn hard against automating migration without reflection. Hence the receipt toast + Undo pattern in our design.
+
+### Locked task identity
+
+Composite key: `(weekId, normalizedTextHash)`. Normalize by trimming, collapsing internal whitespace, lowercasing, stripping trailing punctuation. Sidecar (`.metadata/task-completions.json`) is a rebuildable cache keyed by the same composite, storing only `completedAt`. Duplicate task text in the same week gets an `ordinal` disambiguator that only kicks in when duplicates exist.
+
+Reconciliation rule: **markdown wins for checkbox state, sidecar wins for timestamps.** Every load scans the weekly files and reconciles: missing sidecar entry for a `[x]` line → backfill from file mtime; sidecar entry for a `[ ]` line → drop; sidecar entry with no matching file line → GC. External text edits that materially change the task turn it into a new task (old entry GC'd) — matches BuJo's model where "rewriting IS reconsideration."
+
+User mental model, verbatim from the synthesizer: *"A task is a `- [ ]` line I wrote in Plans and priorities for next week. Checking it anywhere marks it done. If I rename the text substantially, it becomes a new task — same as crossing it out and writing fresh."*
+
+### What we're stealing from prior art
+
+- "Rebuild task index" as a first-class UI command (Obsidian Tasks proves rebuild-from-markdown always works; ours needs to be discoverable but not intrusive — Settings tab button + tip).
+- Aggressive text normalization before hashing so users can retype the same task and get the same identity.
+- Silent reconciliation on load with deterministic merge rules — Obsidian Tasks' silence on external edits is bad, but constant modal prompts are worse.
+- "Written in Week N" badge on every task — BuJo's origin-date-not-deadline pattern, gives us staleness signal for free.
+- Receipt toast + Undo on rollover — BuJo's core lesson that automation without reflection is the anti-pattern.
+- "Rolled over from Week N" badge in Key Accomplishments so the lineage survives after the toast.
+
+### What we're NOT doing
+
+- No inline ID tokens (`[id:abc]`) in the markdown — Logseq's own docs say they strip these on export because they hurt writing experience.
+- No emoji metadata sigils — Obsidian Tasks' Unicode fragility is a well-documented parser trap.
+- No due dates in v1 — Things 3's restraint + BuJo's "origin dates, not deadlines" both validate.
+- No richer task states (cancelled / scheduled / migrated) in v1 — plain `- [ ]` / `- [x]` only.
+- No gamification.
+- No inline task editing in the aggregator — open `/journal` to edit text.
+
+### The four open questions and Chris's calls
+
+1. **Rollover conflict** (user already wrote in this week's Key Accomplishments before rollover fires) → append below existing content under a "Rolled over from Week N" subheading.
+2. **Backfill for missing completedAt on first scan** → file mtime, em-dash if unreadable. Fine to have imprecise timestamps for pre-existing checks since 3c isn't shipped yet.
+3. **Duplicate task text same week** → silent ordinal disambiguator. Warning users about duplicates would nag.
+4. **Rebuild command placement** → Settings → Task List tab, button with a tip. Discoverable, not intrusive.
+
+Chris also confirmed the **hide-completed default = on** (immediate hide when checked, user can toggle off to keep completion history visible).
+
+Full Phase 3c spec is in ROADMAP.md.
+
+### Next
+
+Phase 3a (Label Library viewer + bulk management) still comes first. Phase 3b (Search & Navigation) second. Phase 3c (Task list aggregator) third. If any of the Phase 2.6–2.8c code surfaces bugs during team testing this week, those fold into a small cleanup pass before 3a kicks off.
+
+## 2026-07-06 (later) — Phase 3a: Label Library drill-down + bulk ops
+
+Same-day continuation. Team testing on the fresh build didn't surface crash-level bugs so we jumped straight into 3a.
+
+### Scope reality check
+
+Started with a survey of what's already on disk (Phase 2.8b did more than I remembered): `rename_label`, `delete_label_cascade`, `set_label_color`, `get_label_stats`, `rebuild_label_index` all shipped. `LabelDetailsModal` already covers per-label color / rename / delete with a stats section and drift-detection banner. The Labels tab in Settings already lists + filters. The ACTUAL missing pieces for 3a boiled down to two things: (1) a label → notes reverse lookup with a drill-down UI, and (2) multi-select + bulk ops on the Labels tab.
+
+Also dropped bulk-rename from scope. The original ROADMAP mentioned "bulk rename / merge / delete" but the design has converged: `rename_label` already auto-merges when the target name exists (Phase 2.8b behavior), so "bulk merge" IS "rename N labels into a canonical," and a distinct bulk-rename UI would be redundant. Chris confirmed.
+
+### Slice 1 — Referenced In drill-down
+
+**Backend.** New `get_notes_for_label(name)` Tauri command in `commands.rs`. Walks every weekly file (years desc, weeks desc), runs `scan_label_sites`, filters to sites containing the target label, returns one `LabelReference { year, week, kind, noteTimestamp, noteTitle }` per site. Kind is `"note" | "summary"` as bare lowercase strings so the frontend switches on the raw value with no mapping layer.
+
+For Note references we walk backward from the labels-line byte offset to the nearest `### YYYY-MM-DD HH:MM — Title` heading via a new `extract_note_heading_before` helper. Discriminates Note headings from Summary subsection headings (`### Key accomplishments`, etc.) via the same 10-byte ISO-date-prefix check that `scan_label_sites` uses forward-direction; promoted `is_iso_date_prefix` to `pub(crate)` for the reuse.
+
+Six new tests: 4 unit tests for `extract_note_heading_before` (timestamp+title, no-title, rejects Summary subsections, returns None when no heading precedes), 2 integration tests against `LocalFilesystem` (cross-year + cross-week ordering; both site kinds surface with note metadata). Full test suite: 248/248.
+
+**Frontend.** Added a "Referenced In" section to `LabelDetailsModal` between Usage stats and the Color/Rename/Delete blocks. Stats + references fetch in parallel via `Promise.allSettled` so one failing doesn't hold the other's spinner. Row shape: kind badge (Notes get a warmer accent-tinted background) + note title + optional timestamp + `YYYY-Wnn` label + chevron.
+
+The list caps at 50 rows in the DOM — a heavily-used label ("todo" on a 2-year journal) could theoretically produce 300–500 rows. When we truncate, a `TipBubble` below the list explains ("Showing the 50 most recent references (out of N). Older matches are hidden here…"). Chris and I discussed the number — 50 fits the modal comfortably, and users needing more than that are better served by opening `/journal` and browsing directly.
+
+Click a row → `onClose()` (unmounts modal cleanly, resets `/settings` state) then `goto('/journal?year=Y&week=W')`. `/journal` reads the URL params on mount, expands the target year node in the sidebar tree (loading its weeks if it isn't the current year), and calls `selectWeek`. Defensive: bad params, or a URL pointing at a week that no longer exists on disk, falls through silently to the empty-state pane.
+
+### Slice 2 — Multi-select + bulk delete + bulk merge
+
+Chris's spec: checkboxes on every row, select-all, action toolbar appears when N > 0, one confirm dialog per batch (not per item), merge picker gets a radio-select of the selected labels for canonical target.
+
+New Settings-scoped state: `selectedLabelNames: Set<string>` (name-keyed so the set survives filter/sort changes and Details-modal mutations); `showBulkDeleteConfirm` / `showBulkMergePicker`; `bulkMergeCanonical: string | null`; result banner state.
+
+Toolbar renders above the list when there are labels at all. Left side: select-all checkbox + counter ("Select all" / "N selected") + Clear link. Right side: Delete N (ruby) and Merge into… (marble, disabled with a tooltip until 2+ selected). Toolbar right stays empty at N=0 so users who aren't selecting don't see irrelevant chrome.
+
+Bulk delete uses the shared `ConfirmDialog`; bulk merge uses the shared `Modal` directly because we needed the primary-action-disabled state that ConfirmDialog doesn't expose. Merge picker's radio group pre-selects the highest-count label (ties broken alphabetically) so the "obvious" canonical is the default. Confirm on delete loops `delete_label_cascade`; confirm on merge loops `rename_label(source, canonical)` for every non-canonical source. Both continue past individual failures per Phase 2.8b's locked posture (don't roll back on partial failure; surface what couldn't be touched).
+
+Result banner persists above the list after a bulk op with a `×` dismiss. Errors flip to the pink-tint variant via `.is-error`. Cleared automatically when the user modifies selection — the receipt is stale once a new op is being built.
+
+Interaction cases: Details-modal rename/delete on a bulk-selected label prunes it from the selection on the next fetch (`onLabelMutated`); filter change mid-selection keeps outside-of-filter selections but the select-all checkbox reflects "all visible selected"; partial failures show aggregated summary listing which labels errored.
+
+### Lessons worth keeping
+
+- **Survey what exists BEFORE re-litigating the plan.** The ROADMAP entry for 3a mentioned "bulk rename/merge/delete" as one bullet; the actual scope was much smaller once I realized `rename_label` already auto-merges. Would've saved ~15 minutes to Explore-agent that first instead of taking the ROADMAP at face value.
+- **Cap DOM row counts before shipping list UIs.** Chris asked "how big does this get?" the moment he saw the drill-down design. Realistic sizes are fine but heavy usage tails into unusable territory; a hard cap + explanation TipBubble is cheaper than adding pagination / filtering later.
+- **Multi-select selection is name-keyed, not index-keyed.** Using indices would break the moment the filter changes or a Details-modal mutation reorders the list. Set-of-strings is the right shape.
+
+### Verification
+
+- `cargo test --lib`: 248 passed, 0 failed (was 242 before Slice 1's tests).
+- `svelte-check`: 420 files, 0 errors, 0 warnings across all Slice 1 + Slice 2 changes.
+- Manual: Chris smoke-tested the drill-down + bulk delete + bulk merge on his real journal. No crash-level issues; the "looks like this is all working well" verdict.
+
+### Next
+
+Phase 3b — full-text search across every weekly file, filter by label / date range / file, click-to-jump to the right week. Builds on the label→notes drill-down plumbing from 3a (same result-list + goto-with-URL-params shape, just generalized to arbitrary content matches).
+
+
