@@ -130,6 +130,7 @@
     id = undefined,
     showToolbar = true,
     livePreview = false,
+    scrollTargetOffset = null,
   }: {
     value?: string;
     onChange: (next: string) => void;
@@ -150,6 +151,11 @@
      *  Phase 2.5 Architecture B opts /capture and /summary into this;
      *  /journal stays raw-source for power-user editing. */
     livePreview?: boolean;
+    /** Phase 3b Slice 2 — byte offset to scroll into view once the
+     *  view is mounted and the current value is loaded. Set by /journal
+     *  when the URL carries `?scrollTo=N` (search-result deep link).
+     *  Clamped to the doc range; null / undefined / non-finite = no-op. */
+    scrollTargetOffset?: number | null;
   } = $props();
 
   let container: HTMLDivElement;
@@ -394,6 +400,29 @@
     if (current === value) return;
     view.dispatch({
       changes: { from: 0, to: current.length, insert: value },
+    });
+  });
+
+  // Phase 3b Slice 2 — scroll-to-position for search-result deep links.
+  //
+  // Depends on both `view` (mounted after onMount fires) AND
+  // `scrollTargetOffset` (set by parent after content loads). When both
+  // are ready, dispatch `EditorView.scrollIntoView(pos, { y: 'center' })`
+  // to bring the target byte offset into the middle of the viewport.
+  //
+  // Clamped to the current doc length so a stale deep-link pointing at a
+  // trimmed / rewritten file doesn't blow up. Runs whenever the offset
+  // changes (not just first mount), so a search → back → search cycle
+  // scrolls to fresh positions correctly.
+  $effect(() => {
+    const v = view;
+    const target = scrollTargetOffset;
+    if (!v) return;
+    if (target === null || target === undefined) return;
+    if (!Number.isFinite(target)) return;
+    const clamped = Math.max(0, Math.min(Math.floor(target), v.state.doc.length));
+    v.dispatch({
+      effects: EditorView.scrollIntoView(clamped, { y: 'center' }),
     });
   });
 

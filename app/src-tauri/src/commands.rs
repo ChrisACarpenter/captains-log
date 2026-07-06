@@ -740,6 +740,442 @@ fn extract_note_heading_before(
 }
 
 // ---------------------------------------------------------------------------
+// search_journal (Phase 3b Slice 1 + 2 — full-text search)
+// ---------------------------------------------------------------------------
+
+/// Discriminates which surface a search result sits on. Serialized as
+/// bare lowercase strings so the frontend can switch on the raw value
+/// with no mapping layer — matches the `LabelReferenceKind` pattern
+/// established in Phase 3a Slice 1.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchResultKind {
+    Summary,
+    Note,
+}
+
+/// A single search hit's context. The frontend re-locates the query
+/// within `snippet` for highlighting, so we don't ship match offsets —
+/// keeps the payload lean and avoids re-computing positions after the
+/// whitespace-collapse step.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSnippet {
+    /// ~120 chars of context around the match with the match somewhere
+    /// inside. Case-preserved from source; whitespace collapsed so it
+    /// renders on one line.
+    pub snippet: String,
+}
+
+/// One result per surface (Weekly Summary OR individual Note) that
+/// contains ≥ 1 matches. `snippets` is capped at `MAX_SNIPPETS_PER_RESULT`
+/// for display; the UI shows "and N more matches" when total_matches
+/// exceeds the cap.
+///
+/// `scroll_offset` is the byte offset in the source weekly file the
+/// frontend uses to scroll MarkdownEditor to the right location after
+/// deep-linking. For Summary results it's 0 (Summary is always at the
+/// top of the file); for Note results it's the byte offset of the
+/// `### YYYY-MM-DD HH:MM` heading so the user lands at the top of the
+/// matching note.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub year: u32,
+    pub week: u32,
+    pub kind: SearchResultKind,
+    /// For Summary results: the `### Labels` subsection labels.
+    /// For Note results: the note's own `**Labels:**` line.
+    /// Shipped on every result so the frontend can render chips
+    /// without a second Tauri round-trip.
+    pub labels: Vec<String>,
+    /// For Note results: the enclosing heading's timestamp
+    /// (e.g., "2026-06-25 14:23"). `None` for Summary results.
+    pub note_timestamp: Option<String>,
+    /// For Note results: the optional title after " — " in the
+    /// heading. `None` for Summary results OR untitled notes.
+    pub note_title: Option<String>,
+    /// Byte offset in the source weekly file for scroll-to-position
+    /// deep-linking. Summary = 0, Note = heading offset.
+    pub scroll_offset: u32,
+    pub snippets: Vec<SearchSnippet>,
+    pub total_matches: u32,
+}
+
+/// Substring cap on snippets shipped per result. Set low because the
+/// user only needs enough hits to decide "is this the week I meant?"
+/// — deeper exploration happens on the /journal page after they click.
+const MAX_SNIPPETS_PER_RESULT: usize = 3;
+
+/// Hard cap on per-result match counting. If a Summary contains more
+/// than this, we stop counting and cap `total_matches` at MAX — avoids
+/// pathological O(n·file_size) scans on a Summary that happens to
+/// contain thousands of matches for a 2-char query.
+const MAX_MATCHES_PER_RESULT: u32 = 100;
+
+/// Minimum query length. A single-char search on a busy corpus returns
+/// noise and stresses the frontend. Two chars is the smallest useful
+/// query for names, project keys, etc.
+const MIN_QUERY_LENGTH: usize = 2;
+
+/// Full-text search across every weekly file. Scans BOTH the Weekly
+/// Summary block (four content fields joined) AND every individual
+/// Note's labels-line + body. Case-insensitive substring match.
+///
+/// Optional label filter narrows to surfaces whose labels contain ≥ 1
+/// of the requested labels (OR semantics — any match counts). For
+/// Summary results the filter checks the `### Labels` subsection; for
+/// Note results it checks the note's `**Labels:**` line. This means a
+/// week whose Summary carries a label but whose Notes don't will
+/// surface the Summary result but skip its Notes, and vice versa.
+///
+/// Results are ordered newest-first: years desc, weeks desc within a
+/// year; within a week, the Summary (if it matched) comes first, then
+/// Notes in document order. Read-only — never mutates.
+#[tauri::command]
+pub async fn search_journal(
+    storage_state: State<'_, SharedStorage>,
+    query: String,
+    label_filter: Vec<String>,
+) -> Result<Vec<SearchResult>, String> {
+    let storage = storage_state.read().await;
+    search_journal_impl(&*storage, &query, &label_filter).await
+}
+
+/// Trait-object-friendly impl seam for `search_journal`. Tests drive
+/// this directly against a `LocalFilesystem` — matches the pattern
+/// established by `rename_label_impl` / `delete_label_cascade_impl` so
+/// the command body doesn't have to be duplicated in the test suite.
+pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+    query: &str,
+    label_filter: &[String],
+) -> Result<Vec<SearchResult>, String> {
+    let trimmed = query.trim();
+    if trimmed.len() < MIN_QUERY_LENGTH {
+        // Empty result on too-short query — the frontend renders an
+        // "enter a search term" hint rather than treating this as an error.
+        return Ok(Vec::new());
+    }
+    let needle = trimmed.to_lowercase();
+
+    let label_filter_set: std::collections::HashSet<&str> =
+        label_filter.iter().map(String::as_str).collect();
+    let use_label_filter = !label_filter_set.is_empty();
+
+    let mut results: Vec<SearchResult> = Vec::new();
+
+    let mut years = backend.list_years().await.map_err(|e| e.to_string())?;
+    years.sort_unstable();
+    years.reverse();
+
+    for year in years {
+        let mut weeks = match backend.list_weeks(year).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[search] list_weeks({year}) failed: {e}");
+                continue;
+            }
+        };
+        weeks.sort_unstable();
+        weeks.reverse();
+
+        for week in weeks {
+            let content = match backend.read_week(year, week).await {
+                Ok(Some(c)) => c,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("[search] read_week({year},{week}) failed: {e}");
+                    continue;
+                }
+            };
+
+            // ---- Summary surface ------------------------------------
+            let summary = parse_weekly_summary(&content);
+            let summary_passes_label = !use_label_filter
+                || summary
+                    .labels
+                    .iter()
+                    .any(|l| label_filter_set.contains(l.as_str()));
+
+            if summary_passes_label {
+                // Concatenate the four content fields with a separator
+                // that never appears in the source (double newline).
+                let joined = [
+                    summary.key_accomplishments.as_str(),
+                    summary.plans_and_priorities.as_str(),
+                    summary.challenges_or_roadblocks.as_str(),
+                    summary.anything_else.as_str(),
+                ]
+                .join("\n\n");
+
+                if let Some((snippets, total)) = scan_matches(&joined, &needle) {
+                    results.push(SearchResult {
+                        year,
+                        week,
+                        kind: SearchResultKind::Summary,
+                        labels: summary.labels.clone(),
+                        note_timestamp: None,
+                        note_title: None,
+                        // Summary sits at the top of every weekly file.
+                        // 0 scrolls the editor to origin, which lands
+                        // the user on the Summary.
+                        scroll_offset: 0,
+                        snippets,
+                        total_matches: total,
+                    });
+                }
+            }
+
+            // ---- Note surfaces --------------------------------------
+            // Extract each Note (heading offset + timestamp + title +
+            // labels + body-text-haystack) and scan them independently.
+            // Notes are returned in document order (top-to-bottom of
+            // the "## Weekly Notes" section).
+            for note in extract_notes_for_search(&content) {
+                let note_passes_label = !use_label_filter
+                    || note
+                        .labels
+                        .iter()
+                        .any(|l| label_filter_set.contains(l.as_str()));
+                if !note_passes_label {
+                    continue;
+                }
+                if let Some((snippets, total)) = scan_matches(&note.haystack, &needle) {
+                    results.push(SearchResult {
+                        year,
+                        week,
+                        kind: SearchResultKind::Note,
+                        labels: note.labels,
+                        note_timestamp: Some(note.timestamp),
+                        note_title: note.title,
+                        scroll_offset: note.heading_offset as u32,
+                        snippets,
+                        total_matches: total,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Run the substring scan over a single haystack. Returns
+/// `(snippets, total_matches)` when at least one match landed, or
+/// `None` when the haystack contains nothing. Shared between the
+/// Summary and Note code paths so the cursor-advance logic can't
+/// drift between them.
+fn scan_matches(haystack: &str, needle_lower: &str) -> Option<(Vec<SearchSnippet>, u32)> {
+    let haystack_lower = haystack.to_lowercase();
+    let mut snippets: Vec<SearchSnippet> = Vec::new();
+    let mut total: u32 = 0;
+    let mut cursor: usize = 0;
+    while let Some(rel_idx) = haystack_lower[cursor..].find(needle_lower) {
+        let match_start = cursor + rel_idx;
+        let match_end = match_start + needle_lower.len();
+        total = total.saturating_add(1);
+        if snippets.len() < MAX_SNIPPETS_PER_RESULT {
+            snippets.push(SearchSnippet {
+                snippet: build_snippet(haystack, match_start, match_end),
+            });
+        }
+        cursor = match_end.max(cursor + 1);
+        if total >= MAX_MATCHES_PER_RESULT {
+            break;
+        }
+    }
+    if total == 0 {
+        None
+    } else {
+        Some((snippets, total))
+    }
+}
+
+/// A single Note extracted from a weekly file, in the shape the search
+/// walk needs: heading offset for scroll-to, metadata for the result
+/// card, labels for filter-checking, and a plain-text haystack for the
+/// substring scan.
+///
+/// The haystack includes the labels line (if any) and the free-text
+/// body — but NOT the heading itself. Excluding the heading avoids
+/// noisy matches where a user searches for a date like "2026-06-25"
+/// and hits every Note's timestamp; date-based navigation is a
+/// separate concern (the `/journal` sidebar tree).
+struct ParsedNoteForSearch {
+    /// Byte offset of the `### ` prefix in the source file. Passed to
+    /// the frontend as `scroll_offset` so MarkdownEditor scrolls the
+    /// user to the top of the matching note.
+    heading_offset: usize,
+    /// "YYYY-MM-DD HH:MM" as written on the heading line.
+    timestamp: String,
+    /// Optional " — Title" tail from the heading line.
+    title: Option<String>,
+    /// Labels from the note's `**Labels:**` line, if present.
+    labels: Vec<String>,
+    /// Text to substring-scan: labels line + body, concatenated.
+    haystack: String,
+}
+
+/// Extract every Note from a weekly file for search purposes. Walks
+/// the raw markdown from the `## Weekly Notes` header (or the start
+/// of the file if the Summary is absent) forward, treating each
+/// `### YYYY-MM-DD HH:MM` heading as the start of a new note.
+///
+/// Note boundaries: heading through (next-heading OR end-of-file).
+/// Distinguishes Note headings from Summary subsection headings via
+/// the ISO-date-prefix check that `scan_label_sites` uses forward-
+/// direction. Malformed / unparseable headings are skipped silently
+/// (never panic on user content).
+fn extract_notes_for_search(content: &str) -> Vec<ParsedNoteForSearch> {
+    let mut notes = Vec::new();
+    // Anchor the walk at the "## Weekly Notes" section start so a
+    // Summary subsection heading like "### Key accomplishments" can't
+    // be mistaken for a Note. If the marker is missing (empty week
+    // file, hand-authored variant), fall back to scanning the whole
+    // file — the ISO-date-prefix guard filters non-Note headings.
+    let mut search_from = content.find("\n## Weekly Notes").map(|i| i + 1).unwrap_or(0);
+
+    while let Some(rel) = content[search_from..].find("\n### ") {
+        let heading_line_start = search_from + rel + 1; // skip the '\n'
+        let rest_start = heading_line_start + 4; // skip "### "
+        let line_end = content[rest_start..]
+            .find('\n')
+            .map(|i| rest_start + i)
+            .unwrap_or(content.len());
+        let heading_rest = &content[rest_start..line_end];
+
+        // Advance the outer cursor past this heading regardless of
+        // whether it was a real Note — matches scan_label_sites'
+        // posture on non-Note `###` headings.
+        search_from = line_end;
+
+        // Only ISO-date-prefixed headings are Notes.
+        let iso_check = match heading_rest.as_bytes().get(..10) {
+            Some(bytes) => bytes,
+            None => continue,
+        };
+        if !is_iso_date_prefix(iso_check) {
+            continue;
+        }
+
+        // Parse "YYYY-MM-DD HH:MM[ — Title]".
+        let (timestamp, title) = if let Some(sep_idx) = heading_rest.find(" — ") {
+            let ts = heading_rest[..sep_idx].trim().to_string();
+            let title_str = heading_rest[sep_idx + " — ".len()..].trim();
+            (
+                ts,
+                if title_str.is_empty() {
+                    None
+                } else {
+                    Some(title_str.to_string())
+                },
+            )
+        } else {
+            (heading_rest.trim().to_string(), None)
+        };
+
+        // Body window: from line_end to the next `\n### ` OR EOF.
+        // Includes the trailing newline of the heading and everything
+        // up to (not including) the next heading's leading newline.
+        let body_end = content[line_end..]
+            .find("\n### ")
+            .map(|i| line_end + i)
+            .unwrap_or(content.len());
+        let body_window = &content[line_end..body_end];
+
+        // Pull the labels line if present. The extractor scans the
+        // first few non-empty lines of the body_window for a line
+        // starting with `**Labels:**`.
+        let mut labels: Vec<String> = Vec::new();
+        for line in body_window.lines().take(4) {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("**Labels:**") {
+                for token in rest.split_whitespace() {
+                    if let Some(stripped) = token.strip_prefix('#') {
+                        if !stripped.is_empty() {
+                            labels.push(stripped.to_string());
+                        }
+                    }
+                }
+                break;
+            }
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Hit a non-empty non-labels line — no labels for this note.
+            break;
+        }
+
+        // Haystack: body_window verbatim. Includes labels-line + body
+        // text so a search for "release" finds both a "#release" tag
+        // AND the word "release" in prose. Excludes the heading (see
+        // the ParsedNoteForSearch doc comment for the rationale).
+        let haystack = body_window.to_string();
+
+        notes.push(ParsedNoteForSearch {
+            heading_offset: heading_line_start,
+            timestamp,
+            title,
+            labels,
+            haystack,
+        });
+    }
+
+    notes
+}
+
+/// Build a ~120-char snippet centered on the match. Whitespace inside
+/// the snippet is collapsed to single spaces so the whole thing fits
+/// on one row in the UI. Ellipses are added when the snippet doesn't
+/// cover the start / end of the source respectively.
+///
+/// Snippet slicing walks to a char boundary before slicing to avoid
+/// panicking on multi-byte UTF-8 (emoji, accented chars). The frontend
+/// re-finds the match position within the returned snippet — we don't
+/// ship offsets because whitespace collapse would have invalidated them.
+fn build_snippet(source: &str, match_start: usize, match_end: usize) -> String {
+    const HALF_WIDTH: usize = 60;
+
+    let raw_start = match_start.saturating_sub(HALF_WIDTH);
+    let raw_end = (match_end + HALF_WIDTH).min(source.len());
+
+    // Walk forward to a char boundary at the start, backward at the end.
+    let mut safe_start = raw_start;
+    while safe_start < source.len() && !source.is_char_boundary(safe_start) {
+        safe_start += 1;
+    }
+    let mut safe_end = raw_end;
+    while safe_end > 0 && !source.is_char_boundary(safe_end) {
+        safe_end -= 1;
+    }
+    if safe_end < match_end {
+        // Extremely defensive — a bad boundary walk could have pulled
+        // safe_end back past the match itself. Prefer over-inclusion.
+        safe_end = source.len();
+    }
+
+    let slice = &source[safe_start..safe_end];
+
+    // Collapse whitespace (single/multi-line) to single spaces for
+    // display. split_whitespace already handles \n, \t, and multiple
+    // spaces uniformly.
+    let collapsed: String = slice.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Ellipsis prefixes/suffixes indicate the source extended past our
+    // window on that side.
+    let mut out = String::with_capacity(collapsed.len() + 2);
+    if safe_start > 0 {
+        out.push('…');
+    }
+    out.push_str(&collapsed);
+    if safe_end < source.len() {
+        out.push('…');
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // rename_label (Phase 3a Slice 5)
 // ---------------------------------------------------------------------------
 
@@ -3250,6 +3686,523 @@ mod tests {
             Some("scan-test note"),
             "Note carries title from fixture heading"
         );
+    }
+
+    // ----- search_journal (Phase 3b Slice 1 + 2) -----
+    //
+    // Full-text search command tests. The Tauri wrapper needs `State`
+    // we can't build outside a running app, so we drive `compute_search`
+    // — a helper that mirrors the command body against a plain
+    // `StorageBackend`. Coverage:
+    //   - Short-query gate (< 2 chars → empty result)
+    //   - Case-insensitive substring match
+    //   - Newest-first ordering (years desc, weeks desc within year)
+    //   - Label filter — OR semantics; empty filter is no-op
+    //   - Multi-match: total_matches counted, snippets capped
+    //   - Regex metacharacters treated as literal
+    //   - Cross-field matches (Summary only)
+    //   - Unicode / emoji round-trip
+    //   - (Slice 2) Note-body search + kind discriminator + scroll_offset
+
+    /// Test-only convenience wrapper — turns `&[&str]` inline label lists
+    /// into the `&[String]` the impl expects without cluttering every
+    /// call-site with `.to_string()` conversions.
+    async fn compute_search<B: crate::storage::StorageBackend + ?Sized>(
+        backend: &B,
+        query: &str,
+        label_filter: &[&str],
+    ) -> Result<Vec<SearchResult>, String> {
+        let owned: Vec<String> = label_filter.iter().map(|s| s.to_string()).collect();
+        search_journal_impl(backend, query, &owned).await
+    }
+
+    /// Build a weekly file with a specific Weekly Summary payload for
+    /// search tests. `build_weekly_file` is oriented toward label-index
+    /// tests and only takes label lists; this helper writes actual text
+    /// into the four summary fields so substring search has something
+    /// to match against.
+    fn build_weekly_file_with_summary(
+        year: u32,
+        week: u32,
+        summary: &WeeklySummary,
+    ) -> String {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-06-22T10:00:00-04:00",
+        )
+        .unwrap();
+        let file = weekly_file_scaffold(year, week, now);
+        replace_weekly_summary_in_file(&file, summary)
+    }
+
+    #[tokio::test]
+    async fn search_returns_empty_for_short_query() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let file = build_weekly_file_with_summary(
+            2026,
+            25,
+            &WeeklySummary {
+                key_accomplishments: "shipped the thing".to_string(),
+                last_updated: Some("2026-06-22 10:00".to_string()),
+                ..Default::default()
+            },
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        // 1-char query returns empty — guards against noise + slow
+        // scans on single-character searches.
+        let hits = compute_search(&backend, "s", &[]).await.unwrap();
+        assert!(hits.is_empty(), "1-char query should return empty");
+        // Whitespace-only query trimmed to empty — same treatment.
+        let hits = compute_search(&backend, "   ", &[]).await.unwrap();
+        assert!(hits.is_empty(), "whitespace-only query should return empty");
+    }
+
+    #[tokio::test]
+    async fn search_is_case_insensitive_and_orders_newest_first() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Two years, three files, all mention "Release" in different casings.
+        // Query "release" (lower) should match all three.
+        let s_2025 = WeeklySummary {
+            key_accomplishments: "worked on RELEASE prep".to_string(),
+            last_updated: Some("2025-03-01 09:00".to_string()),
+            ..Default::default()
+        };
+        let s_2026_25 = WeeklySummary {
+            plans_and_priorities: "Cut the release next Monday.".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let s_2026_26 = WeeklySummary {
+            key_accomplishments: "release shipped 🚀".to_string(),
+            last_updated: Some("2026-06-29 10:00".to_string()),
+            ..Default::default()
+        };
+
+        backend
+            .write_week(2025, 10, &build_weekly_file_with_summary(2025, 10, &s_2025))
+            .await
+            .unwrap();
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s_2026_25))
+            .await
+            .unwrap();
+        backend
+            .write_week(2026, 26, &build_weekly_file_with_summary(2026, 26, &s_2026_26))
+            .await
+            .unwrap();
+
+        let hits = compute_search(&backend, "release", &[]).await.unwrap();
+        assert_eq!(hits.len(), 3, "all three summaries mention release");
+        assert_eq!((hits[0].year, hits[0].week), (2026, 26));
+        assert_eq!((hits[1].year, hits[1].week), (2026, 25));
+        assert_eq!((hits[2].year, hits[2].week), (2025, 10));
+
+        // Each result has at least one snippet with the match visible
+        // (post-collapse, case may vary). Verify substring survives.
+        for r in &hits {
+            assert!(!r.snippets.is_empty(), "each match ships ≥ 1 snippet");
+            assert!(
+                r.snippets[0]
+                    .snippet
+                    .to_lowercase()
+                    .contains("release"),
+                "snippet should contain the query (case-insensitively)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_label_filter_narrows_results() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Two summaries mention "release"; one has label "mage", the other has "live".
+        let s25 = WeeklySummary {
+            key_accomplishments: "release prep".to_string(),
+            labels: vec!["mage".to_string()],
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let s26 = WeeklySummary {
+            key_accomplishments: "release cut".to_string(),
+            labels: vec!["live".to_string()],
+            last_updated: Some("2026-06-29 10:00".to_string()),
+            ..Default::default()
+        };
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s25))
+            .await
+            .unwrap();
+        backend
+            .write_week(2026, 26, &build_weekly_file_with_summary(2026, 26, &s26))
+            .await
+            .unwrap();
+
+        // Filter to just "mage" — should surface only week 25.
+        let hits = compute_search(&backend, "release", &["mage"]).await.unwrap();
+        assert_eq!(hits.len(), 1, "label filter narrows to one week");
+        assert_eq!((hits[0].year, hits[0].week), (2026, 25));
+
+        // Empty filter is a no-op.
+        let hits = compute_search(&backend, "release", &[]).await.unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn search_counts_all_matches_and_caps_snippets() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Summary with 5 occurrences of "foo" — total_matches = 5,
+        // snippets capped at MAX_SNIPPETS_PER_RESULT (3).
+        let s = WeeklySummary {
+            key_accomplishments: "foo one, foo two, foo three".to_string(),
+            plans_and_priorities: "plan foo four".to_string(),
+            challenges_or_roadblocks: "challenge foo five".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s))
+            .await
+            .unwrap();
+
+        let hits = compute_search(&backend, "foo", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].total_matches, 5, "counts every occurrence");
+        assert_eq!(
+            hits[0].snippets.len(),
+            MAX_SNIPPETS_PER_RESULT,
+            "snippets capped at MAX_SNIPPETS_PER_RESULT"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_treats_regex_metacharacters_as_literal() {
+        // Locked design: literal substring only, no regex. A query
+        // containing `.*` should match a source containing the LITERAL
+        // characters, not "any character zero-or-more times."
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            key_accomplishments: "pattern like [a-z]+ and .* and $end".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s))
+            .await
+            .unwrap();
+
+        // Literal match against a regex metacharacter cluster.
+        let hits = compute_search(&backend, "[a-z]+", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1, "literal [a-z]+ should match the source");
+        assert!(hits[0].snippets[0].snippet.contains("[a-z]+"));
+
+        // Literal `.*` — if regex were interpreted, this would match
+        // every character and blow up total_matches. Verify it's 1.
+        let hits = compute_search(&backend, ".*", &[]).await.unwrap();
+        assert_eq!(hits[0].total_matches, 1, ".* should match once as literal");
+    }
+
+    #[tokio::test]
+    async fn search_finds_matches_across_summary_fields() {
+        // "project" appears once in Key accomplishments and once in
+        // Plans — total_matches must be 2. Guards against the fields
+        // being scanned in isolation and missing cross-field counting.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            key_accomplishments: "finished the project".to_string(),
+            plans_and_priorities: "project planning for next week".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s))
+            .await
+            .unwrap();
+
+        let hits = compute_search(&backend, "project", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].total_matches, 2,
+            "should count matches in both Key accomplishments and Plans"
+        );
+    }
+
+    // ----- Slice 2: Note-body search -----
+
+    /// Build a weekly file with a summary AND one or more Notes appended.
+    /// Each Note is `### YYYY-MM-DD HH:MM — Title` + optional labels
+    /// line + body. Ordering matches document order — first entry lands
+    /// at the top of the "## Weekly Notes" region, subsequent entries
+    /// follow underneath.
+    fn build_weekly_file_with_notes(
+        year: u32,
+        week: u32,
+        summary: &WeeklySummary,
+        notes: &[(&str, Option<&str>, &[&str], &str)],
+    ) -> String {
+        use crate::notes::{
+            replace_weekly_summary_in_file, weekly_file_scaffold,
+        };
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-06-22T10:00:00-04:00",
+        )
+        .unwrap();
+        let scaffold = weekly_file_scaffold(year, week, now);
+        let mut file = replace_weekly_summary_in_file(&scaffold, summary);
+        for (ts, title, labels, body) in notes {
+            file.push_str("\n### ");
+            file.push_str(ts);
+            if let Some(t) = title {
+                file.push_str(" — ");
+                file.push_str(t);
+            }
+            file.push('\n');
+            if !labels.is_empty() {
+                file.push_str("**Labels:** ");
+                for (i, l) in labels.iter().enumerate() {
+                    if i > 0 {
+                        file.push(' ');
+                    }
+                    file.push('#');
+                    file.push_str(l);
+                }
+                file.push('\n');
+            }
+            file.push('\n');
+            file.push_str(body);
+            file.push('\n');
+        }
+        file
+    }
+
+    #[tokio::test]
+    async fn search_finds_matches_in_note_bodies() {
+        // A weekly file with an empty Summary and two notes — search
+        // must surface the Note whose body contains the query.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let file = build_weekly_file_with_notes(
+            2026,
+            25,
+            &s,
+            &[
+                (
+                    "2026-06-22 10:15",
+                    Some("Kickoff"),
+                    &[],
+                    "Started the release prep call.",
+                ),
+                (
+                    "2026-06-22 14:00",
+                    Some("Wrapup"),
+                    &[],
+                    "Unrelated content.",
+                ),
+            ],
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        let hits = compute_search(&backend, "release", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1, "only the first note's body mentions release");
+        assert!(matches!(hits[0].kind, SearchResultKind::Note));
+        assert_eq!(
+            hits[0].note_timestamp.as_deref(),
+            Some("2026-06-22 10:15"),
+            "timestamp identifies WHICH note matched"
+        );
+        assert_eq!(hits[0].note_title.as_deref(), Some("Kickoff"));
+        assert!(
+            hits[0].scroll_offset > 0,
+            "scroll_offset points to the note heading in the source file"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_scroll_offset_points_at_note_heading() {
+        // Verify scroll_offset lands exactly at the "### " bytes of the
+        // matching note so MarkdownEditor can scroll the user to the
+        // top of that note.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let file = build_weekly_file_with_notes(
+            2026,
+            25,
+            &s,
+            &[(
+                "2026-06-22 10:15",
+                Some("Marker note"),
+                &[],
+                "unique_haystack_token here",
+            )],
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        let hits = compute_search(&backend, "unique_haystack_token", &[])
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let offset = hits[0].scroll_offset as usize;
+        // The heading starts with "### " — bytes at `offset` should
+        // be exactly that prefix.
+        assert_eq!(&file[offset..offset + 4], "### ");
+        // And the heading line at offset should reference our note.
+        let line_end = file[offset..]
+            .find('\n')
+            .map(|i| offset + i)
+            .unwrap_or(file.len());
+        assert!(file[offset..line_end].contains("Marker note"));
+    }
+
+    #[tokio::test]
+    async fn search_both_summary_and_note_surface_in_same_week() {
+        // Same query hits both surfaces in the same week — should
+        // produce two results with Summary first, then Note.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            key_accomplishments: "shipped the release".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let file = build_weekly_file_with_notes(
+            2026,
+            25,
+            &s,
+            &[(
+                "2026-06-22 10:15",
+                Some("Post-release retro"),
+                &[],
+                "release retrospective notes here",
+            )],
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        let hits = compute_search(&backend, "release", &[]).await.unwrap();
+        assert_eq!(hits.len(), 2, "one Summary result + one Note result");
+        assert!(matches!(hits[0].kind, SearchResultKind::Summary));
+        assert!(matches!(hits[1].kind, SearchResultKind::Note));
+        assert_eq!(hits[0].scroll_offset, 0, "Summary scrolls to top");
+        assert!(hits[1].scroll_offset > 0, "Note scrolls to its heading");
+    }
+
+    #[tokio::test]
+    async fn search_label_filter_applies_to_notes() {
+        // Notes have their own `**Labels:**` lines. The filter should
+        // let a note through when ITS labels overlap, independent of
+        // whether the Summary's labels match.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            // Summary has no labels; a global "release" filter should
+            // skip the Summary entirely.
+            key_accomplishments: "release week overall".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let file = build_weekly_file_with_notes(
+            2026,
+            25,
+            &s,
+            &[
+                (
+                    "2026-06-22 10:15",
+                    Some("Tagged"),
+                    &["release"],
+                    "release detail with #release tag",
+                ),
+                (
+                    "2026-06-22 14:00",
+                    Some("Untagged"),
+                    &[],
+                    "release detail with no tag",
+                ),
+            ],
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        // Global filter: only surfaces with labels containing "release"
+        // survive. Summary has no labels → dropped. First note has
+        // #release → surfaces. Second note has no labels → dropped.
+        let hits = compute_search(&backend, "release", &["release"])
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1, "only the labeled note passes the filter");
+        assert!(matches!(hits[0].kind, SearchResultKind::Note));
+        assert_eq!(hits[0].note_title.as_deref(), Some("Tagged"));
+    }
+
+    #[tokio::test]
+    async fn search_handles_unicode_in_queries_and_content() {
+        // Multi-byte content — emoji + accented char. build_snippet's
+        // char-boundary walk must not panic; find() must locate both.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            key_accomplishments: "Shipped 🚀 with café improvements".to_string(),
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        backend
+            .write_week(2026, 25, &build_weekly_file_with_summary(2026, 25, &s))
+            .await
+            .unwrap();
+
+        let hits = compute_search(&backend, "🚀", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1, "should find emoji in content");
+        assert!(hits[0].snippets[0].snippet.contains('🚀'));
+
+        let hits = compute_search(&backend, "café", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1, "should find accented word");
+        assert!(hits[0].snippets[0].snippet.contains("café"));
     }
 
     // ----- rename_label (Phase 3a Slice 5) -----

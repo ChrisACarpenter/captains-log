@@ -114,6 +114,21 @@
     }
   }
 
+  // Phase 3b Slice 3 — global Cmd+K opens /search. Registered here
+  // (not per-route) so the shortcut works from any main-window surface.
+  // Skipped on /capture (the popup window has its own minimal chrome
+  // and shouldn't hijack Cmd+K for a route that doesn't apply there),
+  // and no-op'd when the user is already on /search so a stray Cmd+K
+  // doesn't loop the page.
+  function onGlobalKeydown(e: KeyboardEvent): void {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    if (e.key !== 'k' && e.key !== 'K') return;
+    if (page.url.pathname === '/capture') return;
+    if (page.url.pathname === '/search') return;
+    e.preventDefault();
+    void goto('/search');
+  }
+
   onMount(async () => {
     await applyTheme();
     unlistenSettings = await listen('settings-changed', () => applyTheme());
@@ -124,11 +139,16 @@
     if (page.url.pathname !== '/capture') {
       unlistenOpenSummary = await listen('open-summary', () => goto('/summary'));
     }
+
+    window.addEventListener('keydown', onGlobalKeydown);
   });
 
   onDestroy(() => {
     if (unlistenSettings) unlistenSettings();
     if (unlistenOpenSummary) unlistenOpenSummary();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('keydown', onGlobalKeydown);
+    }
   });
 
   // Week stripe lives on the main window only — the quick-capture popup

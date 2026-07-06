@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 3a ✅ done — next up Phase 3b (Search & Navigation)
+## Current phase: Phase 3b ✅ done — next up Phase 3c (Task list aggregator)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -8,7 +8,9 @@ Phase 2.8 (Custom Themes) shipped 2026-06-30 — 12 user-editable primaries → 
 
 Phase 3a shipped 2026-07-06 — the Label Library viewer got its "Referenced In" drill-down (new `get_notes_for_label` Rust command + a bounded list inside `LabelDetailsModal` capped at 50 rows, click-to-navigate into `/journal?year=Y&week=W`), plus multi-select on the Labels tab with a bulk toolbar (Delete N / Merge into…). The merge picker is a radio-select Modal that pre-fills the highest-count label as the canonical target and reuses `rename_label`'s auto-merge-on-collision. Bulk-rename was dropped from the original scope — rename-into-existing already covers the merge case, so a distinct bulk-rename mode was redundant.
 
-**Next up: Phase 3b — Search & Navigation.** Full-text search across every weekly file, filter by label / date range / file, click-to-jump into the right week. Builds on the label→notes drill-down plumbing from 3a (the same result-list + week-jump shape generalizes to arbitrary content matches).
+Phase 3b shipped 2026-07-06 — full-text search across every weekly file (Weekly Summary content + Note bodies) with an optional label filter, dedicated `/search` route reachable from the `/journal` sidebar OR global `Cmd+K` shortcut, result cards grouped by surface (Summary/Note kind badge + `YYYY-Wnn` label + Note timestamp + labels), click-to-jump into `/journal?year=Y&week=W&scrollTo=<byte-offset>` with MarkdownEditor scrolling the target byte into view. MVP started narrower (Summary-only) and expanded to Notes + scroll-to-position once the pattern proved out.
+
+**Next up: Phase 3c — Task list aggregator.** See the full spec below — aggregate `- [ ]` items from every weekly file's "Plans and priorities for next week" section into a live task view on the landing page. Bidirectional sync back to source markdown, week-rollover mechanic that appends completed tasks to the new week's Key Accomplishments. Design brief captured in the DEVELOPMENT-JOURNAL 2026-07-06 entry.
 
 ---
 
@@ -327,12 +329,15 @@ Sequenced intentionally: the Label library viewer (3a) is the natural starter be
 
 **Verification:** 6 new Rust tests (4 for the `extract_note_heading_before` helper, 2 integration tests against `LocalFilesystem` covering cross-year ordering + both site kinds with note metadata); full suite 248/248. `svelte-check` clean at 420/0/0 across all Slice 1 + Slice 2 changes.
 
-### Phase 3b — Search & Navigation
+### Phase 3b — Search & Navigation ✅ (shipped 2026-07-06)
 
-- [ ] Full-text search across all weekly files
-- [ ] Filter by label, date range, file
-- [ ] Click search result → opens correct week, scrolls to correct Note
-- [ ] Year/week tree handles many years gracefully
+- [x] **Full-text search across every weekly file** — new `search_journal` Rust command scans both the Weekly Summary block (four content fields joined) AND every individual Note's labels-line + body per file. Case-insensitive substring match, literal (no regex), 2-character query floor. Results ordered newest-first: years desc, weeks desc within year; within a week, Summary first (if matched) then Notes in document order.
+- [x] **Label filter** — optional multi-select via `LabelInput`. OR-semantics: any label overlap counts. Applies independently to Summary (`### Labels` subsection) and Notes (`**Labels:**` line), so a week's Summary can pass while its Notes get filtered out, or vice versa. Date-range and file filters intentionally deferred — the current UX proved sufficient without them.
+- [x] **Click search result → opens correct week, scrolls to correct Note** — new `scroll_offset` field on `SearchResult` carries the byte offset (0 for Summary, heading offset for Note). `/search` result click routes to `/journal?year=Y&week=W&scrollTo=<offset>`. New `scrollTargetOffset` prop on `MarkdownEditor` dispatches `EditorView.scrollIntoView(pos, { y: 'center' })` once both view and offset are ready; clamps to doc length so stale deep-links don't blow up.
+- [x] **`Cmd+K` global shortcut** — window-level keydown listener in `+layout.svelte` navigates to `/search` from any main-window surface. Skipped on `/capture`; no-op on `/search` itself so a stray shortcut doesn't loop the page.
+- [x] **Year/week tree handles many years gracefully** — already true from Phase 2.5b; no new work in 3b.
+
+**Verification:** 13 Rust tests total (7 existing + 4 new for Note-body search / scroll offset / kind discrimination / label filter on notes + 2 for literal-metacharacter / cross-field / unicode). All 259 tests pass. Frontend `svelte-check` 422/0/0. Manual smoke: Summary-only searches, Note-only searches, mixed weeks, deep-link scroll-to, Cmd+K from `/journal` / `/settings` / `/summary` all landing correctly.
 
 ### Phase 3c — Task list aggregator
 

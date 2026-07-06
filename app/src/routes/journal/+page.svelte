@@ -6,6 +6,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { refreshCurrentWeek, type YearWeek as RolloverYearWeek } from '$lib/weekRollover';
   import { openUrl } from '@tauri-apps/plugin-opener';
+  import Icon from '$lib/Icon.svelte';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import ExternalUpdateBanner from '$lib/ExternalUpdateBanner.svelte';
   import SaveStatus from '$lib/SaveStatus.svelte';
@@ -40,6 +41,12 @@
   let nodes = $state<YearNode[]>([]);
   let currentYearWeek = $state<YearWeek | null>(null);
   let selected = $state<YearWeek | null>(null);
+  // Phase 3b Slice 2 — populated when the route lands via a search
+  // result deep link (`/journal?year=Y&week=W&scrollTo=N`). Passed to
+  // MarkdownEditor; its $effect scrolls the target byte offset into
+  // view once the editor mounts. Reset to null on subsequent
+  // selectWeek calls so free-navigation doesn't inherit stale offsets.
+  let pendingScrollOffset = $state<number | null>(null);
 
   let editorLoading = $state(false);
   let editorError = $state('');
@@ -200,14 +207,19 @@
       loadingTree = false;
     }
 
-    // Deep-link support (Phase 3a Slice 1 — Label Library drill-down):
-    // if the URL carries ?year=Y&week=W, expand that year in the sidebar
-    // tree (loading its weeks if it isn't the current year) and select
-    // the target week. Parses defensively — bad values fall through
-    // silently and leave the user on the empty-state pane.
+    // Deep-link support (Phase 3a Slice 1 — Label Library drill-down;
+    // Phase 3b Slice 2 — search result scroll-to). If the URL carries
+    // ?year=Y&week=W, expand that year in the sidebar tree (loading
+    // its weeks if it isn't the current year) and select the target
+    // week. Optional ?scrollTo=N (byte offset) additionally scrolls
+    // MarkdownEditor to that position after the content loads.
+    //
+    // Parses defensively — bad values fall through silently and leave
+    // the user on the empty-state pane.
     const params = new URLSearchParams(window.location.search);
     const paramYear = Number(params.get('year'));
     const paramWeek = Number(params.get('week'));
+    const paramScrollRaw = params.get('scrollTo');
     if (Number.isFinite(paramYear) && Number.isFinite(paramWeek) && paramYear > 0 && paramWeek > 0) {
       let targetNode = nodes.find((n) => n.year === paramYear);
       if (targetNode && !targetNode.loaded) {
@@ -219,6 +231,15 @@
       if (targetNode && targetNode.weeks.includes(paramWeek)) {
         targetNode.expanded = true;
         await selectWeek({ year: paramYear, week: paramWeek });
+        // Set scroll offset AFTER selectWeek so the fresh content is
+        // loaded first. MarkdownEditor's $effect fires when both view
+        // and offset are ready.
+        if (paramScrollRaw !== null) {
+          const parsed = Number(paramScrollRaw);
+          if (Number.isFinite(parsed) && parsed >= 0) {
+            pendingScrollOffset = parsed;
+          }
+        }
       }
     }
 
@@ -371,6 +392,11 @@
     saveErrorMessage = '';
     lastSavedAt = null;
     externalUpdate = false;
+    // Clear any lingering deep-link scroll offset — the onMount deep-
+    // link handler sets it AFTER selectWeek returns, so this only nulls
+    // it out on subsequent sidebar-driven week switches. Prevents a
+    // manual "click Week 24" from re-scrolling to a stale byte offset.
+    pendingScrollOffset = null;
     selected = yw;
     try {
       const text = await invoke<string | null>('read_week', {
@@ -611,6 +637,25 @@
       <h2>Journal</h2>
     </header>
 
+    <!-- Phase 3b Slice 1 — Search entry point. Sits below the "Journal"
+         header and above the tree so it's discoverable without competing
+         with the browsing UI. Uses the shared .btn .btn-marble .btn-sm
+         combo so it reads as an action button (matches the Details
+         buttons on the Settings → Labels tab) rather than as a text
+         input. Full-width via a wrapping class so the whole sidebar
+         column becomes a hit target. -->
+    <button
+      type="button"
+      class="btn btn-marble btn-sm sidebar-search-button"
+      onclick={() => void goto('/search')}
+      aria-label="Search Weekly Summaries"
+    >
+      <span class="sidebar-search-icon" aria-hidden="true">
+        <Icon name="search" size={14} />
+      </span>
+      Search
+    </button>
+
     {#if loadingTree}
       <p class="muted">Loading…</p>
     {:else if treeError}
@@ -782,6 +827,7 @@
         <MarkdownEditor
           value={content}
           onChange={(v) => (content = v)}
+          scrollTargetOffset={pendingScrollOffset}
           livePreview={viewMode === 'preview'}
           showToolbar={viewMode === 'preview'}
           placeholder="No content yet. Anything you type here saves to the weekly file."
@@ -881,6 +927,23 @@
     font-size: var(--text-display-sm);
     line-height: var(--text-display-sm-lh);
     margin: 0;
+  }
+
+  /* Phase 3b Slice 1 — Search entry point. The .btn .btn-marble .btn-sm
+     combo owns the button chrome (background, shadow, hover, focus).
+     Local overrides just make it fill the sidebar column and put the
+     icon flush with the label. */
+  .sidebar-search-button {
+    width: 100%;
+    margin-bottom: var(--space-4);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+  }
+  .sidebar-search-icon {
+    display: inline-flex;
+    align-items: center;
   }
 
   .tree {

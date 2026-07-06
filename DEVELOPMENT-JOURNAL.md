@@ -1396,4 +1396,75 @@ Interaction cases: Details-modal rename/delete on a bulk-selected label prunes i
 
 Phase 3b — full-text search across every weekly file, filter by label / date range / file, click-to-jump to the right week. Builds on the label→notes drill-down plumbing from 3a (same result-list + goto-with-URL-params shape, just generalized to arbitrary content matches).
 
+## 2026-07-06 (later) — Phase 3b: full-text search + scroll-to-position + Cmd+K
+
+Same-day continuation. Chris smoke-tested Phase 3a, no bugs surfaced, so we jumped straight to 3b.
+
+### The scope pivot mid-flight
+
+Started with a design conversation about scope. I proposed searching Summary content + Notes; Chris scoped it down to **Summary-only for MVP**: "prove this out and make sure the basics work before we go expanding on it." Locked that as Slice 1. Slice 2 (Notes + scroll-to-position) and Slice 3 (Cmd+K / landing button) were both optional.
+
+Slice 1 shipped and worked. Chris then said "expand and polish 3b" — greenlighting the full plan. So the session ended up running all three slices back-to-back before committing.
+
+### Slice 1 — Summary-only search (~10 min of build, ~30 min of iteration)
+
+**Backend.** New `search_summaries` Rust command that walks every weekly file, extracts the four Summary content fields via `parse_weekly_summary`, joins them with a double-newline separator (never appears in source, so match boundaries stay tractable), and runs case-insensitive substring scan. Snippets built via a new `build_snippet` helper: ~120 chars centered on the match, whitespace collapsed to single spaces, ellipses on either side when we don't cover the source edges. UTF-8 char-boundary walk before slicing so emoji / accented chars don't panic.
+
+Design decisions Chris and I locked before I started coding:
+- 2-char query minimum (single-char search on a busy corpus is noise)
+- Case-insensitive, no regex, literal substring only (Obsidian Tasks' emoji-metadata Unicode fragility informed the "keep it simple" call)
+- Results grouped by (year, week) — one card per Summary that matched, not one card per match
+- Snippets capped at 3 per result with `totalMatches` count for "and N more" display
+- Match hard-cap at 100 per Summary to guard against pathological queries
+
+**Frontend.** New `/search` route. Query input + `LabelInput` chip picker for the optional label filter. Result cards with kind badge + week label + labels + match-count badge (aligned to the far right of the row via `margin-left: auto` so cards with and without labels line up). Snippets rendered with `<mark>` for the query match, restyled to accent-primary-tinted background instead of the browser's default yellow.
+
+Reachable from a Search button in the `/journal` sidebar. Initial styling made it look like a text field (transparent background + 1px border); Chris flagged it as looking wrong and I swapped to the shared `.btn .btn-marble .btn-sm` combo so it reads as a proper button.
+
+**Two shipping bugs I hit + one blind spot in the verify pass:**
+
+1. The adversarial-verifier workflow flagged a "critical" parameter-name mismatch — claiming Tauri v2 doesn't camelCase multi-word parameters at the JS-to-Rust boundary. Verifier was wrong; the shipped `rename_label` command (Rust `old_name` / `new_name`, JS `oldName` / `newName`) proves Tauri does camelCase the crossing. Trusted my own read after cross-referencing shipping code rather than blindly applying the "fix."
+
+2. A REAL bug the verifier missed: I wrote `async function runSearch(e?: Event): Promise<void>` with an optional parameter. `svelte-check` accepted it, but `vite build`'s SSR compile step choked with "Expected ',', got '?'" — optional-parameter TypeScript syntax isn't handled the same way by the SSR bundler as by svelte-check. Chris hit this as a 500 error on his end when clicking the Search button. Fixed by dropping the optional to `e: Event` (the only caller is `onsubmit={runSearch}` which always passes an Event anyway). **Added `vite build` to my mental verification checklist alongside `svelte-check`.**
+
+3. Frontend bug I caught in the same debugging pass: I'd typed `SettingsBundle` as `{ journal: { colorfulLabels } }` (nested); the Rust struct is flat. Try/catch swallowed the runtime miss so the effect was just "Colorful Labels never applies to the search page's LabelInput." Fixed to match the flat shape.
+
+### Slice 2 — Expand to Notes + scroll-to-position
+
+**Backend rename.** `search_summaries` → `search_journal`, matching type renames (`SearchResult`, `SearchSnippet`). New `SearchResultKind` enum (`Summary | Note`). `SearchResult` gains `kind`, `note_timestamp`, `note_title`, and `scroll_offset` fields.
+
+**Note extraction.** New `extract_notes_for_search` helper walks the file from `## Weekly Notes` forward, treating each `### YYYY-MM-DD HH:MM` heading as the start of a new note (using the same ISO-date-prefix check that `scan_label_sites` uses forward-direction). For each note: captures heading byte offset, timestamp, optional title, labels line (if present), and haystack (labels-line + body). **Heading text is deliberately excluded from the haystack** — otherwise a search for "2026-06-25" would hit every note's timestamp on that day, and date-based navigation is what the sidebar tree is for.
+
+**Label filter now applies per-surface.** The Summary and each Note carry their own labels; the filter checks each independently. This means a week whose Summary carries a label but whose Notes don't will surface the Summary result while dropping the Notes, and vice versa. Correct behavior — the two surfaces are conceptually independent tagging targets.
+
+**Scan sharing.** Pulled the substring-cursor loop out into a `scan_matches(haystack, needle) -> Option<(Vec<SearchSnippet>, u32)>` helper so the Summary and Note paths can't drift in edge cases (needle-at-end, cursor advance on zero-length overlaps, etc.). One truth, two callers.
+
+**MarkdownEditor gains `scrollTargetOffset` prop.** Reactive; `$effect` watches both the prop AND the internal `view` state. When both are ready and the offset is a finite non-negative number, dispatches `EditorView.scrollIntoView(pos, { y: 'center' })`. Clamped to `view.state.doc.length` so stale deep-links pointing at trimmed/rewritten files don't panic.
+
+**`/journal` URL param handling.** `?scrollTo=N` sits alongside the existing `?year=Y&week=W`. Set AFTER `selectWeek` returns so the content is loaded first. Cleared to `null` inside `selectWeek` so subsequent manual sidebar-click week switches don't inherit a stale offset.
+
+**Frontend result card.** Kind badge (Summary vs Note; Notes get warmer accent-tinted background), Note timestamp + title inline between the week label and the label chips, otherwise unchanged shape.
+
+### Slice 3 — Cmd+K global
+
+Window-level `keydown` listener in `+layout.svelte`. Guards: skipped on `/capture` (popup shouldn't hijack Cmd+K), no-op on `/search` itself (stray shortcut shouldn't loop the page). Hint text added to the `/search` header prose so users discover it.
+
+### Lessons worth keeping
+
+- **`svelte-check` alone doesn't catch build-time TypeScript syntax errors in Svelte script blocks.** Optional-parameter `?` syntax passed svelte-check but broke `vite build`'s SSR compile step. Always run both.
+- **Trust the shipping code over an adversarial verifier when they disagree.** The verifier's "Tauri doesn't camelCase params" claim contradicted weeks of production behavior in `rename_label` / `delete_label_cascade` / `set_label_color`. Cross-reference before applying a "critical" fix.
+- **When two code paths share a scan loop, extract the loop.** Slice 2's Summary-and-Notes duplication would've drifted the moment either side gained a special-case; `scan_matches` keeps them honest.
+- **Pull the heading out of the search haystack.** For any structured-document search, the framing metadata (dates, timestamps, section titles) is almost always noise if the user's real target is content. Include content, exclude structure.
+
+### Verification
+
+- `cargo test`: 259 passed, 0 failed (was 252 before 3b's tests).
+- `svelte-check`: 422 files, 0 errors, 0 warnings (route additions bumped the file count).
+- `vite build`: succeeds cleanly.
+- Manual: Summary-only search, Note-only search, mixed-week search, click-to-scroll on a Note deep link (lands on the note heading centered in the viewport), Cmd+K from `/journal` / `/settings` / `/summary`, Cmd+K on `/search` itself (correctly no-ops), Cmd+K on `/capture` (correctly ignored).
+
+### Next
+
+Phase 3c — task list aggregator. Full design brief already captured in the 2026-07-06 morning entry. Should be the biggest of the three 3-phase items: bidirectional sync, sidecar for completion timestamps, week-rollover mechanic.
+
 
