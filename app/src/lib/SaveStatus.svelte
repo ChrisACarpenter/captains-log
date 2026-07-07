@@ -30,10 +30,10 @@
   in-file comment apologizing for the divergence). Pulled into one place.
 -->
 <script lang="ts">
-  type SaveStatusValue = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+  import type { AutoSaveStatus } from '$lib/save-status';
 
   type Props = {
-    status: SaveStatusValue;
+    status: AutoSaveStatus;
     lastSavedAt: Date | null;
     onRetry?: () => void;
     savingText?: string;

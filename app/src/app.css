@@ -331,11 +331,24 @@ p {
   box-shadow: none;
 }
 
+/* Disabled visual — opacity-based dim rather than a full palette
+ * swap. Keeps the variant color visible (green stays green, ruby
+ * stays ruby) instead of flipping to a muted gray-brown, which read
+ * as jarring flicker during brief disabled toggles.
+ *
+ * Only used for STABLE disabled states (e.g. Save button on /journal
+ * when `!isDirty` — the "nothing to save" case). Transient disabled
+ * states during fast autosave cycles (~10ms) don't use the disabled
+ * attribute at all — the buttons stay bright throughout and the
+ * saveNow handler gates internally on `saveStatus === 'saving'`. See
+ * the comment on the /summary + /journal Save buttons for the full
+ * rationale; toggling `disabled` for a sub-frame window forced
+ * WKWebView to repaint and produced visible flicker without offering
+ * the user any useful signal. */
 .btn:disabled {
-  background: var(--text-muted);
-  color: var(--bg-base);
-  box-shadow: none;
+  opacity: 0.55;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 /* Button variants */
@@ -424,6 +437,27 @@ p {
   background: var(--bg-error-tint);
   color: var(--text-primary);
   border: 1px solid var(--border-error);
+}
+
+/* Kind-badge utility — the small "Summary" / "Note" tag used on search
+ * result cards + the Referenced-In list inside the Label Details modal.
+ * Two use sites today (Phase 3a Slice 1 + Phase 3b Slice 1), promoted
+ * out of per-file duplication so a future badge tweak lands once.
+ *
+ * Base is bg-elevated + text-secondary. Add .kind-badge-note for the
+ * warmer accent tint that reads Notes as visually distinct from
+ * Summaries without needing colored icons. */
+.kind-badge {
+  font-family: var(--font-display);
+  font-size: var(--text-caption);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+.kind-badge-note {
+  background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-elevated));
+  color: var(--accent-primary-text);
 }
 
 /* Text-input utility — the standard form-field appearance used across

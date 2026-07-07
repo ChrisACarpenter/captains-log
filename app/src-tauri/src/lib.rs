@@ -246,7 +246,13 @@ fn set_preset_theme_from_tray(app: &AppHandle, theme: settings::Theme) {
 fn try_quit(app: &AppHandle) {
     let dirty_what: Vec<String> = {
         let registry = app.state::<DirtyRegistry>();
-        let guard = registry.0.lock().expect("dirty registry mutex poisoned");
+        // Recover from a poisoned mutex instead of panicking on quit —
+        // panicking here would prevent the confirmation prompt from
+        // rendering and the user couldn't rescue their unsaved work.
+        let guard = registry
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .values()
             .filter(|e| e.dirty)

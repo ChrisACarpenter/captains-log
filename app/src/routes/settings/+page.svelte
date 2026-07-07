@@ -10,9 +10,11 @@
                persistent-notification "Tip" bubble (moved here from
                the General area where it used to live alongside the
                reminder controls)
-    Theme    — Light / Dark / Custom radio. Custom is disabled this
-               phase ("Coming soon") so the structural slot exists
-               for v2 to fill in with hex-input color editing.
+    Theme    — Light / Dark / Custom radio. Custom surfaces a
+               12-token editor (Phase 2.8) for fine-grained color
+               control with WCAG AA contrast validation; Light and
+               Dark are the preset palettes. Colorful Labels toggle
+               (Phase 2.8b) also lives here.
 
   Active tab is persisted in localStorage so reopening Settings lands
   the user where they left off.

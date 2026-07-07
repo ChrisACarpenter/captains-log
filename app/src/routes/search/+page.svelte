@@ -234,7 +234,7 @@
               onclick={() => void openResult(r)}
             >
               <div class="result-header">
-                <span class="result-kind result-kind-{r.kind}">
+                <span class="kind-badge" class:kind-badge-note={r.kind === 'note'}>
                   {r.kind === 'note' ? 'Note' : 'Summary'}
                 </span>
                 <span class="result-week">
@@ -397,22 +397,8 @@
     color: var(--text-secondary);
   }
 
-  /* Kind badge — Summary vs Note. Same shape as the "Referenced In"
-     kind chips on LabelDetailsModal so users learn one visual language
-     for surface-kind. Notes get the warmer accent tint; Summaries get
-     the neutral bg-elevated. */
-  .result-kind {
-    font-family: var(--font-display);
-    font-size: var(--text-caption);
-    padding: 2px var(--space-2);
-    border-radius: var(--radius-sm, 4px);
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
-  }
-  .result-kind-note {
-    background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-elevated));
-    color: var(--accent-primary-text);
-  }
+  /* Kind badge visuals live in app.css as the .kind-badge utility
+     (shared with LabelDetailsModal's Referenced-In list). */
 
   /* Note metadata — timestamp + optional title, shown on Note results
      between the week label and the label chips. Monospace timestamp so

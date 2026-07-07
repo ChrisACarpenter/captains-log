@@ -1,14 +1,19 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { refreshCurrentWeek, type YearWeek as RolloverYearWeek } from '$lib/weekRollover';
+  import {
+    refreshCurrentWeek,
+    formatWeekRange,
+    type YearWeek as RolloverYearWeek,
+  } from '$lib/weekRollover';
   import LabelInput from '$lib/LabelInput.svelte';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import ExternalUpdateBanner from '$lib/ExternalUpdateBanner.svelte';
   import SaveStatus from '$lib/SaveStatus.svelte';
+  import type { AutoSaveStatus } from '$lib/save-status';
   import SendToManagerButton from '$lib/SendToManagerButton.svelte';
   import { reportDirty } from '$lib/dirty';
 
@@ -30,14 +35,15 @@
   // to advertise. 'dirty' = typed something, debounce timer pending. 'saving'
   // = invoke in-flight. 'saved' = last write succeeded; show the timestamp.
   // 'error' = last save threw; show retry affordance.
-  type SaveStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+  // AutoSaveStatus type imported from $lib/save-status (shared with
+  // /journal + /capture + the SaveStatus indicator component).
 
   const AUTOSAVE_DEBOUNCE_MS = 1500;
 
   // State
   let loading = $state(true);
   let loadError = $state('');
-  let saveStatus = $state<SaveStatus>('idle');
+  let saveStatus = $state<AutoSaveStatus>('idle');
   let saveErrorMessage = $state('');
   let lastSavedAt = $state<Date | null>(null);
 
@@ -266,17 +272,25 @@
     if (loading) return;
     if (!isDirty) return;
 
-    // Don't downgrade saveStatus from 'saving' to 'dirty' mid-save.
-    // The own-save suppression (pendingCommit) is a single slot, so a
-    // second saveNow firing while the first is still in flight would
-    // overwrite the in-flight slot and let the first save's own emit
-    // surface as a false-positive externalUpdate banner. Keeping
-    // saveStatus = 'saving' makes the saveNow `if (saveStatus ===
-    // 'saving') return;` gate (combined with the rescheduling fallback
-    // there) prevent concurrent saves.
-    if (saveStatus !== 'saving') {
-      saveStatus = 'dirty';
-    }
+    // Read + write saveStatus inside `untrack` so this effect stays
+    // keystroke-driven — WITHOUT untrack the read on line `saveStatus
+    // !== 'saving'` adds saveStatus as a reactive dep, so every state
+    // flip during a save cycle ('dirty' → 'saving' → 'saved') re-fires
+    // the effect and REARMS the autoSaveTimer. That stale timer then
+    // triggers a redundant second save 1.5s later, which is the
+    // button-flicker Chris was seeing (the buttons cycling
+    // disabled→enabled→disabled→enabled).
+    //
+    // Don't downgrade saveStatus from 'saving' to 'dirty' mid-save:
+    // the own-save suppression (pendingCommit) is a single slot, and
+    // a second saveNow firing while the first is in flight would
+    // overwrite the slot and let the first save's own emit surface as
+    // a false-positive externalUpdate banner.
+    untrack(() => {
+      if (saveStatus !== 'saving') {
+        saveStatus = 'dirty';
+      }
+    });
     if (autoSaveTimer) clearTimeout(autoSaveTimer);
     autoSaveTimer = setTimeout(() => {
       autoSaveTimer = null;
@@ -284,29 +298,9 @@
     }, AUTOSAVE_DEBOUNCE_MS);
   });
 
-  // Computed week range label like "Week of June 22 – June 28, 2026"
-  const weekLabel = $derived.by(() => {
-    if (!yearWeek) return '';
-    // ISO week → Monday of that week. JS doesn't have a built-in for ISO week
-    // arithmetic, so do it manually: find the year's Jan 4 (always in week 1),
-    // then offset.
-    const { year, week } = yearWeek;
-    const jan4 = new Date(year, 0, 4);
-    const jan4Day = jan4.getDay() || 7; // Sunday → 7
-    const mondayOfWeek1 = new Date(year, 0, 4 - (jan4Day - 1));
-    const monday = new Date(mondayOfWeek1);
-    monday.setDate(mondayOfWeek1.getDate() + (week - 1) * 7);
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-
-    const fmt = (d: Date) =>
-      d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
-    const sameYear = monday.getFullYear() === sunday.getFullYear();
-    if (sameYear) {
-      return `Week of ${fmt(monday)} – ${fmt(sunday)}, ${monday.getFullYear()}`;
-    }
-    return `Week of ${fmt(monday)}, ${monday.getFullYear()} – ${fmt(sunday)}, ${sunday.getFullYear()}`;
-  });
+  // Computed week range label like "Week of June 22 – June 28, 2026".
+  // ISO-week math lives in $lib/weekRollover.ts (shared with /journal).
+  const weekLabel = $derived(yearWeek ? formatWeekRange(yearWeek) : '');
 
   onMount(async () => {
     try {
@@ -764,17 +758,23 @@
             lastSavedAt={lastSavedAt}
             onRetry={() => void saveNow()}
           />
+          <!-- Save + Back are NOT visually disabled during 'saving'.
+               Local disk saves complete in ~10ms — well under one 60fps
+               frame — so any class/attribute toggle for that window
+               would show up as WKWebView paint flicker without ever
+               actually communicating anything useful to the user.
+               saveNow gates internally on `saveStatus === 'saving'`
+               and its rescheduling arm handles typing-through-save,
+               so double-clicks during the 10ms window are safe. -->
           <button
             class="btn btn-emerald btn-save"
             onclick={() => void saveNow()}
-            disabled={saveStatus === 'saving'}
           >
-            {saveStatus === 'saving' ? 'Saving…' : 'Save'}
+            Save
           </button>
           <button
             class="btn btn-ruby"
             onclick={() => goto('/')}
-            disabled={saveStatus === 'saving'}
           >
             Back
           </button>
@@ -880,6 +880,10 @@
 
   .btn-save {
     margin-left: auto;
+    /* Pin the width so the "Save" → "Saving…" text swap during an
+     * autosave cycle doesn't reflow the sibling buttons in the row.
+     * Sized to comfortably fit "Saving…" plus normal button padding. */
+    min-width: 110px;
   }
 
   /* Send button + sent-status + modal CSS live in <SendToManagerButton>

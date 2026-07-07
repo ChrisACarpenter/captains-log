@@ -6,6 +6,7 @@
   import LabelInput from '$lib/LabelInput.svelte';
   import MarkdownEditor from '$lib/MarkdownEditor.svelte';
   import SaveStatus from '$lib/SaveStatus.svelte';
+  import type { AutoSaveStatus } from '$lib/save-status';
   import ConfirmDialog from '$lib/ConfirmDialog.svelte';
   import { reportDirty } from '$lib/dirty';
 
@@ -16,7 +17,11 @@
 
   // Auto-save (draft persistence) lifecycle. Same shape as the /summary
   // route's saveStatus for consistency.
-  type DraftStatus = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+  // AutoSaveStatus type imported from $lib/save-status (shared with
+  // /journal + /summary + the SaveStatus indicator component). Was
+  // named DraftStatus locally to distinguish from SubmitStatus (below),
+  // but the underlying 5-state machine is identical to the app-wide
+  // one, so it's the same type now.
 
   const AUTOSAVE_DEBOUNCE_MS = 1500;
 
@@ -38,7 +43,7 @@
   let submitStatus = $state<SubmitStatus>('idle');
   let submitErrorMessage = $state('');
 
-  let draftStatus = $state<DraftStatus>('idle');
+  let draftStatus = $state<AutoSaveStatus>('idle');
   let draftErrorMessage = $state('');
   let lastSavedAt = $state<Date | null>(null);
   let initialLoadDone = $state(false);

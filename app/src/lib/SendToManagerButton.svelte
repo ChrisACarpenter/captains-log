@@ -40,8 +40,7 @@
   import { writeHtml } from '@tauri-apps/plugin-clipboard-manager';
   import Modal from '$lib/Modal.svelte';
   import TipBubble from '$lib/onboarding/TipBubble.svelte';
-
-  type SaveStatusValue = 'idle' | 'dirty' | 'saving' | 'saved' | 'error';
+  import type { AutoSaveStatus } from '$lib/save-status';
 
   type SentRecord = {
     sentAt: string;
@@ -74,7 +73,7 @@
     week: number;
     weekLabel: string;
     isDirty: boolean;
-    saveStatus: SaveStatusValue;
+    saveStatus: AutoSaveStatus;
     /** Read-only outputs the parent can bind to so it can render the
      *  "Sent Jun 26 at 4:12 PM" / "Last sent … (edited since)" line
      *  wherever its layout calls for. The component owns the state
@@ -847,10 +846,10 @@
 {/if}
 
 <style>
-  .btn-send:disabled {
-    cursor: not-allowed;
-    opacity: 0.55;
-  }
+  /* .btn-send disabled styling handled by the shared .btn:disabled
+     rule in app.css (opacity-based dim). Local override no longer
+     needed — was previously the only place we used opacity for the
+     dim, now it's the app-wide default. */
 
   /* .sent-status text styling lives in app.css as a shared utility —
      the parent route renders the <p> element above the actions row. */

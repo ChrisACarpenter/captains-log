@@ -247,6 +247,84 @@ pub(crate) async fn set_label_color_impl<B: StorageBackend + ?Sized>(
     index.save(backend).await.map_err(|e| e.to_string())
 }
 
+/// Trim + coerce empty → None for a settings string field. Used by
+/// `complete_first_run` and `update_settings` on user_email /
+/// manager_email / manager_name / bamboo_title so an empty box in the
+/// UI persists as `None` (which the Send button's "is this set?"
+/// gate then reads cleanly). Prior to extraction each field expanded
+/// the same 4-line `.map(...).filter(...)` chain inline.
+fn normalize_optional_string(opt: Option<&String>) -> Option<String> {
+    opt.map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Callback return value for `walk_all_weeks_descending`. Lets a caller
+/// stop the walk early (e.g., `search_journal_impl` hitting its
+/// MAX_RESULTS cap) without needing labelled-break plumbing at every
+/// site.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WalkControl {
+    Continue,
+    Stop,
+}
+
+/// Walk every weekly file newest-first (years descending, weeks
+/// descending within each year), invoking `per_file` for each file's
+/// full markdown content. Return `WalkControl::Stop` from the callback
+/// to end the walk early.
+///
+/// Per-file read/list errors are logged via `eprintln!` with the given
+/// `tag` prefix and skipped — matching the "don't abort on partial
+/// failure" posture from Phase 2.8b's atomic-write work (locked
+/// decision #7). Only a hard failure at `list_years` bubbles up as
+/// `Err`.
+///
+/// Consolidates the walk skeleton that used to live inline in
+/// `rebuild_label_index_impl`, `get_label_stats`, `get_notes_for_label`,
+/// and `search_journal_impl`. Callers now supply just the per-file
+/// body.
+pub(crate) async fn walk_all_weeks_descending<B, F>(
+    backend: &B,
+    tag: &str,
+    mut per_file: F,
+) -> Result<(), String>
+where
+    B: StorageBackend + ?Sized,
+    F: FnMut(u32, u32, String) -> WalkControl,
+{
+    let mut years = backend.list_years().await.map_err(|e| e.to_string())?;
+    years.sort_unstable();
+    years.reverse();
+
+    for year in years {
+        let mut weeks = match backend.list_weeks(year).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[{tag}] list_weeks({year}) failed: {e}");
+                continue;
+            }
+        };
+        weeks.sort_unstable();
+        weeks.reverse();
+
+        for week in weeks {
+            let content = match backend.read_week(year, week).await {
+                Ok(Some(c)) => c,
+                Ok(None) => continue,
+                Err(e) => {
+                    eprintln!("[{tag}] read_week({year},{week}) failed: {e}");
+                    continue;
+                }
+            };
+            if matches!(per_file(year, week, content), WalkControl::Stop) {
+                return Ok(());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Local mirror of `settings::is_hex6` for the `set_label_color` argument
 /// validator. Kept inline here (rather than re-exported from settings) to
 /// avoid widening the settings module's public surface for a single
@@ -259,7 +337,7 @@ fn is_hex6_color(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// rebuild_label_index (Phase 3a Slice 3)
+// rebuild_label_index
 // ---------------------------------------------------------------------------
 
 /// What [`rebuild_label_index`] reports back to the Labels Settings tab so
@@ -282,7 +360,7 @@ pub struct RebuildResult {
 /// Walk every weekly file under the journal root, rebuild `labels.json`
 /// from the explicit-labels sites found there, and report what we scanned.
 ///
-/// Phase 3a Slice 3 — invoked by the Labels Settings tab on first open
+/// Invoked by the Labels Settings tab on first open
 /// per Settings session so the per-label color editor can render against
 /// fresh data even if the live index has drifted from disk (e.g. user
 /// hand-edited a weekly file). Color overrides survive the rebuild: we
@@ -458,7 +536,7 @@ pub(crate) async fn rebuild_label_index_impl<B: StorageBackend + ?Sized>(
 }
 
 // ---------------------------------------------------------------------------
-// get_label_stats (Phase 3a Slice 4)
+// get_label_stats
 // ---------------------------------------------------------------------------
 
 /// On-demand usage breakdown for a single label, surfaced in the Labels
@@ -507,38 +585,22 @@ pub async fn get_label_stats(
     let mut in_notes: u32 = 0;
     let mut in_summaries: u32 = 0;
 
-    let years = storage.list_years().await.map_err(|e| e.to_string())?;
-    for year in years {
-        let weeks = match storage.list_weeks(year).await {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("[label-stats] list_weeks({year}) failed: {e}");
-                continue;
-            }
-        };
-        for week in weeks {
-            let content = match storage.read_week(year, week).await {
-                Ok(Some(c)) => c,
-                Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("[label-stats] read_week({year},{week}) failed: {e}");
-                    continue;
-                }
-            };
-            for site in scan_label_sites(&content) {
-                if site.names.iter().any(|n| n == &name) {
-                    match site.kind {
-                        LabelSiteKind::NoteLabelsLine => {
-                            in_notes = in_notes.saturating_add(1);
-                        }
-                        LabelSiteKind::SummaryLabelsSubsection => {
-                            in_summaries = in_summaries.saturating_add(1);
-                        }
+    walk_all_weeks_descending(&*storage, "label-stats", |_year, _week, content| {
+        for site in scan_label_sites(&content) {
+            if site.names.iter().any(|n| n == &name) {
+                match site.kind {
+                    LabelSiteKind::NoteLabelsLine => {
+                        in_notes = in_notes.saturating_add(1);
+                    }
+                    LabelSiteKind::SummaryLabelsSubsection => {
+                        in_summaries = in_summaries.saturating_add(1);
                     }
                 }
             }
         }
-    }
+        WalkControl::Continue
+    })
+    .await?;
 
     let total = in_notes.saturating_add(in_summaries);
 
@@ -571,7 +633,7 @@ pub async fn get_label_stats(
 }
 
 // ---------------------------------------------------------------------------
-// get_notes_for_label (Phase 3a Slice 1 — Label Library drill-down)
+// get_notes_for_label (Label Library drill-down)
 // ---------------------------------------------------------------------------
 
 /// Which surface a single label reference lives on. Serialized as bare
@@ -619,59 +681,37 @@ pub async fn get_notes_for_label(
     let storage = storage_state.read().await;
     let mut refs: Vec<LabelReference> = Vec::new();
 
-    let mut years = storage.list_years().await.map_err(|e| e.to_string())?;
-    years.sort_unstable();
-    years.reverse();
-
-    for year in years {
-        let mut weeks = match storage.list_weeks(year).await {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("[label-refs] list_weeks({year}) failed: {e}");
+    walk_all_weeks_descending(&*storage, "label-refs", |year, week, content| {
+        for site in scan_label_sites(&content) {
+            if !site.names.iter().any(|n| n == &name) {
                 continue;
             }
-        };
-        weeks.sort_unstable();
-        weeks.reverse();
-
-        for week in weeks {
-            let content = match storage.read_week(year, week).await {
-                Ok(Some(c)) => c,
-                Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("[label-refs] read_week({year},{week}) failed: {e}");
-                    continue;
-                }
-            };
-            for site in scan_label_sites(&content) {
-                if !site.names.iter().any(|n| n == &name) {
-                    continue;
-                }
-                let reference = match site.kind {
-                    LabelSiteKind::SummaryLabelsSubsection => LabelReference {
+            let reference = match site.kind {
+                LabelSiteKind::SummaryLabelsSubsection => LabelReference {
+                    year,
+                    week,
+                    kind: LabelReferenceKind::Summary,
+                    note_timestamp: None,
+                    note_title: None,
+                },
+                LabelSiteKind::NoteLabelsLine => {
+                    let (ts, title) =
+                        extract_note_heading_before(&content, site.byte_range.start)
+                            .unwrap_or((String::new(), None));
+                    LabelReference {
                         year,
                         week,
-                        kind: LabelReferenceKind::Summary,
-                        note_timestamp: None,
-                        note_title: None,
-                    },
-                    LabelSiteKind::NoteLabelsLine => {
-                        let (ts, title) =
-                            extract_note_heading_before(&content, site.byte_range.start)
-                                .unwrap_or((String::new(), None));
-                        LabelReference {
-                            year,
-                            week,
-                            kind: LabelReferenceKind::Note,
-                            note_timestamp: if ts.is_empty() { None } else { Some(ts) },
-                            note_title: title,
-                        }
+                        kind: LabelReferenceKind::Note,
+                        note_timestamp: if ts.is_empty() { None } else { Some(ts) },
+                        note_title: title,
                     }
-                };
-                refs.push(reference);
-            }
+                }
+            };
+            refs.push(reference);
         }
-    }
+        WalkControl::Continue
+    })
+    .await?;
 
     Ok(refs)
 }
@@ -740,13 +780,13 @@ fn extract_note_heading_before(
 }
 
 // ---------------------------------------------------------------------------
-// search_journal (Phase 3b Slice 1 + 2 — full-text search)
+// search_journal (full-text search)
 // ---------------------------------------------------------------------------
 
 /// Discriminates which surface a search result sits on. Serialized as
 /// bare lowercase strings so the frontend can switch on the raw value
 /// with no mapping layer — matches the `LabelReferenceKind` pattern
-/// established in Phase 3a Slice 1.
+/// established by the Label Library drill-down.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchResultKind {
@@ -878,113 +918,82 @@ pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
 
     let mut results: Vec<SearchResult> = Vec::new();
 
-    let mut years = backend.list_years().await.map_err(|e| e.to_string())?;
-    years.sort_unstable();
-    years.reverse();
+    walk_all_weeks_descending(backend, "search", |year, week, content| {
+        // ---- Summary surface ------------------------------------
+        let summary = parse_weekly_summary(&content);
+        let summary_passes_label = !use_label_filter
+            || summary
+                .labels
+                .iter()
+                .any(|l| label_filter_set.contains(l.as_str()));
 
-    'outer: for year in years {
-        let mut weeks = match backend.list_weeks(year).await {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("[search] list_weeks({year}) failed: {e}");
-                continue;
-            }
-        };
-        weeks.sort_unstable();
-        weeks.reverse();
+        if summary_passes_label {
+            // Concatenate the four content fields with a separator
+            // that never appears in the source (double newline).
+            let joined = [
+                summary.key_accomplishments.as_str(),
+                summary.plans_and_priorities.as_str(),
+                summary.challenges_or_roadblocks.as_str(),
+                summary.anything_else.as_str(),
+            ]
+            .join("\n\n");
 
-        for week in weeks {
-            // Global result cap — once we've collected MAX_RESULTS
-            // entries, stop scanning further weeks. Frontend surfaces
-            // a tip when results.len() equals MAX_RESULTS so the user
-            // knows to refine. Break the outer year loop too so we
-            // don't waste time listing weeks of years we won't scan.
-            if results.len() >= MAX_RESULTS {
-                break 'outer;
-            }
-
-            let content = match backend.read_week(year, week).await {
-                Ok(Some(c)) => c,
-                Ok(None) => continue,
-                Err(e) => {
-                    eprintln!("[search] read_week({year},{week}) failed: {e}");
-                    continue;
-                }
-            };
-
-            // ---- Summary surface ------------------------------------
-            let summary = parse_weekly_summary(&content);
-            let summary_passes_label = !use_label_filter
-                || summary
-                    .labels
-                    .iter()
-                    .any(|l| label_filter_set.contains(l.as_str()));
-
-            if summary_passes_label {
-                // Concatenate the four content fields with a separator
-                // that never appears in the source (double newline).
-                let joined = [
-                    summary.key_accomplishments.as_str(),
-                    summary.plans_and_priorities.as_str(),
-                    summary.challenges_or_roadblocks.as_str(),
-                    summary.anything_else.as_str(),
-                ]
-                .join("\n\n");
-
-                if let Some((snippets, total)) = scan_matches(&joined, &needle) {
-                    results.push(SearchResult {
-                        year,
-                        week,
-                        kind: SearchResultKind::Summary,
-                        labels: summary.labels.clone(),
-                        note_timestamp: None,
-                        note_title: None,
-                        // Summary sits at the top of every weekly file.
-                        // 0 scrolls the editor to origin, which lands
-                        // the user on the Summary.
-                        scroll_offset: 0,
-                        snippets,
-                        total_matches: total,
-                    });
-                    if results.len() >= MAX_RESULTS {
-                        break 'outer;
-                    }
-                }
-            }
-
-            // ---- Note surfaces --------------------------------------
-            // Extract each Note (heading offset + timestamp + title +
-            // labels + body-text-haystack) and scan them independently.
-            // Notes are returned in document order (top-to-bottom of
-            // the "## Weekly Notes" section).
-            for note in extract_notes_for_search(&content) {
-                let note_passes_label = !use_label_filter
-                    || note
-                        .labels
-                        .iter()
-                        .any(|l| label_filter_set.contains(l.as_str()));
-                if !note_passes_label {
-                    continue;
-                }
-                if let Some((snippets, total)) = scan_matches(&note.haystack, &needle) {
-                    results.push(SearchResult {
-                        year,
-                        week,
-                        kind: SearchResultKind::Note,
-                        labels: note.labels,
-                        note_timestamp: Some(note.timestamp),
-                        note_title: note.title,
-                        scroll_offset: note.heading_offset as u32,
-                        snippets,
-                        total_matches: total,
-                    });
-                    if results.len() >= MAX_RESULTS {
-                        break 'outer;
-                    }
+            if let Some((snippets, total)) = scan_matches(&joined, &needle) {
+                results.push(SearchResult {
+                    year,
+                    week,
+                    kind: SearchResultKind::Summary,
+                    labels: summary.labels.clone(),
+                    note_timestamp: None,
+                    note_title: None,
+                    // Summary sits at the top of every weekly file.
+                    // 0 scrolls the editor to origin, which lands
+                    // the user on the Summary.
+                    scroll_offset: 0,
+                    snippets,
+                    total_matches: total,
+                });
+                if results.len() >= MAX_RESULTS {
+                    return WalkControl::Stop;
                 }
             }
         }
-    }
+
+        // ---- Note surfaces --------------------------------------
+        // Extract each Note (heading offset + timestamp + title +
+        // labels + body-text-haystack) and scan them independently.
+        // Notes are returned in document order (top-to-bottom of
+        // the "## Weekly Notes" section).
+        for note in extract_notes_for_search(&content) {
+            let note_passes_label = !use_label_filter
+                || note
+                    .labels
+                    .iter()
+                    .any(|l| label_filter_set.contains(l.as_str()));
+            if !note_passes_label {
+                continue;
+            }
+            if let Some((snippets, total)) = scan_matches(&note.haystack, &needle) {
+                results.push(SearchResult {
+                    year,
+                    week,
+                    kind: SearchResultKind::Note,
+                    labels: note.labels,
+                    note_timestamp: Some(note.timestamp),
+                    note_title: note.title,
+                    scroll_offset: note.heading_offset as u32,
+                    snippets,
+                    total_matches: total,
+                });
+                if results.len() >= MAX_RESULTS {
+                    return WalkControl::Stop;
+                }
+            }
+        }
+
+        WalkControl::Continue
+    })
+    .await?;
 
     Ok(results)
 }
@@ -1204,7 +1213,7 @@ fn build_snippet(source: &str, match_start: usize, match_end: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// rename_label (Phase 3a Slice 5)
+// rename_label
 // ---------------------------------------------------------------------------
 
 /// Result of a [`rename_label`] pass. `files_modified` counts weekly files we
@@ -1311,7 +1320,7 @@ pub(crate) async fn rename_label_impl<B: StorageBackend + ?Sized>(
         };
         for week in weeks {
             let pretty_path = format!("{year:04}/{year:04}-W{week:02}.md");
-            let content = match backend.read_week(year, week).await {
+            let mut content = match backend.read_week(year, week).await {
                 Ok(Some(c)) => c,
                 Ok(None) => continue,
                 Err(e) => {
@@ -1322,33 +1331,35 @@ pub(crate) async fn rename_label_impl<B: StorageBackend + ?Sized>(
             };
 
             // Pre-scan: how many sites in this file actually mention
-            // old_clean? If none, skip the rewrite entirely so we don't pay
-            // the write cost on untouched weeks.
+            // old_clean? Consume `sites` with .into_iter() so we end
+            // up with owned LabelSite values — no borrow on content
+            // persists, and we can splice content in place without
+            // a full-file .clone() (previously we cloned content into
+            // `rewritten` just to sidestep the borrow checker).
             let sites = scan_label_sites(&content);
-            let touched: Vec<&LabelSite> = sites
-                .iter()
+            let mut ordered: Vec<LabelSite> = sites
+                .into_iter()
                 .filter(|s| s.names.iter().any(|n| n == old_clean))
                 .collect();
-            if touched.is_empty() {
+            if ordered.is_empty() {
                 continue;
             }
 
-            // Splice replacement chunks back in REVERSE byte order so
-            // earlier sites' ranges stay valid while we rewrite the file.
-            // Cloning into a fresh String lets us slice-and-stitch without
-            // fighting the borrow checker.
-            let mut rewritten = content.clone();
-            let mut per_file_replacements: u32 = 0;
             // Sort touched sites by descending start so splices high-to-low
             // don't invalidate the indices of the ones still to come.
-            let mut ordered = touched.clone();
             ordered.sort_by_key(|s| std::cmp::Reverse(s.byte_range.start));
+
+            let mut per_file_replacements: u32 = 0;
             for site in ordered {
-                let original = &rewritten[site.byte_range.clone()];
-                let (new_chunk, replaced) =
-                    rebuild_chunk_for_rename(original, &site.names, old_clean, new_clean, site.kind);
+                let (new_chunk, replaced) = rebuild_chunk_for_rename(
+                    &content[site.byte_range.clone()],
+                    &site.names,
+                    old_clean,
+                    new_clean,
+                    site.kind,
+                );
                 per_file_replacements = per_file_replacements.saturating_add(replaced);
-                rewritten.replace_range(site.byte_range.clone(), &new_chunk);
+                content.replace_range(site.byte_range, &new_chunk);
             }
 
             if per_file_replacements == 0 {
@@ -1358,7 +1369,7 @@ pub(crate) async fn rename_label_impl<B: StorageBackend + ?Sized>(
                 continue;
             }
 
-            match backend.write_week(year, week, &rewritten).await {
+            match backend.write_week(year, week, &content).await {
                 Ok(()) => {
                     files_modified = files_modified.saturating_add(1);
                     occurrences_replaced =
@@ -1533,7 +1544,7 @@ fn rebuild_chunk_for_rename(
 }
 
 // ---------------------------------------------------------------------------
-// delete_label_cascade (Phase 3a Slice 6)
+// delete_label_cascade
 // ---------------------------------------------------------------------------
 
 /// Result of a [`delete_label_cascade`] pass. `files_modified` counts weekly
@@ -1612,7 +1623,7 @@ pub(crate) async fn delete_label_cascade_impl<B: StorageBackend + ?Sized>(
         };
         for week in weeks {
             let pretty_path = format!("{year:04}/{year:04}-W{week:02}.md");
-            let content = match backend.read_week(year, week).await {
+            let mut content = match backend.read_week(year, week).await {
                 Ok(Some(c)) => c,
                 Ok(None) => continue,
                 Err(e) => {
@@ -1622,30 +1633,33 @@ pub(crate) async fn delete_label_cascade_impl<B: StorageBackend + ?Sized>(
                 }
             };
 
-            // Pre-scan: which sites in this file actually carry `clean`? If
-            // none, skip the rewrite entirely so we don't pay the write cost
-            // on untouched weeks.
+            // Pre-scan: which sites in this file actually carry `clean`?
+            // Consume `sites` with .into_iter() so we end up with owned
+            // LabelSite values — no borrow on content persists, and we
+            // can splice content in place without a full-file .clone().
             let sites = scan_label_sites(&content);
-            let touched: Vec<&LabelSite> = sites
-                .iter()
+            let mut ordered: Vec<LabelSite> = sites
+                .into_iter()
                 .filter(|s| s.names.iter().any(|n| n == &clean))
                 .collect();
-            if touched.is_empty() {
+            if ordered.is_empty() {
                 continue;
             }
 
-            // Splice replacement chunks back in REVERSE byte order so
-            // earlier sites' ranges stay valid while we rewrite the file.
-            let mut rewritten = content.clone();
-            let mut per_file_removed: u32 = 0;
-            let mut ordered = touched.clone();
+            // Sort touched sites by descending start so splices high-to-low
+            // don't invalidate the indices of the ones still to come.
             ordered.sort_by_key(|s| std::cmp::Reverse(s.byte_range.start));
+
+            let mut per_file_removed: u32 = 0;
             for site in ordered {
-                let original = &rewritten[site.byte_range.clone()];
-                let (new_chunk, removed) =
-                    rebuild_chunk_for_delete(original, &site.names, &clean, site.kind);
+                let (new_chunk, removed) = rebuild_chunk_for_delete(
+                    &content[site.byte_range.clone()],
+                    &site.names,
+                    &clean,
+                    site.kind,
+                );
                 per_file_removed = per_file_removed.saturating_add(removed);
-                rewritten.replace_range(site.byte_range.clone(), &new_chunk);
+                content.replace_range(site.byte_range, &new_chunk);
             }
 
             if per_file_removed == 0 {
@@ -1655,7 +1669,7 @@ pub(crate) async fn delete_label_cascade_impl<B: StorageBackend + ?Sized>(
                 continue;
             }
 
-            match backend.write_week(year, week, &rewritten).await {
+            match backend.write_week(year, week, &content).await {
                 Ok(()) => {
                     files_modified = files_modified.saturating_add(1);
                     occurrences_removed =
@@ -2139,26 +2153,10 @@ pub async fn complete_first_run(
     //    strings persist as None so downstream "is this set?" checks stay
     //    simple.
     let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
-    let user_email = input
-        .user_email
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let manager_email = input
-        .manager_email
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let manager_name = input
-        .manager_name
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let bamboo_title = input
-        .bamboo_title
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let user_email = normalize_optional_string(input.user_email.as_ref());
+    let manager_email = normalize_optional_string(input.manager_email.as_ref());
+    let manager_name = normalize_optional_string(input.manager_name.as_ref());
+    let bamboo_title = normalize_optional_string(input.bamboo_title.as_ref());
     let jira_project_keys = normalize_jira_keys(input.jira_project_keys.clone());
     let journal_settings = JournalSettings {
         version: CURRENT_VERSION,
@@ -2270,26 +2268,10 @@ pub async fn update_settings(
     //    empty string after trimming persists as None so the Send button's
     //    "is this set?" check stays simple.
     let chosen_storage = LocalFilesystem::new(input.journal_root.clone());
-    let user_email = input
-        .user_email
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let manager_email = input
-        .manager_email
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let manager_name = input
-        .manager_name
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let bamboo_title = input
-        .bamboo_title
-        .as_ref()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let user_email = normalize_optional_string(input.user_email.as_ref());
+    let manager_email = normalize_optional_string(input.manager_email.as_ref());
+    let manager_name = normalize_optional_string(input.manager_name.as_ref());
+    let bamboo_title = normalize_optional_string(input.bamboo_title.as_ref());
     let jira_project_keys = normalize_jira_keys(input.jira_project_keys.clone());
     let journal_settings = JournalSettings {
         version: CURRENT_VERSION,
@@ -2361,7 +2343,15 @@ pub fn set_window_dirty(
     key: String,
     entry: DirtyEntry,
 ) {
-    let mut guard = registry.0.lock().expect("dirty registry mutex poisoned");
+    // Recover the guard from a poisoned mutex rather than panicking the
+    // Tauri thread. Poisoning means an earlier holder panicked mid-update;
+    // the dirty-registry data may be inconsistent but continuing beats
+    // crashing the whole app (which would lose any actual unsaved work
+    // that IS still recoverable via the auto-save sidecar).
+    let mut guard = registry
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.insert(key, entry);
 }
 
@@ -3138,7 +3128,7 @@ mod tests {
         assert_eq!(read_back.as_deref(), Some(updated));
     }
 
-    // ----- rebuild_label_index (Phase 3a Slice 3) -----
+    // ----- rebuild_label_index -----
 
     /// Build a weekly file body with a Weekly Summary `### Labels`
     /// subsection containing the given labels, plus an optional Note with
@@ -3351,7 +3341,7 @@ mod tests {
         assert_eq!(entry.last_used, NaiveDate::from_ymd_opt(2026, 9, 28).unwrap());
     }
 
-    // ----- get_label_stats (Phase 3a Slice 4) -----
+    // ----- get_label_stats -----
     //
     // The Tauri command wrapper takes a `State` and isn't unit-testable
     // directly, so we exercise the same body inline against a
@@ -3541,7 +3531,7 @@ mod tests {
         assert_eq!(entry.count, 999, "stats call must not mutate labels.json");
     }
 
-    // ----- get_notes_for_label (Phase 3a Slice 1 — Label Library drill-down) -----
+    // ----- get_notes_for_label (Label Library drill-down) -----
     //
     // Same test seam as get_label_stats: the Tauri command wrapper takes a
     // `State` we can't build without a full app, so we mirror the body
@@ -3716,7 +3706,7 @@ mod tests {
         );
     }
 
-    // ----- search_journal (Phase 3b Slice 1 + 2) -----
+    // ----- search_journal -----
     //
     // Full-text search command tests. The Tauri wrapper needs `State`
     // we can't build outside a running app, so we drive `compute_search`
@@ -4376,7 +4366,7 @@ mod tests {
         assert!(hits[0].snippets[0].snippet.contains("café"));
     }
 
-    // ----- rename_label (Phase 3a Slice 5) -----
+    // ----- rename_label -----
     //
     // The Tauri command wrapper takes a `State` and can't be unit-tested
     // directly; `rename_label_impl` is the seam these exercise. Coverage
@@ -4634,7 +4624,7 @@ mod tests {
         assert!(idx.labels.iter().all(|e| e.name != "release"));
     }
 
-    // ----- delete_label_cascade (Phase 3a Slice 6) -----
+    // ----- delete_label_cascade -----
     //
     // The Tauri command wrapper takes a `State` and isn't unit-testable
     // directly; `delete_label_cascade_impl` is the seam these exercise.

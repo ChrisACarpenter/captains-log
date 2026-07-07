@@ -503,7 +503,7 @@
                 class="ref-row"
                 onclick={() => void jumpToReference(ref)}
               >
-                <span class="ref-kind ref-kind-{ref.kind}">
+                <span class="kind-badge" class:kind-badge-note={ref.kind === 'note'}>
                   {ref.kind === 'note' ? 'Note' : 'Summary'}
                 </span>
                 <span class="ref-body">
@@ -829,20 +829,9 @@
   .ref-row:focus-visible {
     box-shadow: inset 0 0 0 2px var(--focus-ring);
   }
-  .ref-kind {
-    font-family: var(--font-display);
-    font-size: var(--text-caption);
-    padding: 2px var(--space-2);
-    border-radius: var(--radius-sm, 4px);
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
-  }
-  .ref-kind-note {
-    /* Slightly warmer background so Notes and Summaries read as distinct
-       row categories at a glance without needing colored icons. */
-    background: color-mix(in srgb, var(--accent-primary) 12%, var(--bg-elevated));
-    color: var(--accent-primary-text);
-  }
+  /* .ref-kind / .ref-kind-note visuals live in app.css as the
+     .kind-badge / .kind-badge-note utility, shared with the /search
+     result cards. */
   .ref-body {
     display: flex;
     flex-direction: column;
