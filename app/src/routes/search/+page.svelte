@@ -24,6 +24,7 @@
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import LabelInput from '$lib/LabelInput.svelte';
+  import TipBubble from '$lib/onboarding/TipBubble.svelte';
 
   // Match the Rust SearchResult / SearchSnippet shape (serde rename_all
   // = "camelCase" on both structs; the kind enum uses lowercase).
@@ -53,6 +54,10 @@
   // Same floor the Rust command enforces — kept in sync so the Search
   // button's disabled state matches the backend's short-query guard.
   const MIN_QUERY_LENGTH = 2;
+  // Mirrors the Rust MAX_RESULTS constant. When the backend caps a
+  // dense query, results.length equals this exactly and we surface a
+  // "narrow your query" TipBubble so the user knows to refine.
+  const MAX_RESULTS = 200;
 
   let query = $state('');
   let labelFilter = $state<string[]>([]);
@@ -208,11 +213,20 @@
         label filter if you added one.
       </p>
     {:else}
+      {#if results.length >= MAX_RESULTS}
+        <TipBubble>
+          Showing the first {MAX_RESULTS} matches (newest first). Your
+          query hit a lot of surfaces — refine it (longer term, add a
+          label filter) to see the rest.
+        </TipBubble>
+      {/if}
       <p class="result-count">
-        {results.length} {results.length === 1 ? 'week' : 'weeks'} match — newest first.
+        {results.length} {results.length === 1 ? 'result' : 'results'}
+        {#if results.length >= MAX_RESULTS}(capped){/if}
+        — newest first.
       </p>
       <ul class="results" role="list">
-        {#each results as r (`${r.year}-${r.week}`)}
+        {#each results as r (`${r.year}-${r.week}-${r.kind}-${r.scrollOffset}`)}
           <li>
             <button
               type="button"

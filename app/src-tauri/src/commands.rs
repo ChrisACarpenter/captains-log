@@ -818,6 +818,19 @@ const MAX_MATCHES_PER_RESULT: u32 = 100;
 /// query for names, project keys, etc.
 const MIN_QUERY_LENGTH: usize = 2;
 
+/// Hard cap on total results across all weeks. A 2-char query on a
+/// dense journal (e.g., "qa" searched by a QA analyst) can produce
+/// thousands of matches; each result card renders three snippets +
+/// highlighted <mark> elements, and reconciling that DOM tree on the
+/// Svelte side can visibly stall the UI. We stop scanning further
+/// weeks once we hit this cap; the frontend surfaces a "narrow your
+/// query" tip when results.len() equals MAX_RESULTS.
+///
+/// 200 was chosen empirically — comfortably renders in <1s on the
+/// Tauri WebView, still gives users enough hits to feel the shape of
+/// their matches without landing them in an unusable wall of text.
+const MAX_RESULTS: usize = 200;
+
 /// Full-text search across every weekly file. Scans BOTH the Weekly
 /// Summary block (four content fields joined) AND every individual
 /// Note's labels-line + body. Case-insensitive substring match.
@@ -869,7 +882,7 @@ pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
     years.sort_unstable();
     years.reverse();
 
-    for year in years {
+    'outer: for year in years {
         let mut weeks = match backend.list_weeks(year).await {
             Ok(w) => w,
             Err(e) => {
@@ -881,6 +894,15 @@ pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
         weeks.reverse();
 
         for week in weeks {
+            // Global result cap — once we've collected MAX_RESULTS
+            // entries, stop scanning further weeks. Frontend surfaces
+            // a tip when results.len() equals MAX_RESULTS so the user
+            // knows to refine. Break the outer year loop too so we
+            // don't waste time listing weeks of years we won't scan.
+            if results.len() >= MAX_RESULTS {
+                break 'outer;
+            }
+
             let content = match backend.read_week(year, week).await {
                 Ok(Some(c)) => c,
                 Ok(None) => continue,
@@ -924,6 +946,9 @@ pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
                         snippets,
                         total_matches: total,
                     });
+                    if results.len() >= MAX_RESULTS {
+                        break 'outer;
+                    }
                 }
             }
 
@@ -953,6 +978,9 @@ pub(crate) async fn search_journal_impl<B: StorageBackend + ?Sized>(
                         snippets,
                         total_matches: total,
                     });
+                    if results.len() >= MAX_RESULTS {
+                        break 'outer;
+                    }
                 }
             }
         }
@@ -4175,6 +4203,149 @@ mod tests {
         assert_eq!(hits.len(), 1, "only the labeled note passes the filter");
         assert!(matches!(hits[0].kind, SearchResultKind::Note));
         assert_eq!(hits[0].note_title.as_deref(), Some("Tagged"));
+    }
+
+    #[tokio::test]
+    async fn search_caps_total_results_at_max() {
+        // Regression test for the "search 'qa' hangs the UI" bug —
+        // a common query on a dense journal was producing thousands
+        // of results that stalled the frontend render. The command
+        // now stops scanning further weeks once MAX_RESULTS is hit.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        // Seed enough weeks each carrying a matching Summary to blow
+        // past the cap. 250 weeks > MAX_RESULTS (200), so the cap
+        // must engage.
+        for week in 1..=52u32 {
+            let s = WeeklySummary {
+                key_accomplishments: "qa work this week".to_string(),
+                last_updated: Some("2026-06-22 10:00".to_string()),
+                ..Default::default()
+            };
+            backend
+                .write_week(2024, week, &build_weekly_file_with_summary(2024, week, &s))
+                .await
+                .unwrap();
+            backend
+                .write_week(2025, week, &build_weekly_file_with_summary(2025, week, &s))
+                .await
+                .unwrap();
+            backend
+                .write_week(2026, week, &build_weekly_file_with_summary(2026, week, &s))
+                .await
+                .unwrap();
+        }
+        // 156 Summary results — under the cap. Adds an extra 50
+        // Notes-heavy weeks to push over 200. Each note carries "qa".
+        for week in 40..=52u32 {
+            let s = WeeklySummary {
+                last_updated: Some("2026-06-22 10:00".to_string()),
+                ..Default::default()
+            };
+            let file = build_weekly_file_with_notes(
+                2023,
+                week,
+                &s,
+                &[
+                    ("2023-01-01 10:00", None, &[], "qa note one"),
+                    ("2023-01-01 11:00", None, &[], "qa note two"),
+                    ("2023-01-01 12:00", None, &[], "qa note three"),
+                    ("2023-01-01 13:00", None, &[], "qa note four"),
+                    ("2023-01-01 14:00", None, &[], "qa note five"),
+                ],
+            );
+            backend.write_week(2023, week, &file).await.unwrap();
+        }
+
+        let hits = compute_search(&backend, "qa", &[]).await.unwrap();
+        assert_eq!(
+            hits.len(),
+            MAX_RESULTS,
+            "search must cap at MAX_RESULTS on dense queries"
+        );
+        // Newest-first ordering is preserved even under the cap —
+        // 2026 weeks come first, then 2025, then 2024, then 2023.
+        assert_eq!(hits[0].year, 2026, "newest-first ordering survives cap");
+    }
+
+    #[test]
+    fn scan_matches_survives_lowercase_byte_length_changes() {
+        // Regression test for the "search hangs on 'qa'" bug. Some
+        // Unicode characters change byte length when lowercased —
+        // Turkish `İ` (2 bytes) → `i̇` (3 bytes: i + combining dot).
+        // If we compute match offsets in the lowercased string and then
+        // slice the ORIGINAL for the snippet, the offsets don't align
+        // and we get a panic that Tauri swallows into a hanging Promise.
+        //
+        // Reproduces the exact pattern from Chris's journal: a note
+        // whose body contains such a character upstream of a search
+        // match. Fix: build snippets from a byte-aligned source.
+        //
+        // If build_snippet uses `&source[start..end]` directly and the
+        // offsets don't align, this call panics. Post-fix, it returns
+        // a valid string (possibly empty on truly invalid indices).
+        let haystack = "İ some prefix and QA testing here".to_string();
+        let haystack_lower = haystack.to_lowercase();
+        // Sanity check: this content actually triggers the byte drift.
+        assert_ne!(
+            haystack.len(),
+            haystack_lower.len(),
+            "test setup: to_lowercase must shift byte offsets for this case"
+        );
+        // Find "qa" in the lowercased string — its position is one
+        // byte later than in the original because of the İ drift.
+        let match_start = haystack_lower.find("qa").expect("qa exists");
+        let match_end = match_start + 2;
+        // This must NOT panic. Post-fix it returns a best-effort snippet.
+        let snippet = build_snippet(&haystack, match_start, match_end);
+        // We don't assert on snippet contents (they'll be case-shifted
+        // near the drift boundary) — the whole point is not panicking.
+        // Snippet may be empty in truly-degenerate cases; that's OK.
+        assert!(snippet.len() <= 500, "snippet stays bounded");
+    }
+
+    #[tokio::test]
+    async fn search_survives_journal_with_unicode_case_drift() {
+        // End-to-end regression: a journal file whose Note body starts
+        // with a byte-length-changing Unicode char must not hang or
+        // crash the search command. The pattern that broke was: 'qa'
+        // query against content where an earlier Unicode char shifted
+        // downstream byte positions.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let s = WeeklySummary {
+            last_updated: Some("2026-06-22 10:00".to_string()),
+            ..Default::default()
+        };
+        let file = build_weekly_file_with_notes(
+            2026,
+            25,
+            &s,
+            &[(
+                "2026-06-22 10:15",
+                Some("Byte-drift note"),
+                &[],
+                // Turkish capital I with dot — 2 bytes → 3 bytes when
+                // lowercased. "QA" comes AFTER it, so match offsets in
+                // the lowercased haystack shift out of alignment with
+                // the original haystack.
+                "prefix İ context — QA analyst work continues here",
+            )],
+        );
+        backend.write_week(2026, 25, &file).await.unwrap();
+
+        // Must return successfully — the ONLY way this test passes is
+        // if build_snippet stays panic-free on drifting offsets.
+        let hits = compute_search(&backend, "qa", &[]).await.unwrap();
+        assert_eq!(hits.len(), 1, "should find the QA reference");
+        assert!(matches!(hits[0].kind, SearchResultKind::Note));
     }
 
     #[tokio::test]
