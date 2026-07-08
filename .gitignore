@@ -9,6 +9,10 @@ build/
 .vite/
 .next/
 
+# Playwright test-runner artifacts (Playwright drops .last-run.json and any
+# retained screenshots/traces here between runs — not source of truth).
+test-results/
+
 # Rust / Tauri
 target/
 **/target/

@@ -649,47 +649,16 @@
   }
 
   /* Task checkbox. Decoration.replace from live-preview.ts swaps the
-   * 3-char `[ ]` / `[x]` TaskMarker for this clickable square. Sizing
-   * tuned to sit on the body text baseline without disrupting line
-   * height. SVG check is hidden unless aria-checked is true. */
+   * 3-char `[ ]` / `[x]` TaskMarker for this clickable square. The
+   * base visual (size, border, hover/focus/checked states) comes from
+   * the shared `.checkbox-square` class in app.css — the widget's
+   * `className` sets both `cm-md-task` and `checkbox-square`. Only
+   * editor-local layout tweaks (margin, baseline nudge) live here so
+   * the widget sits inline with body text without disrupting line
+   * height. */
   .md-editor :global(.cm-md-task) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
     margin: 0 4px 0 0;
-    padding: 0;
-    background: transparent;
-    /* text-muted gives a visible 4.59:1 outline against bg-surface
-       (border-structural's 10%-alpha cream is only 1.32:1 and the
-       checkbox's interactivity is invisible to the user at rest). */
-    border: 1.5px solid var(--text-muted);
-    border-radius: 3px;
-    color: transparent;
-    cursor: pointer;
     vertical-align: -3px;
-    transition:
-      background var(--transition-fast),
-      border-color var(--transition-fast),
-      color var(--transition-fast);
-    outline: none;
-  }
-  .md-editor :global(.cm-md-task:hover) {
-    border-color: var(--accent-primary);
-    background: var(--bg-surface);
-  }
-  .md-editor :global(.cm-md-task:focus-visible) {
-    box-shadow: 0 0 0 2px var(--focus-glow);
-    border-color: var(--accent-primary);
-  }
-  .md-editor :global(.cm-md-task[aria-checked="true"]) {
-    background: var(--accent-primary);
-    border-color: var(--accent-primary);
-    color: var(--bg-base);
-  }
-  .md-editor :global(.cm-md-task svg) {
-    flex-shrink: 0;
   }
 
   /* Strikethrough + muted color over the body of a checked task. The

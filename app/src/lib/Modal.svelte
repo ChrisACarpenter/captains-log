@@ -70,6 +70,24 @@
     ariaLabelledBy?: string;
     zLayer?: 'default' | 'nested';
     maxWidth?: string;
+    /**
+     * When true, Escape / backdrop click / header close-button are all
+     * no-ops. Callers set this during an in-flight IPC so the user can't
+     * dismiss the modal while state is mid-transition. Distinct from
+     * simply setting `open` false — the caller keeps the modal mounted;
+     * we just refuse to *request* a close via any of the standard
+     * dismissal affordances.
+     */
+    blockDismissal?: boolean;
+    /**
+     * When true, initial focus goes to the first enabled form control
+     * (`<input>`, `<textarea>`, or `<select>`) inside the body instead
+     * of the card itself. Use this for modals that exist to collect
+     * input — otherwise the user has to Tab into the field before
+     * typing. Default false preserves the "focus the card" behavior
+     * ConfirmDialog and LabelDetailsModal already rely on.
+     */
+    focusFirstInput?: boolean;
     children: Snippet;
   };
 
@@ -80,6 +98,8 @@
     ariaLabelledBy,
     zLayer = 'default',
     maxWidth = 'min(520px, calc(100vw - 32px))',
+    blockDismissal = false,
+    focusFirstInput = false,
     children,
   }: Props = $props();
 
@@ -112,27 +132,70 @@
   function onKeydown(e: KeyboardEvent): void {
     if (e.key !== 'Escape') return;
     if (modalStack[modalStack.length - 1] !== myId) return;
+    if (blockDismissal) return;
     e.stopPropagation();
+    onClose();
+  }
+
+  // Guarded dismiss entry point used by the backdrop + header close-×.
+  // Escape has its own guard above (needs early-return before
+  // stopPropagation).
+  function requestClose(): void {
+    if (blockDismissal) return;
     onClose();
   }
 
   let cardEl = $state<HTMLDivElement | null>(null);
 
+  // Element that was focused right before the modal opened. On close
+  // we return focus here so keyboard users don't lose their place in
+  // the tab order — required by WCAG 2.1 SC 3.2.1 (On Focus) for
+  // dialogs.
+  let previouslyFocusedEl: HTMLElement | null = null;
+
   // Mount/unmount side effects keyed on `open`. Using $effect so the lock
   // + listener cycle correctly when callers toggle `open` repeatedly.
   $effect(() => {
     if (open) {
+      previouslyFocusedEl =
+        typeof document !== 'undefined' &&
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
       applyScrollLock();
       modalStack.push(myId);
       window.addEventListener('keydown', onKeydown, true);
       // Defer focus to next microtask so the card is rendered before we
-      // ask the browser to focus it.
-      queueMicrotask(() => cardEl?.focus());
+      // ask the browser to focus it. When `focusFirstInput` is set,
+      // prefer the first enabled form control in the body — that's
+      // what a data-entry modal wants (no Tab required to start
+      // typing). Otherwise focus the card itself (matches the prior
+      // behavior ConfirmDialog / LabelDetailsModal rely on).
+      queueMicrotask(() => {
+        if (focusFirstInput && cardEl) {
+          const firstInput = cardEl.querySelector<HTMLElement>(
+            'input:not([disabled]), textarea:not([disabled]), select:not([disabled])',
+          );
+          if (firstInput) {
+            firstInput.focus();
+            return;
+          }
+        }
+        cardEl?.focus();
+      });
       return () => {
         window.removeEventListener('keydown', onKeydown, true);
         const idx = modalStack.indexOf(myId);
         if (idx >= 0) modalStack.splice(idx, 1);
         releaseScrollLock();
+        // Restore focus. Guard against the element having been removed
+        // from the DOM between open + close (e.g. route change, parent
+        // v-if flip) — in that case, silently drop.
+        const target = previouslyFocusedEl;
+        previouslyFocusedEl = null;
+        if (target && document.contains(target)) {
+          target.focus();
+        }
       };
     }
   });
@@ -158,7 +221,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="modal-backdrop modal-{zLayer}"
-    onclick={onClose}
+    onclick={requestClose}
   ></div>
   <div
     class="modal-card modal-{zLayer}"
@@ -175,8 +238,9 @@
         <button
           type="button"
           class="modal-close"
-          onclick={onClose}
+          onclick={requestClose}
           aria-label="Close"
+          disabled={blockDismissal}
         >×</button>
       </header>
     {/if}

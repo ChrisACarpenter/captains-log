@@ -462,6 +462,66 @@ impl Default for MailBodyDelivery {
     }
 }
 
+/// User-tunable display preferences for the landing-page task list.
+/// Wired into `list_tasks` on the frontend — the backend command
+/// itself returns every task in the current week's Plans body; these
+/// flags only affect what the UI shows and how it orders them.
+///
+/// Defaults are picked so an upgrade from a pre-Slice-4 settings.json
+/// doesn't surprise the user: `show_completed = true` (nothing
+/// disappears), `open_tasks_first = true` (the natural read order),
+/// `show_completed_timestamp = false` (extra chrome only if the user
+/// opts in).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListSettings {
+    /// When false, the landing-page task list hides `[x]` rows.
+    pub show_completed: bool,
+    /// When true, open tasks are sorted above completed ones. When
+    /// false, tasks appear in source-file order (matches the
+    /// Plans-and-priorities section as written).
+    pub open_tasks_first: bool,
+    /// When true, completed rows render a relative-time label
+    /// ("checked 2h ago"). Uses the `completed_at` sidecar value.
+    /// Off by default to keep the list visually tight.
+    pub show_completed_timestamp: bool,
+    /// When true, the entire task-list section is hidden from the
+    /// landing page. Escape hatch for users who don't use the
+    /// feature — everything else in the app keeps working.
+    #[serde(default)]
+    pub hide_task_list: bool,
+    /// Phase 3c Slice 5 — when true, incomplete tasks from the
+    /// previous ISO week are automatically copied forward into the
+    /// current week's Plans section on landing-page mount / focus /
+    /// week-transition. When false, no rollover ever fires; users
+    /// manage their carry-forward manually via the summary editor.
+    /// Default on: rollover is the whole point of the feature; off is
+    /// a kill switch for anyone who prefers a fresh slate each week.
+    #[serde(default = "default_true")]
+    pub auto_rollover_enabled: bool,
+}
+
+/// Serde-default helper: `#[serde(default)]` uses `Default::default()`
+/// on the field's type, which for `bool` is `false`. `auto_rollover`
+/// wants `true` as its missing-field fallback so upgrading from a
+/// pre-Slice-5 settings.json turns rollover ON, matching the fresh-
+/// install default.
+fn default_true() -> bool {
+    true
+}
+
+impl Default for TaskListSettings {
+    fn default() -> Self {
+        Self {
+            show_completed: true,
+            open_tasks_first: true,
+            show_completed_timestamp: false,
+            hide_task_list: false,
+            auto_rollover_enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JournalSettings {
@@ -533,6 +593,12 @@ pub struct JournalSettings {
     /// opts in from Settings > Theme.
     #[serde(default)]
     pub colorful_labels: bool,
+    /// Phase 3c Slice 4 — display preferences for the landing-page
+    /// task list. `#[serde(default)]` so a pre-Slice-4 settings.json
+    /// upgrades cleanly with the defaults documented on
+    /// [`TaskListSettings`].
+    #[serde(default)]
+    pub task_list: TaskListSettings,
 }
 
 impl Default for JournalSettings {
@@ -552,6 +618,7 @@ impl Default for JournalSettings {
             mail_outlook_flavor: OutlookFlavor::default(),
             mail_body_delivery: MailBodyDelivery::default(),
             colorful_labels: false,
+            task_list: TaskListSettings::default(),
         }
     }
 }
@@ -1217,6 +1284,102 @@ mod tests {
 
         let loaded = JournalSettings::load(&backend).await.unwrap();
         assert!(!loaded.colorful_labels);
+    }
+
+    #[test]
+    fn task_list_settings_defaults_match_documented_shape() {
+        // Locks in the Slice 4/5 defaults so a future refactor that
+        // flips one silently fails here rather than shipping.
+        let s = TaskListSettings::default();
+        assert!(s.show_completed);
+        assert!(s.open_tasks_first);
+        assert!(!s.show_completed_timestamp);
+        assert!(!s.hide_task_list);
+        assert!(s.auto_rollover_enabled);
+    }
+
+    #[tokio::test]
+    async fn journal_settings_legacy_without_task_list_loads_with_defaults() {
+        // Pre-Slice-4 settings.json files have no `task_list` field.
+        // serde(default) on JournalSettings.task_list is responsible
+        // for filling in TaskListSettings::default() when the field is
+        // absent. This test pins that contract so a future refactor
+        // that drops the attribute fails here.
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let legacy_json = r#"{
+          "version": 1,
+          "userName": "Chris",
+          "reminder": { "enabled": false, "daysOfWeek": [4], "hour": 16, "minute": 0 }
+        }"#;
+        backend
+            .write_metadata(JOURNAL_SETTINGS_FILENAME, legacy_json)
+            .await
+            .unwrap();
+
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert!(loaded.task_list.show_completed);
+        assert!(loaded.task_list.open_tasks_first);
+        assert!(!loaded.task_list.show_completed_timestamp);
+        assert!(!loaded.task_list.hide_task_list);
+        assert!(loaded.task_list.auto_rollover_enabled);
+    }
+
+    #[tokio::test]
+    async fn journal_settings_partial_task_list_loads_with_field_defaults() {
+        // A task_list block that predates the `hide_task_list` field
+        // must still parse — `#[serde(default)]` on the individual
+        // field carries the default when the JSON key is absent.
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let json_missing_hide = r#"{
+          "version": 1,
+          "userName": "Chris",
+          "reminder": { "enabled": false, "daysOfWeek": [4], "hour": 16, "minute": 0 },
+          "taskList": {
+            "showCompleted": true,
+            "openTasksFirst": true,
+            "showCompletedTimestamp": false
+          }
+        }"#;
+        backend
+            .write_metadata(JOURNAL_SETTINGS_FILENAME, json_missing_hide)
+            .await
+            .unwrap();
+
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert!(!loaded.task_list.hide_task_list);
+        // Missing `autoRolloverEnabled` in a partial task_list block
+        // must upgrade to the default (true), not to serde's bool
+        // default (false). Guard against accidental removal of the
+        // `#[serde(default = "default_true")]` attribute.
+        assert!(loaded.task_list.auto_rollover_enabled);
+    }
+
+    #[tokio::test]
+    async fn journal_settings_task_list_round_trips() {
+        // Saving with non-default toggles and reloading must preserve
+        // them — catches accidental snake_case vs camelCase drift on
+        // the nested struct's fields.
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let original = JournalSettings {
+            task_list: TaskListSettings {
+                show_completed: false,
+                open_tasks_first: false,
+                show_completed_timestamp: true,
+                hide_task_list: true,
+                auto_rollover_enabled: false,
+            },
+            ..JournalSettings::default()
+        };
+        original.save(&backend).await.unwrap();
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert!(!loaded.task_list.show_completed);
+        assert!(!loaded.task_list.open_tasks_first);
+        assert!(loaded.task_list.show_completed_timestamp);
+        assert!(loaded.task_list.hide_task_list);
+        assert!(!loaded.task_list.auto_rollover_enabled);
     }
 
     #[tokio::test]

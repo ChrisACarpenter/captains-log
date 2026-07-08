@@ -31,10 +31,15 @@ use crate::reminders::{
 use crate::sent_log::{
     get_sent_record as load_sent_record, hash_weekly_summary, upsert_sent_record, SentRecord,
 };
+use crate::tasks::{
+    append_task_to_plans, parse_plans_tasks, render_task_text_inline, toggle_checkbox_in_plans,
+    RolloverLog, TaskCompletion, TaskCompletions,
+};
 use crate::{DirtyEntry, DirtyRegistry};
 use crate::settings::{
     default_journal_root, AppSettings, CustomTheme, JournalSettings, MailBodyDelivery,
-    MailBodyFormat, MailSendMode, OutlookFlavor, ReminderSettings, Theme, CURRENT_VERSION,
+    MailBodyFormat, MailSendMode, OutlookFlavor, ReminderSettings, TaskListSettings, Theme,
+    CURRENT_VERSION,
 };
 use crate::storage::{LocalFilesystem, StorageBackend};
 use crate::SharedStorage;
@@ -1213,6 +1218,1007 @@ fn build_snippet(source: &str, match_start: usize, match_end: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// list_tasks
+// ---------------------------------------------------------------------------
+
+/// One row in the landing-page task-list view.
+///
+/// `year` + `week` identify the source file; `text_hash` + `ordinal`
+/// disambiguate within that week (two tasks with identical normalized
+/// text share the same hash and use `ordinal` 0, 1, 2, …). The
+/// frontend uses the composite `(year, week, textHash, ordinal)` tuple
+/// as a stable render key. See `tasks.rs` for the identity model.
+///
+/// `completed_at` is `None` for open tasks *and* for completed tasks
+/// that have no sidecar entry yet (e.g. the user checked the box in
+/// an external editor before Captain's Log ran). The UI treats
+/// `None` on a completed task as "no timestamp on record"; Slice 2's
+/// `toggle_task` will populate the sidecar going forward.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListEntry {
+    pub year: u32,
+    pub week: u32,
+    /// Task text as-written, no formatting stripped. Kept alongside
+    /// `text_html` so tests and downstream logic that need the raw
+    /// characters (e.g. re-normalizing, copy-to-clipboard) don't have
+    /// to unescape the rendered HTML.
+    pub text: String,
+    /// Sanitized inline HTML rendering of `text`. Safe to render via
+    /// Svelte's `{@html …}` — see [`crate::tasks::render_task_text_inline`]
+    /// for the pipeline (pulldown-cmark → ammonia inline-only allowlist).
+    pub text_html: String,
+    pub text_hash: String,
+    pub ordinal: u32,
+    pub is_completed: bool,
+    pub completed_at: Option<String>,
+    /// Slice 5 provenance surface. `Some(YearWeek)` when this task
+    /// row was rolled over from a prior week and that origin differs
+    /// from the current week; `None` for tasks that live in their
+    /// birth week or predate the provenance system. The frontend
+    /// uses this to render a "from W26" chip so users see which
+    /// entries carried forward.
+    pub original_week: Option<YearWeek>,
+}
+
+/// List every task in the current week's `### Plans and priorities
+/// for next week` subsection.
+///
+/// Scope for Slice 1: current ISO week only. Older weeks' incomplete
+/// tasks aren't surfaced here — Slice 5's week-rollover mechanism is
+/// what pulls carry-over tasks into the current week. If the current
+/// week's file doesn't exist or has an empty Plans section, returns
+/// an empty vector (the frontend renders an empty-state tip).
+///
+/// Reconciliation follows the markdown-wins-state, sidecar-wins-
+/// timestamp rule. This command is read-only — it never writes the
+/// sidecar. Any backfill of missing completion timestamps happens
+/// lazily when the user next toggles a task (Slice 2).
+#[tauri::command]
+pub async fn list_tasks(
+    storage_state: State<'_, SharedStorage>,
+) -> Result<Vec<TaskListEntry>, String> {
+    let storage = storage_state.read().await;
+    list_tasks_impl(&*storage).await
+}
+
+/// Trait-object-friendly impl seam for [`list_tasks`], mirroring the
+/// pattern established by `search_journal_impl`. Integration tests
+/// drive this directly against a `LocalFilesystem`.
+pub(crate) async fn list_tasks_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+) -> Result<Vec<TaskListEntry>, String> {
+    let YearWeek { year, week } = get_current_year_week();
+    let content = backend
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(content) = content else {
+        return Ok(Vec::new());
+    };
+    let summary = parse_weekly_summary(&content);
+    let parsed = parse_plans_tasks(&summary.plans_and_priorities);
+    if parsed.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Only load the sidecars when we actually have tasks to reconcile
+    // — the reads are cheap but the extra syscalls are wasted on empty
+    // weeks (the common case for a fresh journal).
+    let completions = TaskCompletions::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+    let rollover_log = RolloverLog::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let entries = parsed
+        .into_iter()
+        .map(|t| {
+            let completed_at = if t.is_completed {
+                completions
+                    .find(year, week, &t.text_hash, t.ordinal)
+                    .map(|c| c.completed_at.clone())
+            } else {
+                None
+            };
+            // Provenance surface: only report an `original_week` when
+            // it actually differs from the current week. A task in
+            // its birth week — the common case — reports `None` so
+            // the frontend doesn't render a redundant "from W28"
+            // chip on tasks that live in W28.
+            let original_week = rollover_log
+                .find(year, week, &t.text_hash, t.ordinal)
+                .filter(|p| p.original_year != year || p.original_week != week)
+                .map(|p| YearWeek {
+                    year: p.original_year,
+                    week: p.original_week,
+                });
+            let text_html = render_task_text_inline(&t.text);
+            TaskListEntry {
+                year,
+                week,
+                text: t.text,
+                text_html,
+                text_hash: t.text_hash,
+                ordinal: t.ordinal,
+                is_completed: t.is_completed,
+                completed_at,
+                original_week,
+            }
+        })
+        .collect();
+    Ok(entries)
+}
+
+// ---------------------------------------------------------------------------
+// toggle_task
+// ---------------------------------------------------------------------------
+
+/// Result of a successful [`toggle_task`] call. The frontend uses this
+/// to update the row in place — no full task-list refetch needed after
+/// a single click.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskToggleResult {
+    /// New checkbox state after the flip. Always the opposite of the
+    /// state observed at the time the frontend called this command.
+    pub is_completed: bool,
+    /// Sidecar timestamp for the new state:
+    /// `Some(rfc3339)` when we just checked a task,
+    /// `None` when we just un-checked it.
+    pub completed_at: Option<String>,
+}
+
+/// Flip a single task's checkbox in the source weekly file.
+///
+/// This is Phase 3c Slice 2's bidirectional-checkoff entry point. It:
+///
+/// 1. Reads the weekly file for `(year, week)`.
+/// 2. Parses the Weekly Summary and locates the task by
+///    `(text_hash, ordinal)` — the composite key `list_tasks`
+///    returns to the frontend.
+/// 3. Flips the checkbox marker byte in place (see
+///    [`toggle_checkbox_in_plans`] for the identity math), stamps a
+///    fresh `Last updated: …` line on the summary (matching
+///    `update_weekly_summary`'s format), and writes the file back
+///    via the storage backend's atomic-write path.
+/// 4. Updates `.metadata/task-completions.json`: inserts an entry
+///    with `completed_at = local RFC 3339 now` on check, drops any
+///    matching entry on uncheck.
+///
+/// **Failure surface.** If the task can't be found — the user
+/// probably edited the summary elsewhere between our read and their
+/// click — this returns `Err(…)`. The frontend should refresh the
+/// task list on error. No partial writes: either the file *and*
+/// sidecar both update, or neither does (the file write happens
+/// before the sidecar; a crash between them leaves the sidecar
+/// slightly stale, which `list_tasks` heals on next read via the
+/// markdown-wins-state rule).
+#[tauri::command]
+pub async fn toggle_task(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+    text_hash: String,
+    ordinal: u32,
+) -> Result<TaskToggleResult, String> {
+    // Write lock, not read, because we do a read-modify-write on the
+    // sidecar (load → mutate → save). Two concurrent toggle_task
+    // calls sharing a read lock could each load the same sidecar
+    // snapshot, mutate their own copy, and have the later save
+    // clobber the earlier one. Matches the pattern set by
+    // `create_note` (label index) and `set_label_color`.
+    let storage = storage_state.write().await;
+    toggle_task_impl(&*storage, year, week, &text_hash, ordinal).await
+}
+
+/// Trait-object seam for [`toggle_task`]. Integration tests drive this
+/// directly against a `LocalFilesystem`, mirroring `list_tasks_impl`.
+///
+/// **Concurrency contract.** This function is not safe against
+/// concurrent callers — the sidecar update is load → mutate → save
+/// without an internal lock. The [`toggle_task`] wrapper holds the
+/// SharedStorage `RwLock::write()` guard for the full call, which is
+/// what serializes real IPC traffic. Tests that drive this impl
+/// directly must not spawn concurrent invocations on the same
+/// backend.
+pub(crate) async fn toggle_task_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+    year: u32,
+    week: u32,
+    text_hash: &str,
+    ordinal: u32,
+) -> Result<TaskToggleResult, String> {
+    let content = backend
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("no weekly file for {year}-W{week:02}"))?;
+
+    let mut summary = parse_weekly_summary(&content);
+    let (new_plans, new_state) =
+        toggle_checkbox_in_plans(&summary.plans_and_priorities, text_hash, ordinal)?;
+    summary.plans_and_priorities = new_plans;
+    // Match `update_weekly_summary`'s stamp format so the /summary
+    // editor's "Last updated" indicator stays consistent between an
+    // in-editor save and a landing-page checkbox click.
+    let now = Local::now();
+    summary.last_updated = Some(now.format("%Y-%m-%d %H:%M").to_string());
+    let new_content = replace_weekly_summary_in_file(&content, &summary);
+    backend
+        .write_week(year, week, &new_content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Sidecar update — file write happens first so a crash between
+    // the two leaves markdown authoritative. `list_tasks` reconciles
+    // by markdown-wins-state on the next read.
+    let mut completions = TaskCompletions::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Drop any existing entry for this task, regardless of the new
+    // state — an entry that survives across a state change would
+    // stale-poison the reconciliation logic.
+    completions.completions.retain(|c| {
+        !(c.year == year && c.week == week && c.text_hash == text_hash && c.ordinal == ordinal)
+    });
+    let completed_at = if new_state {
+        let stamp = now.to_rfc3339();
+        completions.completions.push(TaskCompletion {
+            year,
+            week,
+            text_hash: text_hash.to_string(),
+            ordinal,
+            completed_at: stamp.clone(),
+        });
+        Some(stamp)
+    } else {
+        None
+    };
+    completions
+        .save(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(TaskToggleResult {
+        is_completed: new_state,
+        completed_at,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// append_task_to_current_week
+// ---------------------------------------------------------------------------
+
+/// Append a new open task to the current week's Plans-and-priorities
+/// subsection. The Slice 3 landing-page "+ Add task" modal calls this.
+///
+/// Scaffolds the weekly file when it doesn't exist yet (same pattern
+/// as `update_weekly_summary`) so the user can add their first task
+/// without having to open `/summary` first. Stamps `last_updated` to
+/// keep the summary indicator in sync with a landing-page mutation.
+/// Emits `weekly-file-changed` so any open editor window reloads.
+///
+/// Validation errors bubble up as-is — the frontend renders them
+/// inline inside the modal. See [`append_task_to_plans`] for the
+/// exact rules (empty text, embedded newlines, pre-existing prefix,
+/// length cap).
+#[tauri::command]
+pub async fn append_task_to_current_week(
+    app: AppHandle,
+    storage_state: State<'_, SharedStorage>,
+    text: String,
+) -> Result<(), String> {
+    // Write lock, matching toggle_task's reasoning: this is a
+    // read-modify-write on the summary section, so two concurrent
+    // append calls sharing a read lock could each load the same
+    // Plans body, splice their own task, and have the later write
+    // silently drop the earlier task.
+    let storage = storage_state.write().await;
+    let YearWeek { year, week } = get_current_year_week();
+    append_task_to_current_week_impl(&*storage, year, week, &text).await?;
+    emit_weekly_file_changed(&app, year, week);
+    Ok(())
+}
+
+/// Trait-object seam for [`append_task_to_current_week`]. Tests drive
+/// this directly against a `LocalFilesystem`, mirroring `list_tasks_impl`
+/// and `toggle_task_impl`.
+///
+/// **Concurrency contract.** As with `toggle_task_impl`, this is not
+/// safe against concurrent callers — the read-modify-write against
+/// the weekly file has no internal lock. The command wrapper's
+/// `RwLock::write()` guard is what serializes real IPC traffic.
+pub(crate) async fn append_task_to_current_week_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+    year: u32,
+    week: u32,
+    text: &str,
+) -> Result<(), String> {
+    let now = Local::now().fixed_offset();
+    let content = backend
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // If the file doesn't exist yet, scaffold it — same pattern as
+    // `update_weekly_summary`. The user shouldn't have to open the
+    // summary editor once just to unlock task creation.
+    let base = match content {
+        Some(c) => c,
+        None => weekly_file_scaffold(year, week, now),
+    };
+
+    let mut summary = parse_weekly_summary(&base);
+    let new_plans = append_task_to_plans(&summary.plans_and_priorities, text)?;
+    summary.plans_and_priorities = new_plans.clone();
+    summary.last_updated = Some(now.format("%Y-%m-%d %H:%M").to_string());
+    let new_content = replace_weekly_summary_in_file(&base, &summary);
+
+    backend
+        .write_week(year, week, &new_content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Slice 5 — seed provenance for the newly-appended task so the
+    // rollover code path has a known `originalWeek` when it copies
+    // this task forward. Failing to write the sidecar is logged but
+    // NOT propagated: the markdown write already succeeded, so the
+    // task exists; the worst case is a task without provenance,
+    // which the rebuild command can backfill later. The whole
+    // sequence runs under the command wrapper's write lock so we
+    // don't need internal serialization.
+    if let Some(new_task) = parse_plans_tasks(&new_plans).last().cloned() {
+        match RolloverLog::load(backend).await {
+            Ok(mut log) => {
+                log.upsert(crate::tasks::TaskProvenance {
+                    year,
+                    week,
+                    text_hash: new_task.text_hash,
+                    ordinal: new_task.ordinal,
+                    original_year: year,
+                    original_week: week,
+                    original_created_at: now.to_rfc3339(),
+                });
+                if let Err(e) = log.save(backend).await {
+                    eprintln!(
+                        "[append_task] rollover-log save failed: {e} (markdown is authoritative; rebuild will backfill)"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[append_task] rollover-log load failed: {e} (skipping provenance seed; rebuild will backfill)"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// rebuild_task_completions_index
+// ---------------------------------------------------------------------------
+
+/// Report from a [`rebuild_task_completions_index`] pass. Surfaced by
+/// the Settings > Tasks tab's Rebuild button so the user gets a
+/// receipt of what changed on disk.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRebuildResult {
+    pub files_scanned: u32,
+    pub tasks_scanned: u32,
+    /// Number of NEW sidecar entries we wrote because markdown had
+    /// `[x]` but the sidecar didn't know about it (user checked in
+    /// an external editor before Captain's Log ran, or the sidecar
+    /// file was deleted).
+    pub entries_backfilled: u32,
+    /// Number of sidecar entries we removed because markdown either
+    /// doesn't have that task anymore or the task's checkbox flipped
+    /// back to `[ ]` outside of Captain's Log.
+    pub entries_pruned: u32,
+    /// Number of stranded incomplete tasks (open `[ ]` items in any
+    /// non-current weekly file, not already present in the current
+    /// week's Plans body) that Rebuild copied forward into the
+    /// current week. Complements the auto-rollover mechanism which
+    /// only looks at the immediately-previous week — Rebuild is the
+    /// bulk "sync everything up" escape hatch.
+    pub tasks_swept_forward: u32,
+    pub duration_ms: u64,
+    pub failed_files: Vec<String>,
+}
+
+/// Reconcile `.metadata/task-completions.json` against every weekly
+/// file on disk.
+///
+/// Slice 4's "Rebuild task index" Settings button — the user's
+/// escape hatch when the sidecar and markdown drift. Two things
+/// happen in one atomic write:
+///
+/// - **Backfill**: for every `[x]` task in every week, if there's no
+///   matching sidecar entry we synthesize one with
+///   `completed_at = file mtime` converted to RFC 3339. All backfilled
+///   tasks in a single week share that week's mtime, so the timestamp
+///   is coarse — but it's better than the current `null` for tasks
+///   checked externally.
+/// - **Prune**: sidecar entries whose task no longer exists as `[x]`
+///   in markdown (task deleted, or un-checked in an external editor)
+///   are removed. The reconciliation rule is markdown-wins-state.
+///
+/// Sidecar entries that ARE present and match a live `[x]` task keep
+/// their original `completed_at` — sidecar wins for timestamps.
+///
+/// Follows `rebuild_label_index`'s partial-failure posture:
+/// per-file errors log to eprintln and land in `failed_files`; only
+/// the final atomic write of the sidecar is allowed to bubble up as
+/// `Err`.
+#[tauri::command]
+pub async fn rebuild_task_completions_index(
+    app: AppHandle,
+    storage_state: State<'_, SharedStorage>,
+) -> Result<TaskRebuildResult, String> {
+    // Write lock for the same reason as `toggle_task` — read-modify-
+    // write on the sidecar can't share the lock with concurrent
+    // toggles / appends.
+    let storage = storage_state.write().await;
+    let result = rebuild_task_completions_index_impl(&*storage).await?;
+    // The sidecar just changed but no weekly file did — a dedicated
+    // event tells any open landing page to refetch list_tasks so
+    // freshly-backfilled `completed_at` timestamps become visible
+    // without a page reload.
+    let _ = app.emit("task-index-rebuilt", ());
+    Ok(result)
+}
+
+pub(crate) async fn rebuild_task_completions_index_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+) -> Result<TaskRebuildResult, String> {
+    use crate::tasks::{TaskCompletion, TaskProvenance};
+    use std::collections::{HashMap, HashSet};
+
+    let start = std::time::Instant::now();
+    let now = Local::now().fixed_offset();
+    let YearWeek {
+        year: current_year,
+        week: current_week,
+    } = get_current_year_week();
+
+    // Load whatever's already on disk so sidecar-wins-for-timestamps
+    // holds for the entries that DO match a live `[x]` task.
+    let existing = TaskCompletions::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+    let original_entry_count = existing.completions.len();
+    let existing_map: HashMap<(u32, u32, String, u32), TaskCompletion> = existing
+        .completions
+        .into_iter()
+        .map(|c| ((c.year, c.week, c.text_hash.clone(), c.ordinal), c))
+        .collect();
+
+    // Walk every week newest-first. For each `[x]` task we either
+    // adopt the existing sidecar entry or synthesize a new one from
+    // the source file's mtime.
+    let mut expected_keys: HashSet<(u32, u32, String, u32)> = HashSet::new();
+    let mut new_entries: Vec<TaskCompletion> = Vec::new();
+    let mut files_scanned: u32 = 0;
+    let mut tasks_scanned: u32 = 0;
+    let mut entries_backfilled: u32 = 0;
+    let mut failed_files: Vec<String> = Vec::new();
+    // (year, week) → file mtime formatted as RFC 3339. Cached so we
+    // only pay the metadata syscall on weeks that actually need
+    // backfill, and only once per week even with many completed tasks.
+    let mut week_mtimes: HashMap<(u32, u32), Option<String>> = HashMap::new();
+
+    // Sweep-forward staging (Slice 5b — direct-to-current escape
+    // hatch). `open_first_seen` tracks the earliest week each unique
+    // task-hash appeared as `[ ]` in a non-current file; we walk
+    // ascending so the first insert wins. `current_week_hashes` is
+    // used to dedup: a stranded task already present in the current
+    // week (because auto-rollover already carried it or the user
+    // manually added it) doesn't get a second copy.
+    struct SweepCandidate {
+        source_year: u32,
+        source_week: u32,
+        source_ordinal: u32,
+        text: String,
+    }
+    let mut open_first_seen: HashMap<String, SweepCandidate> = HashMap::new();
+    let mut current_week_hashes: HashSet<String> = HashSet::new();
+
+    let years = backend.list_years().await.map_err(|e| e.to_string())?;
+    for year in years {
+        let weeks = match backend.list_weeks(year).await {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("[rebuild_tasks] list_weeks({year}) failed: {e}");
+                continue;
+            }
+        };
+        for week in weeks {
+            let pretty_path = format!("{year:04}/{year:04}-W{week:02}.md");
+            let content = match backend.read_week(year, week).await {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    files_scanned = files_scanned.saturating_add(1);
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("[rebuild_tasks] read_week({year},{week}) failed: {e}");
+                    failed_files.push(pretty_path);
+                    continue;
+                }
+            };
+            files_scanned = files_scanned.saturating_add(1);
+            let summary = parse_weekly_summary(&content);
+            let tasks = parse_plans_tasks(&summary.plans_and_priorities);
+            let is_current_week = year == current_year && week == current_week;
+            for t in &tasks {
+                tasks_scanned = tasks_scanned.saturating_add(1);
+                if t.is_completed {
+                    let key = (year, week, t.text_hash.clone(), t.ordinal);
+                    expected_keys.insert(key.clone());
+                    if existing_map.contains_key(&key) {
+                        // Sidecar wins for timestamps on entries we
+                        // already know about; the merge step below
+                        // pulls the original entry back into `kept`.
+                        continue;
+                    }
+                    // Backfill — resolve the week's mtime lazily.
+                    let stamp = match week_mtimes.get(&(year, week)) {
+                        Some(cached) => cached.clone(),
+                        None => {
+                            let stamp = match backend.week_mtime(year, week).await {
+                                Ok(Some(t)) => Some(system_time_to_rfc3339(t)),
+                                Ok(None) => None,
+                                Err(e) => {
+                                    eprintln!(
+                                        "[rebuild_tasks] week_mtime({year},{week}) failed: {e}"
+                                    );
+                                    None
+                                }
+                            };
+                            week_mtimes.insert((year, week), stamp.clone());
+                            stamp
+                        }
+                    };
+                    // No mtime available (file vanished mid-scan or the
+                    // backend doesn't support it) → skip. Fabricating a
+                    // `now` timestamp would misrepresent when the task
+                    // was completed, so we leave it null-in-sidecar and
+                    // list_tasks will surface `completed_at: None`.
+                    let Some(completed_at) = stamp else { continue };
+                    new_entries.push(TaskCompletion {
+                        year,
+                        week,
+                        text_hash: t.text_hash.clone(),
+                        ordinal: t.ordinal,
+                        completed_at,
+                    });
+                    entries_backfilled = entries_backfilled.saturating_add(1);
+                } else if is_current_week {
+                    // Track current-week hashes so we can dedup the
+                    // sweep against tasks already present here.
+                    current_week_hashes.insert(t.text_hash.clone());
+                } else {
+                    // `[ ]` in a non-current week → sweep candidate.
+                    // First-seen wins because we walk years+weeks
+                    // ascending, so the earliest source becomes the
+                    // provenance origin.
+                    open_first_seen
+                        .entry(t.text_hash.clone())
+                        .or_insert(SweepCandidate {
+                            source_year: year,
+                            source_week: week,
+                            source_ordinal: t.ordinal,
+                            text: t.text.clone(),
+                        });
+                }
+            }
+        }
+    }
+
+    // Merge: intersection of existing_map's entries with expected_keys,
+    // plus the fresh backfills. Anything in existing_map whose key
+    // isn't in expected_keys is dropped (pruned).
+    let mut kept: Vec<TaskCompletion> = existing_map
+        .into_iter()
+        .filter_map(|(key, c)| expected_keys.contains(&key).then_some(c))
+        .collect();
+    let entries_pruned: u32 =
+        (original_entry_count as u64).saturating_sub(kept.len() as u64) as u32;
+    kept.append(&mut new_entries);
+    kept.sort_by(|a, b| {
+        (a.year, a.week, &a.text_hash, a.ordinal)
+            .cmp(&(b.year, b.week, &b.text_hash, b.ordinal))
+    });
+
+    let new_index = TaskCompletions {
+        version: 1,
+        completions: kept,
+    };
+    new_index.save(backend).await.map_err(|e| e.to_string())?;
+
+    // -----------------------------------------------------------------
+    // Sweep phase — copy stranded incomplete tasks directly into the
+    // current week. Runs regardless of the auto-rollover toggle:
+    // Rebuild is an explicit user action and this is the whole point.
+    // -----------------------------------------------------------------
+    // Dedup vs the target: tasks already in current week don't get a
+    // second copy. Walk `open_first_seen` in a stable order so the
+    // resulting Plans body is deterministic across runs.
+    let mut to_sweep: Vec<(String, SweepCandidate)> = open_first_seen
+        .into_iter()
+        .filter(|(hash, _)| !current_week_hashes.contains(hash))
+        .collect();
+    to_sweep.sort_by(|(_, a), (_, b)| {
+        (a.source_year, a.source_week, a.source_ordinal)
+            .cmp(&(b.source_year, b.source_week, b.source_ordinal))
+    });
+
+    let mut tasks_swept_forward: u32 = 0;
+    if !to_sweep.is_empty() {
+        // Read the current week's file (scaffold if missing —
+        // matches append_task's posture so an empty new week
+        // isn't a wall).
+        let base = match backend
+            .read_week(current_year, current_week)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(c) => c,
+            None => weekly_file_scaffold(current_year, current_week, now),
+        };
+        let mut summary = parse_weekly_summary(&base);
+        let mut new_plans = summary.plans_and_priorities.clone();
+
+        // Load rollover-log so we can inherit provenance from the
+        // source-week entry (multi-hop preservation) rather than
+        // resetting to the source week.
+        let mut rollover_log = RolloverLog::load(backend)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        for (hash, cand) in &to_sweep {
+            new_plans = match append_task_to_plans(&new_plans, &cand.text) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "[rebuild_tasks] sweep failed to append {:?}: {e}",
+                        cand.text
+                    );
+                    continue;
+                }
+            };
+            tasks_swept_forward = tasks_swept_forward.saturating_add(1);
+
+            // Determine provenance for the new copy:
+            //  - If the source-week entry has provenance, inherit
+            //    original_* (the task might itself have rolled to
+            //    the source from an even earlier week).
+            //  - Otherwise the source week IS the origin.
+            let (origin_year, origin_week, origin_at) = match rollover_log.find(
+                cand.source_year,
+                cand.source_week,
+                hash,
+                cand.source_ordinal,
+            ) {
+                Some(p) => (
+                    p.original_year,
+                    p.original_week,
+                    p.original_created_at.clone(),
+                ),
+                None => (cand.source_year, cand.source_week, now.to_rfc3339()),
+            };
+            rollover_log.upsert(TaskProvenance {
+                year: current_year,
+                week: current_week,
+                text_hash: hash.clone(),
+                // The append produced ordinal 0 in the target (the
+                // dedup guaranteed no prior entry with this hash).
+                ordinal: 0,
+                original_year: origin_year,
+                original_week: origin_week,
+                original_created_at: origin_at,
+            });
+        }
+
+        if tasks_swept_forward > 0 {
+            summary.plans_and_priorities = new_plans;
+            summary.last_updated =
+                Some(now.format("%Y-%m-%d %H:%M").to_string());
+            let new_content = replace_weekly_summary_in_file(&base, &summary);
+            backend
+                .write_week(current_year, current_week, &new_content)
+                .await
+                .map_err(|e| e.to_string())?;
+            rollover_log
+                .save(backend)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(TaskRebuildResult {
+        files_scanned,
+        tasks_scanned,
+        entries_backfilled,
+        entries_pruned,
+        tasks_swept_forward,
+        duration_ms: start.elapsed().as_millis() as u64,
+        failed_files,
+    })
+}
+
+/// Format a `SystemTime` as an RFC 3339 timestamp in the local
+/// timezone. Matches `toggle_task`'s `completed_at` shape so a
+/// backfilled entry can't be visually distinguished from a
+/// freshly-toggled one at the field level.
+fn system_time_to_rfc3339(t: std::time::SystemTime) -> String {
+    let utc: chrono::DateTime<chrono::Utc> = t.into();
+    let local: chrono::DateTime<chrono::Local> = utc.into();
+    local.to_rfc3339()
+}
+
+// ---------------------------------------------------------------------------
+// check_and_apply_rollover
+// ---------------------------------------------------------------------------
+
+/// Result of a [`check_and_apply_rollover`] call. Non-zero
+/// `tasks_copied` populates the toast on the landing page; zero (or
+/// `applied == false`) suppresses it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RolloverApplied {
+    /// True when this call actually wrote to the current week. False
+    /// when the log's `last_run_to_week` already matched, or the
+    /// source week had no open tasks to move.
+    pub applied: bool,
+    /// Number of open tasks copied from the source week into the
+    /// current week. Zero when applied=true is possible (source had
+    /// tasks but all were already present in target after dedup).
+    pub tasks_copied: u32,
+    /// The week we pulled from. `None` when nothing was applied (no
+    /// source file, no open tasks) so the frontend can suppress the
+    /// receipt tail ("from last week").
+    pub source_week: Option<YearWeek>,
+    /// The current week — always set, even when applied=false, so
+    /// the frontend can log rollover attempts for debugging.
+    pub target_week: YearWeek,
+}
+
+/// Automatically copy incomplete tasks from the previous ISO week into
+/// the current week's Plans section. Slice 5's rollover — the
+/// landing page invokes this on mount, on focus, on visibility
+/// change, and periodically while focused; the command is idempotent
+/// via the `rollover-log.json` sidecar so repeated calls are cheap.
+///
+/// **Locked semantics** (see `project_captains_log_rollover_design`
+/// memory):
+///
+/// - **Source** = ISO week immediately preceding the current one. If
+///   that week's file doesn't exist, no-op.
+/// - **Copy, don't move** — tasks stay in the source week's file too.
+///   Historical files are sacred.
+/// - **Only open** (`[ ]`) tasks are copied. Completed tasks stay
+///   put as record.
+/// - **Dedup by text_hash** — a task with the same normalized text
+///   already in the current week is skipped so double-runs and
+///   manual re-entries never duplicate.
+/// - **Provenance preserved** — the copy inherits the source's
+///   `original_year` / `original_week` / `original_created_at`, so a
+///   task pulled through 3 weeks still points back to its birth
+///   week, not its immediate predecessor.
+#[tauri::command]
+pub async fn check_and_apply_rollover(
+    app: AppHandle,
+    storage_state: State<'_, SharedStorage>,
+) -> Result<RolloverApplied, String> {
+    // Write lock — this is a read-modify-write on both the current
+    // week's file and the rollover-log sidecar. Same rationale as
+    // toggle_task / append_task.
+    let storage = storage_state.write().await;
+    let result = check_and_apply_rollover_impl(&*storage).await?;
+    if result.applied && result.tasks_copied > 0 {
+        // Weekly file mutated — tell any open editor / listener to
+        // reload.
+        emit_weekly_file_changed(&app, result.target_week.year, result.target_week.week);
+    }
+    // Always emit the rollover-applied event (even when applied=false)
+    // so the landing page can log check attempts + surface toast on
+    // real applies. The payload's `applied` + `tasksCopied` fields
+    // let the receiver decide whether to render UI.
+    let _ = app.emit("rollover-applied", &result);
+    Ok(result)
+}
+
+pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+) -> Result<RolloverApplied, String> {
+    use crate::notes::iso_previous_year_week;
+    use crate::tasks::{TaskProvenance, YearWeekKey};
+
+    let now = Local::now().fixed_offset();
+    let YearWeek { year, week } = get_current_year_week();
+    let target = YearWeek { year, week };
+
+    // Idempotency: if the log already records this exact target
+    // week, we've rolled over for this ISO week already. Cheap
+    // no-op on repeated triggers from focus / visibility events.
+    let mut log = RolloverLog::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+    if log.last_run_to_week
+        == Some(YearWeekKey { year, week })
+    {
+        return Ok(RolloverApplied {
+            applied: false,
+            tasks_copied: 0,
+            source_week: None,
+            target_week: target,
+        });
+    }
+
+    let (source_year, source_week) = iso_previous_year_week(year, week);
+
+    // Source file missing → nothing to roll over. Still mark the
+    // log's last_run_to_week so we don't retry on every focus event
+    // for the rest of the week.
+    let source_content = backend
+        .read_week(source_year, source_week)
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(source_content) = source_content else {
+        log.last_run_to_week = Some(YearWeekKey { year, week });
+        log.last_run_at = Some(now.to_rfc3339());
+        log.save(backend).await.map_err(|e| e.to_string())?;
+        return Ok(RolloverApplied {
+            applied: true,
+            tasks_copied: 0,
+            source_week: None,
+            target_week: target,
+        });
+    };
+
+    let source_summary = parse_weekly_summary(&source_content);
+    let source_tasks = parse_plans_tasks(&source_summary.plans_and_priorities);
+    let open_source_tasks: Vec<_> = source_tasks
+        .iter()
+        .filter(|t| !t.is_completed)
+        .cloned()
+        .collect();
+
+    // Read the target (current) week file. Scaffold if missing —
+    // matches append_task_to_current_week's posture so the user
+    // opening a fresh week doesn't hit a "no file" wall.
+    let target_content = backend
+        .read_week(year, week)
+        .await
+        .map_err(|e| e.to_string())?;
+    let target_base = match target_content {
+        Some(c) => c,
+        None => weekly_file_scaffold(year, week, now),
+    };
+    let mut target_summary = parse_weekly_summary(&target_base);
+    let existing_target_hashes: std::collections::HashSet<String> =
+        parse_plans_tasks(&target_summary.plans_and_priorities)
+            .into_iter()
+            .map(|t| t.text_hash)
+            .collect();
+
+    // For each source open-task not already present in the target,
+    // append `- [ ] {text}` and carry provenance forward.
+    let mut new_plans = target_summary.plans_and_priorities.clone();
+    let mut tasks_copied: u32 = 0;
+    for src in &open_source_tasks {
+        if existing_target_hashes.contains(&src.text_hash) {
+            continue;
+        }
+        // Append via the same helper the manual-add path uses so
+        // whitespace/newline rules stay identical.
+        new_plans = match append_task_to_plans(&new_plans, &src.text) {
+            Ok(p) => p,
+            Err(e) => {
+                // Extremely unlikely (validation is on user input,
+                // not on parser output) but log + skip rather than
+                // abort — one bad line shouldn't block the rest.
+                eprintln!(
+                    "[rollover] failed to append {:?}: {e}",
+                    src.text
+                );
+                continue;
+            }
+        };
+        tasks_copied = tasks_copied.saturating_add(1);
+
+        // Provenance: if the source task has a provenance entry we
+        // inherit `original_*` from it; otherwise the source week
+        // itself is the origin (best-effort for pre-Slice-5 tasks).
+        let provenance = match log.find(
+            source_year,
+            source_week,
+            &src.text_hash,
+            src.ordinal,
+        ) {
+            Some(p) => TaskProvenance {
+                year,
+                week,
+                text_hash: src.text_hash.clone(),
+                ordinal: existing_ordinal_for(&new_plans, &src.text),
+                original_year: p.original_year,
+                original_week: p.original_week,
+                original_created_at: p.original_created_at.clone(),
+            },
+            None => TaskProvenance {
+                year,
+                week,
+                text_hash: src.text_hash.clone(),
+                ordinal: existing_ordinal_for(&new_plans, &src.text),
+                original_year: source_year,
+                original_week: source_week,
+                original_created_at: now.to_rfc3339(),
+            },
+        };
+        log.upsert(provenance);
+    }
+
+    // If nothing actually changed, still record the run so we don't
+    // retry all week — but don't touch the weekly file.
+    if tasks_copied == 0 {
+        log.last_run_to_week = Some(YearWeekKey { year, week });
+        log.last_run_at = Some(now.to_rfc3339());
+        log.save(backend).await.map_err(|e| e.to_string())?;
+        return Ok(RolloverApplied {
+            applied: true,
+            tasks_copied: 0,
+            source_week: Some(YearWeek {
+                year: source_year,
+                week: source_week,
+            }),
+            target_week: target,
+        });
+    }
+
+    // Write the target file with the appended tasks + fresh
+    // last_updated stamp.
+    target_summary.plans_and_priorities = new_plans;
+    target_summary.last_updated = Some(now.format("%Y-%m-%d %H:%M").to_string());
+    let new_content = replace_weekly_summary_in_file(&target_base, &target_summary);
+    backend
+        .write_week(year, week, &new_content)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    log.last_run_to_week = Some(YearWeekKey { year, week });
+    log.last_run_at = Some(now.to_rfc3339());
+    log.save(backend).await.map_err(|e| e.to_string())?;
+
+    Ok(RolloverApplied {
+        applied: true,
+        tasks_copied,
+        source_week: Some(YearWeek {
+            year: source_year,
+            week: source_week,
+        }),
+        target_week: target,
+    })
+}
+
+/// After appending a task text via `append_task_to_plans`, find the
+/// ordinal the new instance was assigned. Re-parses the resulting
+/// Plans body — cheap, and it keeps the ordinal math in one place
+/// (`parse_plans_tasks`) rather than reimplementing it here.
+fn existing_ordinal_for(new_plans: &str, source_text: &str) -> u32 {
+    use crate::tasks::{hash_task_text, normalize_task_text};
+    let target_hash = hash_task_text(&normalize_task_text(source_text));
+    parse_plans_tasks(new_plans)
+        .into_iter()
+        .filter(|t| t.text_hash == target_hash)
+        .last()
+        .map(|t| t.ordinal)
+        .unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
 // rename_label
 // ---------------------------------------------------------------------------
 
@@ -1789,7 +2795,7 @@ fn rebuild_chunk_for_delete(
 // Weekly Summary
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct YearWeek {
     pub year: u32,
@@ -1852,6 +2858,24 @@ pub async fn update_weekly_summary(
     input: UpdateWeeklySummaryInput,
 ) -> Result<(), String> {
     let now = Local::now().fixed_offset();
+
+    let storage = storage_state.read().await;
+
+    let existing = storage
+        .read_week(input.year, input.week)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Slice 6a: /summary edits the four prose fields + labels, but the
+    // `### Tasks` section is managed exclusively from the landing page.
+    // Preserve whatever `tasks_body` currently lives on disk so a
+    // summary save doesn't clobber the task list.
+    let preserved_tasks_body = existing
+        .as_deref()
+        .map(parse_weekly_summary)
+        .map(|s| s.tasks_body)
+        .unwrap_or_default();
+
     let new_summary = WeeklySummary {
         key_accomplishments: input.key_accomplishments,
         plans_and_priorities: input.plans_and_priorities,
@@ -1863,15 +2887,9 @@ pub async fn update_weekly_summary(
             .map(|l| l.trim().trim_start_matches('#').to_string())
             .filter(|l| !l.is_empty())
             .collect(),
+        tasks_body: preserved_tasks_body,
         last_updated: Some(now.format("%Y-%m-%d %H:%M").to_string()),
     };
-
-    let storage = storage_state.read().await;
-
-    let existing = storage
-        .read_week(input.year, input.week)
-        .await
-        .map_err(|e| e.to_string())?;
 
     let updated = match existing {
         Some(content) => replace_weekly_summary_in_file(&content, &new_summary),
@@ -1967,6 +2985,10 @@ pub struct SettingsBundle {
     /// per-label color instead of the flat theme accent. Defaults to
     /// false on a fresh install; the user opts in from Settings > Theme.
     pub colorful_labels: bool,
+    /// Phase 3c Slice 4 — display preferences for the landing-page
+    /// task list. See `settings::TaskListSettings` for the field-level
+    /// docs + defaults.
+    pub task_list: TaskListSettings,
 }
 
 #[tauri::command]
@@ -2012,6 +3034,7 @@ pub async fn get_settings(
         mail_outlook_flavor: journal_settings.mail_outlook_flavor,
         mail_body_delivery: journal_settings.mail_body_delivery,
         colorful_labels: journal_settings.colorful_labels,
+        task_list: journal_settings.task_list,
     })
 }
 
@@ -2117,6 +3140,11 @@ pub struct UpdateSettingsInput {
     /// frontends that omit the field don't accidentally turn it on.
     #[serde(default)]
     pub colorful_labels: bool,
+    /// Tasks tab (Slice 4) — display prefs for the landing-page task
+    /// list. `#[serde(default)]` so a frontend that hasn't picked up
+    /// the new tab yet still round-trips other settings.
+    #[serde(default)]
+    pub task_list: TaskListSettings,
 }
 
 /// Writes both settings files. If the user picked a journal root different
@@ -2288,6 +3316,7 @@ pub async fn update_settings(
         mail_outlook_flavor: input.mail_outlook_flavor,
         mail_body_delivery: input.mail_body_delivery,
         colorful_labels: input.colorful_labels,
+        task_list: input.task_list.clone(),
     };
     journal_settings
         .save(&chosen_storage)
@@ -4986,6 +6015,1452 @@ mod tests {
         let after_idx = LabelIndex::load(&backend).await.unwrap();
         assert_eq!(before_idx.labels.len(), after_idx.labels.len());
         assert!(after_idx.labels.iter().any(|e| e.name == "planning"));
+    }
+
+    // ---------------------------------------------------------------------
+    // list_tasks tests
+    // ---------------------------------------------------------------------
+    //
+    // `list_tasks_impl` reads the **current** ISO week's file, so the test
+    // seeds fixtures at whatever `get_current_year_week()` reports. That
+    // makes these tests non-deterministic in terms of file path (the
+    // date-of-run picks the folder), but the behavior under test —
+    // parsing + reconciliation — is fully covered.
+
+    #[tokio::test]
+    async fn list_tasks_returns_empty_when_no_weekly_file_exists() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tasks_returns_empty_when_plans_section_has_no_tasks() {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities: "just some prose, no checkboxes".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_tasks_extracts_open_and_completed_from_current_week() {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities: "- [ ] Write the doc\n- [x] Ship the thing".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].year, year);
+        assert_eq!(tasks[0].week, week);
+        assert_eq!(tasks[0].text, "Write the doc");
+        assert!(!tasks[0].is_completed);
+        assert!(tasks[0].completed_at.is_none());
+        assert_eq!(tasks[1].text, "Ship the thing");
+        assert!(tasks[1].is_completed);
+        // No sidecar → no timestamp yet.
+        assert!(tasks[1].completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_tasks_exposes_original_week_only_when_rolled_over() {
+        // Provenance surface contract: `original_week` is Some only
+        // when the task's origin differs from the current week. A
+        // task born in the current week reports None so the frontend
+        // doesn't render a spurious "from Wxx" chip.
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{
+            hash_task_text, normalize_task_text, RolloverLog, TaskProvenance,
+        };
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-08T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities:
+                "- [ ] Rolled over task\n- [ ] Born this week".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        // Seed provenance: first task carries origin from a prior
+        // week (year, week - 3); second task's origin is the current
+        // week itself.
+        let rolled_hash =
+            hash_task_text(&normalize_task_text("Rolled over task"));
+        let native_hash =
+            hash_task_text(&normalize_task_text("Born this week"));
+        let log = RolloverLog {
+            version: 1,
+            last_run_to_week: None,
+            last_run_at: None,
+            provenance: vec![
+                TaskProvenance {
+                    year,
+                    week,
+                    text_hash: rolled_hash,
+                    ordinal: 0,
+                    original_year: year,
+                    original_week: week.saturating_sub(3).max(1),
+                    original_created_at: "2026-06-15T09:00:00-04:00"
+                        .to_string(),
+                },
+                TaskProvenance {
+                    year,
+                    week,
+                    text_hash: native_hash,
+                    ordinal: 0,
+                    original_year: year,
+                    original_week: week,
+                    original_created_at: "2026-07-08T09:00:00-04:00"
+                        .to_string(),
+                },
+            ],
+        };
+        log.save(&backend).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+
+        let rolled = tasks.iter().find(|t| t.text == "Rolled over task").unwrap();
+        let native = tasks.iter().find(|t| t.text == "Born this week").unwrap();
+
+        // Rolled-over task exposes its origin.
+        let origin = rolled.original_week.expect("rolled task carries origin");
+        assert_eq!(origin.year, year);
+        assert_eq!(origin.week, week.saturating_sub(3).max(1));
+
+        // Native-to-this-week task suppresses the origin field so the
+        // frontend doesn't render a redundant "from W28" chip on a
+        // task in W28.
+        assert!(
+            native.original_week.is_none(),
+            "born-this-week task should not carry origin: {:?}",
+            native.original_week
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_returns_sidecar_timestamp_for_matching_completion() {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities: "- [x] Ship the thing".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        // Seed the sidecar with a matching completion timestamp.
+        let hash = hash_task_text(&normalize_task_text("Ship the thing"));
+        let idx = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year,
+                week,
+                text_hash: hash,
+                ordinal: 0,
+                completed_at: "2026-07-05T18:00:00-04:00".to_string(),
+            }],
+        };
+        idx.save(&backend).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].is_completed);
+        assert_eq!(
+            tasks[0].completed_at.as_deref(),
+            Some("2026-07-05T18:00:00-04:00")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_ignores_stale_sidecar_entries_for_unchecked_tasks() {
+        // Markdown wins for state: if the user un-checked a task
+        // externally, the stale sidecar timestamp must NOT resurrect the
+        // completed indicator. `completed_at` should be `None`.
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            // Note: `[ ]` — task is open in markdown.
+            plans_and_priorities: "- [ ] Ship the thing".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        let hash = hash_task_text(&normalize_task_text("Ship the thing"));
+        let idx = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year,
+                week,
+                text_hash: hash,
+                ordinal: 0,
+                completed_at: "2026-07-05T18:00:00-04:00".to_string(),
+            }],
+        };
+        idx.save(&backend).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert!(!tasks[0].is_completed, "markdown wins for state");
+        assert!(
+            tasks[0].completed_at.is_none(),
+            "open task should never carry a completion timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_returns_rendered_html_alongside_raw_text() {
+        // The bug that surfaced this feature: task text containing inline
+        // markdown was rendered as literal asterisks/tildes. The command
+        // must now return `text_html` with the formatting rendered and
+        // sanitized.
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities:
+                "- [ ] Task 6, with **text** *formatting* ~~for~~ *fun*\n- [ ] <script>alert(1)</script>"
+                    .to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        // Raw text is preserved verbatim for the identity model.
+        assert_eq!(
+            tasks[0].text,
+            "Task 6, with **text** *formatting* ~~for~~ *fun*"
+        );
+        // Rendered HTML has the formatting materialized.
+        assert_eq!(
+            tasks[0].text_html,
+            "Task 6, with <strong>text</strong> <em>formatting</em> <del>for</del> <em>fun</em>"
+        );
+        // XSS attempt sanitized in the second task.
+        assert!(
+            !tasks[1].text_html.contains("<script"),
+            "script tag must be stripped: {}",
+            tasks[1].text_html
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_disambiguates_duplicate_text_via_ordinal() {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        // Two identical completed tasks — ordinal must pick out the right one.
+        let summary = WeeklySummary {
+            plans_and_priorities: "- [x] Standup\n- [x] Standup".to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+
+        let hash = hash_task_text(&normalize_task_text("Standup"));
+        let idx = TaskCompletions {
+            version: 1,
+            completions: vec![
+                TaskCompletion {
+                    year,
+                    week,
+                    text_hash: hash.clone(),
+                    ordinal: 1,
+                    completed_at: "2026-07-06T15:00:00-04:00".to_string(),
+                },
+                // ordinal 0 intentionally missing → completed_at should be None.
+            ],
+        };
+        idx.save(&backend).await.unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].ordinal, 0);
+        assert!(tasks[0].completed_at.is_none());
+        assert_eq!(tasks[1].ordinal, 1);
+        assert_eq!(
+            tasks[1].completed_at.as_deref(),
+            Some("2026-07-06T15:00:00-04:00")
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // toggle_task tests
+    // ---------------------------------------------------------------------
+
+    fn hash_of_task(text: &str) -> String {
+        use crate::tasks::{hash_task_text, normalize_task_text};
+        hash_task_text(&normalize_task_text(text))
+    }
+
+    async fn seed_weekly_file_with_tasks(
+        backend: &crate::storage::LocalFilesystem,
+        year: u32,
+        week: u32,
+        plans_body: &str,
+    ) {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities: plans_body.to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn toggle_task_flips_open_to_completed_and_records_sidecar() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskCompletions;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the thing").await;
+
+        let hash = hash_of_task("Ship the thing");
+        let result = toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+        assert!(result.is_completed);
+        assert!(result.completed_at.is_some());
+
+        // File now has [x] on that line.
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(
+            content.contains("- [x] Ship the thing"),
+            "expected [x] in file: {content}"
+        );
+        assert!(!content.contains("- [ ] Ship the thing"));
+
+        // Sidecar has an entry with matching hash + ordinal.
+        let completions = TaskCompletions::load(&backend).await.unwrap();
+        let entry = completions.find(year, week, &hash, 0).expect("sidecar entry");
+        assert_eq!(entry.completed_at, result.completed_at.unwrap());
+    }
+
+    #[tokio::test]
+    async fn toggle_task_flips_completed_to_open_and_drops_sidecar_entry() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [x] Ship the thing").await;
+
+        // Pre-seed a stale sidecar entry — uncheck must drop it.
+        let hash = hash_of_task("Ship the thing");
+        let seeded = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year,
+                week,
+                text_hash: hash.clone(),
+                ordinal: 0,
+                completed_at: "2026-07-05T12:00:00-04:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+        assert!(!result.is_completed);
+        assert!(result.completed_at.is_none());
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(content.contains("- [ ] Ship the thing"));
+        assert!(!content.contains("- [x] Ship the thing"));
+
+        let completions = TaskCompletions::load(&backend).await.unwrap();
+        assert!(
+            completions.find(year, week, &hash, 0).is_none(),
+            "sidecar entry must be dropped on uncheck"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_task_errors_on_missing_task() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the thing").await;
+
+        let err = toggle_task_impl(&backend, year, week, "not-a-real-hash", 0)
+            .await
+            .unwrap_err();
+        assert!(err.contains("couldn't be found"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn toggle_task_errors_on_missing_weekly_file() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let hash = hash_of_task("Ship the thing");
+        let err = toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap_err();
+        assert!(
+            err.contains("no weekly file"),
+            "expected missing-file err, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_task_respects_ordinal_for_duplicates() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskCompletions;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(
+            &backend,
+            year,
+            week,
+            "- [ ] Standup\n- [ ] Standup\n- [ ] Standup",
+        )
+        .await;
+
+        // Toggle only the middle one.
+        let hash = hash_of_task("Standup");
+        toggle_task_impl(&backend, year, week, &hash, 1).await.unwrap();
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        // Extract just the Plans body via parse_weekly_summary so the
+        // "last updated" line etc. can't cause a false match.
+        let summary = parse_weekly_summary(&content);
+        assert_eq!(
+            summary.plans_and_priorities,
+            "- [ ] Standup\n- [x] Standup\n- [ ] Standup"
+        );
+
+        let completions = TaskCompletions::load(&backend).await.unwrap();
+        assert!(completions.find(year, week, &hash, 0).is_none());
+        assert!(completions.find(year, week, &hash, 1).is_some());
+        assert!(completions.find(year, week, &hash, 2).is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_task_stamps_last_updated() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship").await;
+
+        let hash = hash_of_task("Ship");
+        toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(
+            !content.contains("*Last updated: never*"),
+            "toggle should stamp last_updated: {content}"
+        );
+        // Format is YYYY-MM-DD HH:MM (matches update_weekly_summary).
+        assert!(
+            content.contains("*Last updated: 20"),
+            "unexpected last_updated format: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_task_roundtrip_preserves_file_content_outside_marker() {
+        // Flip → flip. Everything except the last_updated line should
+        // return to its starting bytes. Rules out drift caused by the
+        // re-render of the summary section (whitespace, header
+        // formatting, adjacent tasks, unrelated Plans lines).
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(
+            &backend,
+            year,
+            week,
+            "- [ ] One with **bold**\n- [ ] Two\n- [ ] Three",
+        )
+        .await;
+
+        let hash = hash_of_task("Two");
+        toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+        let after_first = backend.read_week(year, week).await.unwrap().unwrap();
+        toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+        let after_second = backend.read_week(year, week).await.unwrap().unwrap();
+
+        // Parse both post-write versions and compare the Plans body —
+        // last_updated will differ by minute, and we don't care about
+        // that here.
+        let plans_after_two = parse_weekly_summary(&after_second).plans_and_priorities;
+        assert_eq!(
+            plans_after_two,
+            "- [ ] One with **bold**\n- [ ] Two\n- [ ] Three"
+        );
+        // And after just one flip, "Two" should be `[x]` — sanity.
+        let plans_after_one = parse_weekly_summary(&after_first).plans_and_priorities;
+        assert_eq!(
+            plans_after_one,
+            "- [ ] One with **bold**\n- [x] Two\n- [ ] Three"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // append_task_to_current_week tests
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn append_task_scaffolds_missing_weekly_file() {
+        // First task on a fresh week: no file, no directory yet.
+        // The command must scaffold and end up with a legit Weekly
+        // Summary containing our task.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+
+        append_task_to_current_week_impl(&backend, year, week, "First one")
+            .await
+            .unwrap();
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(
+            content.contains("- [ ] First one"),
+            "task missing from scaffolded file: {content}"
+        );
+        // Scaffold produces a Weekly Summary + Weekly Notes structure.
+        assert!(content.contains("## Weekly Summary"));
+        assert!(content.contains("## Weekly Notes"));
+        // last_updated stamped, not left as `never`.
+        assert!(
+            !content.contains("*Last updated: never*"),
+            "last_updated not stamped: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_task_appends_to_existing_plans_body() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Existing").await;
+
+        append_task_to_current_week_impl(&backend, year, week, "Fresh")
+            .await
+            .unwrap();
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&content).plans_and_priorities;
+        assert_eq!(plans, "- [ ] Existing\n- [ ] Fresh");
+    }
+
+    #[tokio::test]
+    async fn append_task_preserves_weekly_notes_below_summary() {
+        // Guard: replace_weekly_summary_in_file must leave the Weekly
+        // Notes section byte-identical. Regression trap for anyone
+        // later switching to a different write mechanism.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] existing").await;
+
+        // Manually append a Weekly Notes block so we can verify it
+        // survives.
+        let before = backend.read_week(year, week).await.unwrap().unwrap();
+        let with_notes = format!("{before}\n### 2026-07-07 14:00\nA note body\n");
+        backend.write_week(year, week, &with_notes).await.unwrap();
+
+        append_task_to_current_week_impl(&backend, year, week, "Fresh")
+            .await
+            .unwrap();
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(
+            content.contains("### 2026-07-07 14:00"),
+            "note heading lost: {content}"
+        );
+        assert!(
+            content.contains("A note body"),
+            "note body lost: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_task_surfaces_validation_errors_verbatim() {
+        // Errors from append_task_to_plans reach the command boundary
+        // unchanged so the frontend can render them in the modal.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+
+        let err = append_task_to_current_week_impl(&backend, year, week, "")
+            .await
+            .unwrap_err();
+        assert!(err.contains("can't be empty"), "err: {err}");
+
+        let err = append_task_to_current_week_impl(&backend, year, week, "one\ntwo")
+            .await
+            .unwrap_err();
+        assert!(err.contains("multiple lines"), "err: {err}");
+
+        let err = append_task_to_current_week_impl(&backend, year, week, "- [ ] pre")
+            .await
+            .unwrap_err();
+        assert!(err.contains("prefix"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn append_task_new_task_is_visible_via_list_tasks() {
+        // End-to-end: append, then read via list_tasks_impl and
+        // confirm the new entry appears (open, not completed, correct
+        // rendered HTML).
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+
+        append_task_to_current_week_impl(&backend, year, week, "Ship **the** thing")
+            .await
+            .unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].text, "Ship **the** thing");
+        assert!(!tasks[0].is_completed);
+        // Markdown formatting renders in the HTML field.
+        assert_eq!(
+            tasks[0].text_html,
+            "Ship <strong>the</strong> thing"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_task_updates_last_updated_stamp() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] existing").await;
+
+        // Seeded file has last_updated = "never". Append should stamp.
+        let before = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(before.contains("*Last updated: never*"));
+
+        append_task_to_current_week_impl(&backend, year, week, "Fresh")
+            .await
+            .unwrap();
+
+        let after = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(
+            !after.contains("*Last updated: never*"),
+            "last_updated not stamped: {after}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // rebuild_task_completions_index tests
+    // ---------------------------------------------------------------------
+
+    async fn seed_specific_week(
+        backend: &crate::storage::LocalFilesystem,
+        year: u32,
+        week: u32,
+        plans_body: &str,
+    ) {
+        use crate::notes::{replace_weekly_summary_in_file, weekly_file_scaffold};
+        let now = chrono::DateTime::<chrono::FixedOffset>::parse_from_rfc3339(
+            "2026-07-07T10:00:00-04:00",
+        )
+        .unwrap();
+        let mut file = weekly_file_scaffold(year, week, now);
+        let summary = WeeklySummary {
+            plans_and_priorities: plans_body.to_string(),
+            ..Default::default()
+        };
+        file = replace_weekly_summary_in_file(&file, &summary);
+        backend.write_week(year, week, &file).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rebuild_backfills_sidecar_for_completed_task_with_no_entry() {
+        // The main win-condition: user checked a task externally
+        // (e.g. in /summary editor before Slice 2 shipped) so there's
+        // no sidecar row for it. Rebuild should synthesize one using
+        // the file's mtime.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 10, "- [x] Shipped externally").await;
+
+        // Confirm the sidecar starts empty.
+        let before = TaskCompletions::load(&backend).await.unwrap();
+        assert!(before.completions.is_empty());
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.entries_backfilled, 1);
+        assert_eq!(result.entries_pruned, 0);
+        assert_eq!(result.tasks_scanned, 1);
+        assert_eq!(result.files_scanned, 1);
+        assert!(result.failed_files.is_empty());
+
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert_eq!(after.completions.len(), 1);
+        let hash = hash_task_text(&normalize_task_text("Shipped externally"));
+        let entry = after.find(2026, 10, &hash, 0).expect("sidecar entry");
+        // completed_at is a plausible RFC 3339 timestamp — we don't
+        // pin the exact value since it derives from file mtime at
+        // test-run time.
+        assert!(entry.completed_at.contains('T'));
+        assert!(!entry.completed_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_preserves_existing_sidecar_timestamp_when_task_still_completed() {
+        // Sidecar wins for timestamps: an entry that already exists
+        // and still matches a live `[x]` task must NOT get overwritten
+        // with a fresh mtime.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 10, "- [x] Original done").await;
+
+        let hash = hash_task_text(&normalize_task_text("Original done"));
+        let seeded = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year: 2026,
+                week: 10,
+                text_hash: hash.clone(),
+                ordinal: 0,
+                completed_at: "2025-01-01T10:00:00-05:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.entries_backfilled, 0);
+        assert_eq!(result.entries_pruned, 0);
+
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert_eq!(after.completions.len(), 1);
+        let entry = after.find(2026, 10, &hash, 0).unwrap();
+        assert_eq!(entry.completed_at, "2025-01-01T10:00:00-05:00");
+    }
+
+    #[tokio::test]
+    async fn rebuild_prunes_stale_sidecar_entry_for_unchecked_task() {
+        // Markdown wins for state: sidecar has an entry, but the
+        // matching line in the file is `[ ]`. Rebuild must drop the
+        // stale entry.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        // Note: task is `[ ]`, not `[x]` — user un-checked externally.
+        seed_specific_week(&backend, 2026, 10, "- [ ] Was done, isn't now").await;
+
+        let hash = hash_task_text(&normalize_task_text("Was done, isn't now"));
+        let seeded = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year: 2026,
+                week: 10,
+                text_hash: hash.clone(),
+                ordinal: 0,
+                completed_at: "2025-01-01T10:00:00-05:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.entries_backfilled, 0);
+        assert_eq!(result.entries_pruned, 1);
+
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert!(after.completions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_prunes_sidecar_entry_for_deleted_task() {
+        // Sidecar entry points at a task whose line no longer exists
+        // in the file (user deleted it externally). Must be pruned.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 10, "- [ ] Fresh task").await;
+
+        // Seed with an entry for a completely different (and absent) task.
+        let seeded = TaskCompletions {
+            version: 1,
+            completions: vec![TaskCompletion {
+                year: 2026,
+                week: 10,
+                text_hash: "deadbeef".to_string(),
+                ordinal: 0,
+                completed_at: "2025-01-01T10:00:00-05:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.entries_pruned, 1);
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert!(after.completions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_tasks_on_empty_journal_writes_empty_sidecar() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskCompletions;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.files_scanned, 0);
+        assert_eq!(result.tasks_scanned, 0);
+        assert_eq!(result.entries_backfilled, 0);
+        assert_eq!(result.entries_pruned, 0);
+
+        // Sidecar exists (even if empty) so the frontend can tell
+        // between "never rebuilt" and "rebuilt, nothing to do".
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert!(after.completions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_handles_mixed_scenario_backfill_prune_keep() {
+        // A realistic mixed weekly journal:
+        // - week 10: [x] Alpha  ← no sidecar entry (backfill)
+        // - week 11: [x] Bravo  ← sidecar entry present (keep)
+        // - week 12: [ ] Charlie ← sidecar entry present (prune)
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, TaskCompletion, TaskCompletions};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 10, "- [x] Alpha").await;
+        seed_specific_week(&backend, 2026, 11, "- [x] Bravo").await;
+        seed_specific_week(&backend, 2026, 12, "- [ ] Charlie").await;
+
+        let bravo_hash = hash_task_text(&normalize_task_text("Bravo"));
+        let charlie_hash = hash_task_text(&normalize_task_text("Charlie"));
+        let seeded = TaskCompletions {
+            version: 1,
+            completions: vec![
+                TaskCompletion {
+                    year: 2026,
+                    week: 11,
+                    text_hash: bravo_hash.clone(),
+                    ordinal: 0,
+                    completed_at: "2025-01-01T10:00:00-05:00".to_string(),
+                },
+                TaskCompletion {
+                    year: 2026,
+                    week: 12,
+                    text_hash: charlie_hash.clone(),
+                    ordinal: 0,
+                    completed_at: "2025-01-02T10:00:00-05:00".to_string(),
+                },
+            ],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.entries_backfilled, 1, "Alpha backfilled");
+        assert_eq!(result.entries_pruned, 1, "Charlie pruned");
+
+        let after = TaskCompletions::load(&backend).await.unwrap();
+        assert_eq!(after.completions.len(), 2, "Alpha + Bravo remain");
+        // Bravo's original timestamp preserved.
+        assert_eq!(
+            after
+                .find(2026, 11, &bravo_hash, 0)
+                .unwrap()
+                .completed_at,
+            "2025-01-01T10:00:00-05:00"
+        );
+        // Alpha has a fresh backfilled timestamp (non-empty).
+        let alpha_hash = hash_task_text(&normalize_task_text("Alpha"));
+        assert!(after.find(2026, 10, &alpha_hash, 0).is_some());
+    }
+
+    // ---------------------------------------------------------------------
+    // rebuild sweep-forward tests
+    // ---------------------------------------------------------------------
+    //
+    // The Rebuild button (Settings > Tasks) also sweeps stranded
+    // incomplete tasks from any non-current week directly into the
+    // current week. Chris's design call: auto-rollover only pulls
+    // from the immediately-previous week, so tasks added to older
+    // weeks (via the journal editor) would otherwise never surface —
+    // Rebuild is the explicit "sync everything up" escape hatch.
+
+    #[tokio::test]
+    async fn rebuild_sweeps_stranded_open_task_from_older_week() {
+        // The exact scenario Chris hit: `[ ]` task added to a week
+        // multiple hops behind the current one via the journal
+        // editor. Rebuild should copy it directly into the current
+        // week and record provenance pointing to the origin.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{
+            hash_task_text, normalize_task_text, RolloverLog,
+        };
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        // Seed a week deliberately far from "now" so we exercise the
+        // "not in immediate previous week" path.
+        seed_specific_week(&backend, 2026, 22, "- [ ] Stranded task").await;
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.tasks_swept_forward, 1);
+
+        // Task now lives in the current week too.
+        let YearWeek { year, week } = get_current_year_week();
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&content).plans_and_priorities;
+        assert!(
+            plans.contains("- [ ] Stranded task"),
+            "swept task missing from current week: {plans}"
+        );
+
+        // Provenance points to the source week (22 in this test),
+        // NOT to some intermediate week.
+        let hash = hash_task_text(&normalize_task_text("Stranded task"));
+        let log = RolloverLog::load(&backend).await.unwrap();
+        let entry = log
+            .find(year, week, &hash, 0)
+            .expect("provenance entry for swept task");
+        assert_eq!(entry.original_year, 2026);
+        assert_eq!(entry.original_week, 22);
+    }
+
+    #[tokio::test]
+    async fn rebuild_sweep_dedupes_against_current_week_tasks() {
+        // If a task with the same normalized text already exists in
+        // the current week (auto-rollover already carried it, or user
+        // added it manually), sweep must NOT add a second copy.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_specific_week(&backend, 2026, 22, "- [ ] Duplicate").await;
+        seed_specific_week(&backend, year, week, "- [ ] Duplicate").await;
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(
+            result.tasks_swept_forward, 0,
+            "already present in current week — must not sweep"
+        );
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&content).plans_and_priorities;
+        assert_eq!(
+            plans.matches("Duplicate").count(),
+            1,
+            "current week should still have exactly one instance"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_sweep_ignores_completed_tasks_in_older_weeks() {
+        // Only `[ ]` items sweep forward — completed history stays
+        // in its source week as a record.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(
+            &backend,
+            2026,
+            22,
+            "- [x] Already done\n- [ ] Still open",
+        )
+        .await;
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.tasks_swept_forward, 1);
+
+        let YearWeek { year, week } = get_current_year_week();
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&content).plans_and_priorities;
+        assert!(plans.contains("Still open"));
+        assert!(!plans.contains("Already done"));
+    }
+
+    #[tokio::test]
+    async fn rebuild_sweep_dedupes_same_text_across_multiple_older_weeks() {
+        // Task appears open in weeks 20 AND 22 (user hasn't cleaned
+        // up historical copies). Sweep should add ONE copy to
+        // current week, with provenance pointing to the earliest
+        // source (week 20).
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, RolloverLog};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 20, "- [ ] Recurring").await;
+        seed_specific_week(&backend, 2026, 22, "- [ ] Recurring").await;
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(
+            result.tasks_swept_forward, 1,
+            "one copy for the unique text, not one per source week"
+        );
+
+        let YearWeek { year, week } = get_current_year_week();
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert_eq!(
+            parse_weekly_summary(&content)
+                .plans_and_priorities
+                .matches("Recurring")
+                .count(),
+            1
+        );
+
+        // Provenance points at the EARLIEST source (week 20), not 22.
+        let hash = hash_task_text(&normalize_task_text("Recurring"));
+        let log = RolloverLog::load(&backend).await.unwrap();
+        let entry = log.find(year, week, &hash, 0).expect("provenance");
+        assert_eq!(entry.original_week, 20);
+    }
+
+    #[tokio::test]
+    async fn rebuild_sweep_scaffolds_missing_current_week_file() {
+        // If the user opens the app in a brand-new ISO week with
+        // stranded tasks in old files, Rebuild should scaffold the
+        // current week and populate it.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 22, "- [ ] From the void").await;
+
+        let YearWeek { year, week } = get_current_year_week();
+        assert!(backend.read_week(year, week).await.unwrap().is_none());
+
+        let result = rebuild_task_completions_index_impl(&backend).await.unwrap();
+        assert_eq!(result.tasks_swept_forward, 1);
+
+        let content = backend.read_week(year, week).await.unwrap().unwrap();
+        assert!(content.contains("## Weekly Summary"));
+        assert!(content.contains("## Weekly Notes"));
+        assert!(content.contains("- [ ] From the void"));
+    }
+
+    #[tokio::test]
+    async fn rebuild_sweep_preserves_existing_provenance_original_week() {
+        // Multi-hop provenance survives Rebuild too. If the source
+        // week's copy already has provenance pointing to an even
+        // earlier week (because auto-rollover carried it once
+        // already), the Rebuild-swept copy inherits that origin —
+        // NOT the immediate source week.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, RolloverLog, TaskProvenance};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        seed_specific_week(&backend, 2026, 22, "- [ ] Deep task").await;
+
+        // Pretend the week-22 copy was itself rolled from week 18.
+        let hash = hash_task_text(&normalize_task_text("Deep task"));
+        let seeded = RolloverLog {
+            version: 1,
+            last_run_to_week: None,
+            last_run_at: None,
+            provenance: vec![TaskProvenance {
+                year: 2026,
+                week: 22,
+                text_hash: hash.clone(),
+                ordinal: 0,
+                original_year: 2026,
+                original_week: 18,
+                original_created_at: "2026-05-01T09:00:00-04:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        rebuild_task_completions_index_impl(&backend).await.unwrap();
+
+        let YearWeek { year, week } = get_current_year_week();
+        let log = RolloverLog::load(&backend).await.unwrap();
+        let entry = log
+            .find(year, week, &hash, 0)
+            .expect("swept task provenance");
+        assert_eq!(entry.original_year, 2026);
+        assert_eq!(entry.original_week, 18);
+        assert_eq!(entry.original_created_at, "2026-05-01T09:00:00-04:00");
+    }
+
+    // ---------------------------------------------------------------------
+    // check_and_apply_rollover tests
+    // ---------------------------------------------------------------------
+    //
+    // Like `list_tasks` + `toggle_task`, the rollover impl uses
+    // `get_current_year_week()` to pick the target, so fixtures are
+    // seeded relative to *whatever* week the test runs in. The
+    // previous-week source file is at the ISO year+week returned by
+    // `iso_previous_year_week` of that.
+
+    #[tokio::test]
+    async fn rollover_no_source_file_marks_last_run_but_copies_nothing() {
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{RolloverLog, YearWeekKey};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(result.applied);
+        assert_eq!(result.tasks_copied, 0);
+        assert!(result.source_week.is_none());
+
+        // Log has to record the run so the next focus event no-ops
+        // instead of re-scanning the same missing file.
+        let log = RolloverLog::load(&backend).await.unwrap();
+        assert_eq!(
+            log.last_run_to_week,
+            Some(YearWeekKey { year, week })
+        );
+
+        // Sanity: iso_previous_year_week is what we're computing off of.
+        let (sy, sw) = iso_previous_year_week(year, week);
+        assert!(backend.read_week(sy, sw).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn rollover_copies_open_tasks_from_previous_week() {
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        // Seed the source week with a mix of open + completed tasks.
+        // Only the open ones should be copied.
+        seed_specific_week(
+            &backend,
+            source_year,
+            source_week,
+            "- [ ] Ship the thing\n- [x] Already done\n- [ ] Follow up",
+        )
+        .await;
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(result.applied);
+        assert_eq!(result.tasks_copied, 2);
+        assert_eq!(
+            result.source_week,
+            Some(YearWeek {
+                year: source_year,
+                week: source_week,
+            })
+        );
+
+        let target_content = backend.read_week(year, week).await.unwrap().unwrap();
+        let target_plans = parse_weekly_summary(&target_content).plans_and_priorities;
+        assert!(target_plans.contains("- [ ] Ship the thing"));
+        assert!(target_plans.contains("- [ ] Follow up"));
+        // Completed task stayed put and did NOT come along.
+        assert!(!target_plans.contains("Already done"));
+
+        // Source file also still has all three (copy, not move).
+        let source_content = backend.read_week(source_year, source_week).await.unwrap().unwrap();
+        assert!(source_content.contains("- [ ] Ship the thing"));
+        assert!(source_content.contains("- [x] Already done"));
+    }
+
+    #[tokio::test]
+    async fn rollover_is_idempotent_across_repeated_calls() {
+        // Focus + visibility events fire multiple triggers within a
+        // single ISO week; the second call must be a no-op.
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        seed_specific_week(
+            &backend,
+            source_year,
+            source_week,
+            "- [ ] Ship the thing",
+        )
+        .await;
+
+        let first = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(first.applied);
+        assert_eq!(first.tasks_copied, 1);
+
+        // Second call — log's lastRunToWeek already matches, so we
+        // short-circuit with applied=false. Nothing new should be
+        // appended to the target file.
+        let second = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(!second.applied);
+        assert_eq!(second.tasks_copied, 0);
+
+        // Target still has exactly one instance of the task.
+        let target_content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&target_content).plans_and_priorities;
+        let count = plans.matches("Ship the thing").count();
+        assert_eq!(count, 1, "second call must not duplicate the task");
+    }
+
+    #[tokio::test]
+    async fn rollover_dedupes_task_already_in_current_week() {
+        // User manually re-typed a task in the current week before
+        // rollover ran. The rollover must skip it, not create a
+        // duplicate.
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        seed_specific_week(
+            &backend,
+            source_year,
+            source_week,
+            "- [ ] Shared task\n- [ ] Only in source",
+        )
+        .await;
+        seed_specific_week(&backend, year, week, "- [ ] Shared task").await;
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert_eq!(
+            result.tasks_copied, 1,
+            "only the non-duplicate should be copied"
+        );
+
+        let target_content = backend.read_week(year, week).await.unwrap().unwrap();
+        let plans = parse_weekly_summary(&target_content).plans_and_priorities;
+        assert_eq!(plans.matches("Shared task").count(), 1);
+        assert_eq!(plans.matches("Only in source").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn rollover_preserves_original_week_across_multi_hop() {
+        // Simulate: task born in week A, rolls to week B, then B rolls
+        // to C. The provenance for the copy in C must still point to A.
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{hash_task_text, normalize_task_text, RolloverLog, TaskProvenance};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        // Pretend the source week's task originated 2 weeks before it.
+        let (origin_year, origin_week) = iso_previous_year_week(source_year, source_week);
+        seed_specific_week(&backend, source_year, source_week, "- [ ] Long-running task").await;
+
+        // Manually seed the provenance for the source-week task as
+        // if a prior rollover had carried it forward from `origin`.
+        let hash = hash_task_text(&normalize_task_text("Long-running task"));
+        let seeded = RolloverLog {
+            version: 1,
+            last_run_to_week: None,
+            last_run_at: None,
+            provenance: vec![TaskProvenance {
+                year: source_year,
+                week: source_week,
+                text_hash: hash.clone(),
+                ordinal: 0,
+                original_year: origin_year,
+                original_week: origin_week,
+                original_created_at: "2026-05-01T09:00:00-04:00".to_string(),
+            }],
+        };
+        seeded.save(&backend).await.unwrap();
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert_eq!(result.tasks_copied, 1);
+
+        let log = RolloverLog::load(&backend).await.unwrap();
+        let carried = log
+            .find(year, week, &hash, 0)
+            .expect("provenance for the rolled task in the target week");
+        // The important property: original_* points to origin, NOT
+        // to source_year/source_week. The task's origin follows it
+        // through arbitrarily many hops.
+        assert_eq!(carried.original_year, origin_year);
+        assert_eq!(carried.original_week, origin_week);
+        assert_eq!(carried.original_created_at, "2026-05-01T09:00:00-04:00");
+    }
+
+    #[tokio::test]
+    async fn rollover_scaffolds_target_week_when_missing() {
+        // A brand-new ISO week has no file yet — rollover must
+        // scaffold it, not error out.
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        seed_specific_week(&backend, source_year, source_week, "- [ ] Fresh").await;
+
+        assert!(backend.read_week(year, week).await.unwrap().is_none());
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(result.applied);
+        assert_eq!(result.tasks_copied, 1);
+
+        let target_content = backend.read_week(year, week).await.unwrap().unwrap();
+        // Scaffold contract holds: file has proper structure.
+        assert!(target_content.contains("## Weekly Summary"));
+        assert!(target_content.contains("## Weekly Notes"));
+        assert!(target_content.contains("- [ ] Fresh"));
     }
 
     #[cfg(target_os = "macos")]

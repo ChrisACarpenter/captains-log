@@ -35,6 +35,7 @@
   import ConfirmDialog from '$lib/ConfirmDialog.svelte';
   import Modal from '$lib/Modal.svelte';
   import InputField from '$lib/InputField.svelte';
+  import Checkbox from '$lib/Checkbox.svelte';
   import LabelDetailsModal from '$lib/LabelDetailsModal.svelte';
   import LoadingOverlay from '$lib/LoadingOverlay.svelte';
   import PathPickerField from '$lib/PathPickerField.svelte';
@@ -92,6 +93,16 @@
     minute: number;
   };
 
+  // Phase 3c Slice 4 — display prefs for the landing-page task list.
+  // Mirrors the Rust TaskListSettings struct in settings.rs.
+  type TaskListSettings = {
+    showCompleted: boolean;
+    openTasksFirst: boolean;
+    showCompletedTimestamp: boolean;
+    hideTaskList: boolean;
+    autoRolloverEnabled: boolean;
+  };
+
   type Settings = {
     firstRun: boolean;
     journalRoot: string;
@@ -115,15 +126,18 @@
     // frontend Settings type stays in lockstep with the backend
     // SettingsBundle shape.
     colorfulLabels: boolean;
+    // Slice 4 — display prefs for the landing-page task list.
+    taskList: TaskListSettings;
   };
 
-  type TabKey = 'general' | 'reminders' | 'mail' | 'theme' | 'labels';
+  type TabKey = 'general' | 'reminders' | 'mail' | 'theme' | 'labels' | 'tasks';
   const TABS: Array<{ key: TabKey; label: string }> = [
     { key: 'general', label: 'General' },
     { key: 'reminders', label: 'Reminders' },
     { key: 'mail', label: 'Mail' },
     { key: 'theme', label: 'Theme' },
     { key: 'labels', label: 'Labels' },
+    { key: 'tasks', label: 'Tasks' },
   ];
   const TAB_STORAGE_KEY = 'captainslog:settingsTab';
 
@@ -194,6 +208,31 @@
   // theme). Read on load and round-tripped on save so unrelated edits
   // (e.g. reminder time) never silently clobber the value.
   let colorfulLabels = $state(false);
+
+  // Phase 3c Slice 4 — Task list display prefs. Bound to the three
+  // checkboxes in the Tasks tab. Defaults mirror the Rust
+  // TaskListSettings::default() impl so an existing settings.json
+  // upgrades cleanly.
+  let taskShowCompleted = $state(true);
+  let taskOpenTasksFirst = $state(true);
+  let taskShowCompletedTimestamp = $state(false);
+  let taskHideTaskList = $state(false);
+  let taskAutoRolloverEnabled = $state(true);
+
+  // Rebuild-task-index state — mirrors isRebuildingIndex from the
+  // Labels tab. `taskRebuildReceipt` renders inline in the tab body
+  // after a successful rebuild so the user sees what changed.
+  let isRebuildingTasks = $state(false);
+  let taskRebuildError = $state('');
+  let taskRebuildReceipt = $state<{
+    filesScanned: number;
+    tasksScanned: number;
+    entriesBackfilled: number;
+    entriesPruned: number;
+    tasksSweptForward: number;
+    durationMs: number;
+    failedFiles: string[];
+  } | null>(null);
 
   // ---------- Custom theme editor (Phase 2.8 — Slice 4) ----------
   //
@@ -939,6 +978,38 @@
     }
   }
 
+  type TaskRebuildResult = {
+    filesScanned: number;
+    tasksScanned: number;
+    entriesBackfilled: number;
+    entriesPruned: number;
+    tasksSweptForward: number;
+    durationMs: number;
+    failedFiles: string[];
+  };
+
+  // Slice 4 — Rebuild task index. Same posture as rebuildLabelIndex:
+  // the button is disabled while in-flight, errors surface inline in
+  // the Tasks tab, and a success receipt renders under the button
+  // reporting what changed on disk (backfills + prunes + failed
+  // files). Clicking again after success just re-runs the rebuild;
+  // there's no session gate because tasks aren't wired to the "auto-
+  // rebuild on tab open" pattern the Labels tab uses.
+  async function rebuildTaskIndex(): Promise<void> {
+    if (isRebuildingTasks) return;
+    taskRebuildError = '';
+    taskRebuildReceipt = null;
+    isRebuildingTasks = true;
+    try {
+      const result = await invoke<TaskRebuildResult>('rebuild_task_completions_index');
+      taskRebuildReceipt = result;
+    } catch (err) {
+      taskRebuildError = String(err);
+    } finally {
+      isRebuildingTasks = false;
+    }
+  }
+
   async function onLabelsTabClicked(): Promise<void> {
     activeTab = 'labels';
     // Gate is "in-flight OR done" — both states mean "don't start another
@@ -1287,6 +1358,12 @@
       mailOutlookFlavor = s.mailOutlookFlavor ?? 'business';
       mailBodyDelivery = s.mailBodyDelivery ?? 'prefilled';
       colorfulLabels = s.colorfulLabels ?? false;
+      // Slice 4/5 — Task list toggles.
+      taskShowCompleted = s.taskList?.showCompleted ?? true;
+      taskOpenTasksFirst = s.taskList?.openTasksFirst ?? true;
+      taskShowCompletedTimestamp = s.taskList?.showCompletedTimestamp ?? false;
+      taskHideTaskList = s.taskList?.hideTaskList ?? false;
+      taskAutoRolloverEnabled = s.taskList?.autoRolloverEnabled ?? true;
       // Phase 2.8 — load the persisted custom palette (if any) so toggling
       // into Custom restores the user's last-saved theme verbatim.
       persistedCustomTheme = s.customTheme ?? null;
@@ -1433,7 +1510,14 @@
           mailNativeHtml,
           mailOutlookFlavor,
           mailBodyDelivery,
-          colorfulLabels
+          colorfulLabels,
+          taskList: {
+            showCompleted: taskShowCompleted,
+            openTasksFirst: taskOpenTasksFirst,
+            showCompletedTimestamp: taskShowCompletedTimestamp,
+            hideTaskList: taskHideTaskList,
+            autoRolloverEnabled: taskAutoRolloverEnabled
+          }
         }
       });
       // Storage, reminder, and theme all hot-swap in-process — no restart needed.
@@ -1580,9 +1664,15 @@
           id="panel-general"
           aria-labelledby="tab-general"
         >
-          <!-- Your details -->
+          <!--
+            User Information — a single section holding every "who am I"
+            input (you + your manager). Field-order groups you-fields
+            first, then manager-fields; the InputField labels carry the
+            grouping signal, so an intermediate "You" / "Manager"
+            sub-heading would just be noise.
+          -->
           <div class="section">
-            <h2 class="section-title">Your details…</h2>
+            <h2 class="section-title">User Information</h2>
 
             <InputField
               id="name"
@@ -1609,7 +1699,7 @@
 
             <InputField
               id="bamboo-title"
-              label="Job title"
+              label="Job Title"
               placeholder="Staff QA Analyst"
               bind:value={bambooTitleInput}
               hint="As it appears on BambooHR. Used in your weekly email signature."
@@ -1617,20 +1707,15 @@
 
             <InputField
               id="jira-keys"
-              label="Your Jira project key(s)"
+              label="Jira Project Key(s)"
               placeholder="MAGE, LIVE"
               bind:value={jiraKeysInput}
               hint="Comma-separated. Captain's Log uppercases them on save."
             />
-          </div>
-
-          <!-- Manager -->
-          <div class="section">
-            <h2 class="section-title">Manager details…</h2>
 
             <InputField
               id="manager-name"
-              label="Manager name"
+              label="Manager Name"
               placeholder="Arthur"
               bind:value={managerNameInput}
               hint={'Used as the greeting in the email ("Hello Arthur,"). Leave blank for a plain "Hello,".'}
@@ -1638,7 +1723,7 @@
 
             <InputField
               id="manager-email"
-              label="Manager email"
+              label="Manager Email"
               type="email"
               placeholder="manager@prodigygame.com"
               autocomplete="email"
@@ -1650,9 +1735,9 @@
             />
           </div>
 
-          <!-- Journal location -->
+          <!-- File Location -->
           <div class="section">
-            <h2 class="section-title">Journal location…</h2>
+            <h2 class="section-title">File Location</h2>
 
             <PathPickerField
               id="root"
@@ -1673,11 +1758,13 @@
           aria-labelledby="tab-reminders"
         >
           <div class="section">
-            <div class="field">
-              <label class="checkbox-row">
-                <input type="checkbox" bind:checked={reminderEnabled} />
-                <span>Send me a reminder to fill in the Weekly Summary</span>
-              </label>
+            <h2 class="section-title">Weekly Reminder</h2>
+            <div class="checkbox-stack">
+              <Checkbox
+                bind:checked={reminderEnabled}
+                label="Send Me a Weekly Reminder"
+                description="Get a macOS notification when it's time to fill in your Weekly Summary. Pick the day and time below."
+              />
             </div>
 
             {#if reminderEnabled}
@@ -1755,11 +1842,11 @@
                Compose + paste hand-delivers rich HTML via the clipboard,
                so plaintext flavor doesn't matter and the radio is hidden. -->
           <div class="section">
-            <h2 class="section-title">How should Send work?</h2>
+            <h2 class="section-title">Mail Delivery</h2>
 
             <div class="field">
               <label for="mail-send-mode" class="field-heading">
-                Send-to-manager path
+                Send Method
               </label>
               <select
                 id="mail-send-mode"
@@ -1788,8 +1875,8 @@
             </div>
 
             <div class="field">
-              <span class="field-heading">Body delivery</span>
-              <div class="radio-stack" role="radiogroup" aria-label="Body delivery">
+              <span class="field-heading">Body Delivery</span>
+              <div class="radio-stack" role="radiogroup" aria-label="Body Delivery">
                 <label class="radio-row">
                   <input
                     type="radio"
@@ -1798,7 +1885,7 @@
                     bind:group={mailBodyDelivery}
                   />
                   <span>
-                    <span class="radio-row-label">Prefilled draft</span>
+                    <span class="radio-row-label">Prefilled Draft</span>
                     <span class="radio-row-detail">
                       Body is rendered to plaintext and embedded in the
                       draft. One click to send — but the recipient sees a
@@ -1814,7 +1901,7 @@
                     bind:group={mailBodyDelivery}
                   />
                   <span>
-                    <span class="radio-row-label">Compose + paste (formatted)</span>
+                    <span class="radio-row-label">Compose + Paste (Formatted)</span>
                     <span class="radio-row-detail">
                       Opens an empty draft in your chosen client and copies
                       the formatted message to your clipboard. Paste with
@@ -1831,8 +1918,8 @@
                    Compose + paste copies rich HTML to the clipboard and
                    the prefill body is empty, so plaintext flavor is moot. -->
               <div class="field">
-                <span class="field-heading">Body format</span>
-                <div class="radio-stack" role="radiogroup" aria-label="Body format">
+                <span class="field-heading">Body Format</span>
+                <div class="radio-stack" role="radiogroup" aria-label="Body Format">
                   <label class="radio-row">
                     <input
                       type="radio"
@@ -1841,7 +1928,7 @@
                       bind:group={mailBodyFormat}
                     />
                     <span>
-                      <span class="radio-row-label">Clean text</span>
+                      <span class="radio-row-label">Clean Text</span>
                       <span class="radio-row-detail">
                         Markdown stripped — reads naturally in any mail
                         client.
@@ -1856,7 +1943,7 @@
                       bind:group={mailBodyFormat}
                     />
                     <span>
-                      <span class="radio-row-label">Markdown source</span>
+                      <span class="radio-row-label">Markdown Source</span>
                       <span class="radio-row-detail">
                         Raw <code>**bold**</code> and <code>- bullets</code>
                         preserved.
@@ -1946,20 +2033,12 @@
                    the sender must click "Message → Edit as New Message"
                    before sending. Wins over Body delivery when both are
                    set (handled server-side). -->
-              <div class="field">
-                <label class="radio-row">
-                  <input type="checkbox" bind:checked={mailNativeHtml} />
-                  <span>
-                    <span class="radio-row-label">Send as Styled HTML draft (.eml)</span>
-                    <span class="radio-row-detail">
-                      Mac Mail only — recipient sees a fully styled message
-                      with no paste step required. Independent of Body
-                      delivery; this option wins when both are set. The
-                      draft opens read-only — click Message → Edit as New
-                      Message before sending.
-                    </span>
-                  </span>
-                </label>
+              <div class="checkbox-stack">
+                <Checkbox
+                  bind:checked={mailNativeHtml}
+                  label="Send as Styled HTML Draft (.eml)"
+                  description="Mac Mail only — recipient sees a fully styled message with no paste step required. Independent of Body Delivery; this option wins when both are set. The draft opens read-only — click Message → Edit as New Message before sending."
+                />
               </div>
             </div>
           {/if}
@@ -1998,8 +2077,8 @@
               </TipBubble>
 
               <div class="field">
-                <span class="field-heading">Outlook flavor</span>
-                <div class="radio-stack" role="radiogroup" aria-label="Outlook flavor">
+                <span class="field-heading">Outlook Flavor</span>
+                <div class="radio-stack" role="radiogroup" aria-label="Outlook Flavor">
                   <label class="radio-row">
                     <input
                       type="radio"
@@ -2365,21 +2444,21 @@
                      batch actions and stays empty until N > 0 so the
                      toolbar doesn't shout at users who aren't selecting. -->
                 <div class="bulk-actions" role="toolbar" aria-label="Bulk label actions">
-                  <label class="bulk-select-all">
-                    <input
-                      type="checkbox"
+                  <div class="bulk-select-all">
+                    <Checkbox
                       checked={allVisibleSelected}
                       onchange={toggleSelectAllVisible}
-                      aria-label="Select all visible labels"
-                    />
-                    <span class="bulk-select-all-text">
-                      {#if selectionCount > 0}
-                        {selectionCount} selected
-                      {:else}
-                        Select all
-                      {/if}
-                    </span>
-                  </label>
+                      ariaLabel="Select all visible labels"
+                    >
+                      <span class="bulk-select-all-text">
+                        {#if selectionCount > 0}
+                          {selectionCount} selected
+                        {:else}
+                          Select all
+                        {/if}
+                      </span>
+                    </Checkbox>
+                  </div>
                   {#if selectionCount > 0}
                     <button
                       type="button"
@@ -2437,12 +2516,10 @@
                 <ul class="label-list" role="list">
                   {#each visibleLabels as entry (entry.name)}
                     <li class="label-row">
-                      <input
-                        type="checkbox"
-                        class="label-select"
+                      <Checkbox
                         checked={selectedLabelNames.has(entry.name)}
                         onchange={() => toggleLabelSelection(entry.name)}
-                        aria-label="Select {entry.name}"
+                        ariaLabel={`Select ${entry.name}`}
                       />
                       <span
                         class="label-chip"
@@ -2465,6 +2542,103 @@
                   {/each}
                 </ul>
               {/if}
+            {/if}
+          </div>
+        </div>
+      {/if}
+
+      <!-- ============================== Tasks tab ============================== -->
+      {#if activeTab === 'tasks'}
+        <div class="form" role="tabpanel" id="panel-tasks" aria-labelledby="tab-tasks">
+          <div class="section">
+            <h2 class="section-title">Display</h2>
+            <div class="checkbox-stack">
+              <Checkbox
+                bind:checked={taskShowCompleted}
+                label="Show Completed Tasks"
+                description="Keep finished tasks in view alongside the open ones. Turn this off to focus only on what's left to do."
+              />
+              <Checkbox
+                bind:checked={taskOpenTasksFirst}
+                label="Open Tasks First"
+                description="Open tasks appear at the top; completed ones sink to the bottom. When off, tasks show in the order they were written in your Weekly Summary."
+              />
+              <Checkbox
+                bind:checked={taskShowCompletedTimestamp}
+                label="Show Completion Timestamp"
+                description={'Adds a subtle “checked 2h ago” chip next to completed tasks. Off by default to keep the list tight.'}
+              />
+              <Checkbox
+                bind:checked={taskAutoRolloverEnabled}
+                label="Auto-Roll Over Incomplete Tasks"
+                description="At the start of each week, any tasks you didn't finish last week are copied into this week's list. Rolled-over tasks show a small chip so you can see where they came from. Turn off to start each week with a clean list."
+              />
+              <Checkbox
+                bind:checked={taskHideTaskList}
+                label="Hide the Task List"
+                description="Removes the task list section entirely from the main page. Useful if you don't use the task feature."
+              />
+            </div>
+          </div>
+
+          <div class="section">
+            <h2 class="section-title">Rebuild Task Index</h2>
+            <TipBubble>
+              Scans every weekly file and syncs task state. Backfills
+              missing completion timestamps for tasks that were
+              checked outside Captain's Log, prunes stale entries
+              whose task no longer exists, and copies any stranded
+              incomplete tasks from older weeks directly into this
+              week's Plans section (with a "from Wxx" chip so you
+              see where each came from). Safe to run any time.
+            </TipBubble>
+            <div class="field">
+              <button
+                type="button"
+                class="btn btn-marble"
+                onclick={rebuildTaskIndex}
+                disabled={isRebuildingTasks}
+              >
+                {isRebuildingTasks ? 'Rebuilding…' : 'Rebuild task index'}
+              </button>
+            </div>
+            {#if taskRebuildError}
+              <p class="hint hint-warning">{taskRebuildError}</p>
+            {/if}
+            {#if taskRebuildReceipt}
+              <!--
+                aria-live="polite" so a screen reader announces the
+                receipt when it appears; role="status" gives it a
+                landmark. aria-atomic on the wrapper so the whole
+                summary is read as one unit rather than three
+                fragments.
+              -->
+              <div
+                class="rebuild-receipt"
+                role="status"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                <p class="hint">
+                  Scanned <strong>{taskRebuildReceipt.filesScanned}</strong>
+                  {taskRebuildReceipt.filesScanned === 1 ? 'file' : 'files'}
+                  ({taskRebuildReceipt.tasksScanned}
+                  {taskRebuildReceipt.tasksScanned === 1 ? 'task' : 'tasks'}) in
+                  {taskRebuildReceipt.durationMs}ms.
+                </p>
+                <p class="hint">
+                  Backfilled <strong>{taskRebuildReceipt.entriesBackfilled}</strong>,
+                  pruned <strong>{taskRebuildReceipt.entriesPruned}</strong>,
+                  swept forward <strong>{taskRebuildReceipt.tasksSweptForward}</strong>.
+                </p>
+                {#if taskRebuildReceipt.failedFiles.length > 0}
+                  <p class="hint hint-warning">
+                    Couldn't read {taskRebuildReceipt.failedFiles.length}
+                    {taskRebuildReceipt.failedFiles.length === 1 ? 'file' : 'files'}:
+                    {taskRebuildReceipt.failedFiles.join(', ')}
+                  </p>
+                {/if}
+              </div>
             {/if}
           </div>
         </div>
@@ -2691,11 +2865,19 @@
     gap: var(--space-6);
   }
 
+  /*
+    Section title = chapter marker. Displays the tab's top-level
+    groupings (User Information, Weekly Reminder, Mail Delivery,
+    etc.). Bigger than a field-heading (text-display-sm vs
+    text-button) so scanning the tab reads as "chapter → fields"
+    rather than "row → row".
+  */
   .section-title {
     font-family: var(--font-display);
-    font-size: var(--text-button);
+    font-size: var(--text-display-sm);
+    line-height: var(--text-display-sm-lh);
     color: var(--text-primary);
-    margin: 0 0 var(--space-2);
+    margin: 0 0 var(--space-3);
     padding-bottom: var(--space-2);
     border-bottom: 1px solid var(--border-decorative);
   }
@@ -2787,23 +2969,6 @@
   .day-pill:focus-visible {
     outline: none;
     box-shadow: 0 0 0 2px var(--focus-glow);
-  }
-
-  .checkbox-row {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center;
-    gap: var(--space-3);
-    font-size: var(--text-body) !important;
-    cursor: pointer;
-  }
-  /* (.colorful-labels-label removed when Colorful Labels became a
-   * radio-card in the Label Theme section — the radio's .radio-label
-   * already carries the display-font treatment.) */
-  .checkbox-row input[type='checkbox'] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--accent-primary);
   }
 
   /* ---- Theme: radio cards ---- */
@@ -3124,6 +3289,15 @@
     flex-direction: column;
     gap: var(--space-2);
   }
+  /* Shared vertical stack for the Checkbox card variant (padded
+     capsule with heading + detail) — Tasks, Reminders, and Mail
+     tabs all use this. Same spacing as .radio-stack so the two
+     control families sit uniformly if a section ever mixes them. */
+  .checkbox-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
   .radio-row {
     position: relative;
     display: flex;
@@ -3180,11 +3354,6 @@
   /* Checkbox rows keep the native check + accent-color tint — `:has()`
    * gates the dot above so this rule only matches when the row hosts
    * an actual checkbox. */
-  .radio-row:has(input[type='checkbox']) input[type='checkbox'] {
-    margin-top: 3px;
-    accent-color: var(--accent-primary);
-    cursor: pointer;
-  }
   .radio-row-label {
     display: block;
     font-family: var(--font-display);
@@ -3279,15 +3448,6 @@
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
   }
-  .label-select {
-    /* Native checkbox scales fine at 16px; give it a bit of tap area
-       vertically so mouse targeting isn't finicky. */
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-
   /* Phase 3a Slice 2 — multi-select toolbar. Renders above the label list
      when any labels are present. Left side owns selection state; right
      side owns batch actions (hidden until N > 0). */
@@ -3308,11 +3468,6 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    cursor: pointer;
-  }
-  .bulk-select-all input[type='checkbox'] {
-    width: 16px;
-    height: 16px;
     cursor: pointer;
   }
   .bulk-select-all-text {

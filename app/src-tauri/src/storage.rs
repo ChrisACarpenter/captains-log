@@ -93,6 +93,28 @@ pub trait StorageBackend: Send + Sync {
     async fn delete_metadata(&self, _name: &str) -> StorageResult<()> {
         Ok(())
     }
+
+    /// Return a weekly file's last-modified time. Used by Slice 4's
+    /// `rebuild_task_completions_index` to backfill `completed_at`
+    /// timestamps for `[x]` tasks that were checked externally (a
+    /// text editor, or the /summary MarkdownEditor before Captain's
+    /// Log had a task command) and thus have no sidecar entry.
+    ///
+    /// Returns `Ok(None)` when the file doesn't exist — same posture
+    /// as `read_week` so callers can walk `list_years` × `list_weeks`
+    /// without racing.
+    ///
+    /// Default impl is `Ok(None)` for backends where filesystem-style
+    /// mtime doesn't have a natural analog (a future read-only mirror
+    /// / test double); the LocalFilesystem impl below returns the
+    /// real mtime.
+    async fn week_mtime(
+        &self,
+        _year: u32,
+        _week: u32,
+    ) -> StorageResult<Option<std::time::SystemTime>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -243,6 +265,22 @@ impl StorageBackend for LocalFilesystem {
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io(path, e)),
+        }
+    }
+
+    async fn week_mtime(
+        &self,
+        year: u32,
+        week: u32,
+    ) -> StorageResult<Option<std::time::SystemTime>> {
+        let path = self.week_path(year, week)?;
+        match tokio::fs::metadata(&path).await {
+            Ok(meta) => match meta.modified() {
+                Ok(t) => Ok(Some(t)),
+                Err(e) => Err(io(path, e)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(io(path, e)),
         }
     }

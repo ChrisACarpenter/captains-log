@@ -375,6 +375,7 @@ mod tests {
             anything_else: other.to_string(),
             labels: labels.iter().map(|x| x.to_string()).collect(),
             last_updated: None,
+            ..Default::default()
         }
     }
 
@@ -544,6 +545,7 @@ mod tests {
                 .to_string(),
             labels: vec!["mage".into(), "qa".into(), "localization".into()],
             last_updated: None,
+            ..Default::default()
         };
         let out = render_body_html(
             &summary,

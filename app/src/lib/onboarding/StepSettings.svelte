@@ -13,6 +13,7 @@
   import StepHeader from './StepHeader.svelte';
   import PointerFinger from '$lib/PointerFinger.svelte';
   import PathPickerField from '$lib/PathPickerField.svelte';
+  import Checkbox from '$lib/Checkbox.svelte';
 
   type Props = {
     defaultJournalRoot: string;
@@ -71,10 +72,9 @@
   </div>
 
   <div class="field reminder">
-    <label class="checkbox-row">
-      <input type="checkbox" bind:checked={reminderEnabled} />
-      <span>Send me a weekly reminder to fill in the Weekly Summary</span>
-    </label>
+    <Checkbox bind:checked={reminderEnabled}>
+      Send me a weekly reminder to fill in the Weekly Summary
+    </Checkbox>
     {#if reminderEnabled}
       <div class="reminder-row">
         <label class="subfield">
@@ -125,21 +125,6 @@
      the toggle is on. */
   .reminder {
     gap: var(--space-3);
-  }
-
-  .checkbox-row {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    font-size: var(--text-body);
-    color: var(--text-primary);
-    cursor: pointer;
-  }
-  .checkbox-row input[type='checkbox'] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--accent-primary);
-    flex-shrink: 0;
   }
 
   .reminder-row {

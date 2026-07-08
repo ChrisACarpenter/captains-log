@@ -180,6 +180,7 @@ mod tests {
             anything_else: String::new(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
             last_updated: None,
+            ..Default::default()
         }
     }
 

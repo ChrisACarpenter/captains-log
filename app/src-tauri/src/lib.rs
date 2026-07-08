@@ -17,6 +17,7 @@ pub mod reminders;
 pub mod sent_log;
 pub mod settings;
 pub mod storage;
+pub mod tasks;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -425,6 +426,11 @@ pub fn run() {
             commands::get_label_stats,
             commands::get_notes_for_label,
             commands::search_journal,
+            commands::list_tasks,
+            commands::toggle_task,
+            commands::append_task_to_current_week,
+            commands::rebuild_task_completions_index,
+            commands::check_and_apply_rollover,
             commands::rename_label,
             commands::delete_label_cascade,
             commands::get_settings,

@@ -84,10 +84,25 @@
     {autocomplete}
     spellcheck={spellcheck ? 'true' : 'false'}
     class="text-input"
+    aria-describedby={warning ? `${id}-warning` : undefined}
+    aria-invalid={warning ? 'true' : undefined}
     bind:value
   />
   {#if warning}
-    <p class="field-hint is-warning">{warning}</p>
+    <!--
+      role="alert" + aria-live="assertive" so screen readers announce
+      validation errors as soon as they render. aria-describedby on the
+      input above wires the input to this element so navigating back to
+      the field re-announces the error.
+    -->
+    <p
+      id="{id}-warning"
+      class="field-hint is-warning"
+      role="alert"
+      aria-live="assertive"
+    >
+      {warning}
+    </p>
   {:else if hintSnippet}
     <p class="field-hint">{@render hintSnippet()}</p>
   {:else if hint}

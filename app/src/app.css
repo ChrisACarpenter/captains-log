@@ -485,6 +485,84 @@ p {
   box-shadow: 0 0 0 2px var(--focus-glow);
 }
 
+/* ---------- Checkbox square ----------
+ *
+ * Shared visual for a small "click to toggle" square that appears next
+ * to task text. Two callers today:
+ *   1. CodeMirror's markdown live-preview widget in MarkdownEditor
+ *      (rendered by lib/live-preview.ts TaskCheckboxWidget). Adds the
+ *      `.cm-md-task` marker class on top of this one for editor-local
+ *      layout tweaks (margin, vertical-align).
+ *   2. The landing-page task list on the / route.
+ *
+ * DOM contract callers must follow:
+ *   <button class="checkbox-square" type="button" role="checkbox"
+ *           aria-checked="true|false" aria-label="…">
+ *     <svg viewBox="0 0 24 24" width="12" height="12" fill="none"
+ *          stroke="currentColor" stroke-width="3" stroke-linecap="round"
+ *          stroke-linejoin="round" aria-hidden="true">
+ *       <polyline points="5 12 10 17 19 7"/>
+ *     </svg>
+ *   </button>
+ *
+ * The check glyph is stroked in `currentColor`. When the button is not
+ * checked, `color: transparent` makes it invisible; on aria-checked=true
+ * we flip color to `--bg-base` (the check reads as a cutout against the
+ * accent-primary fill). Callers own any surrounding margin.
+ */
+.checkbox-square {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  background: transparent;
+  /* --text-muted's 1.5px outline is a solid 4.59:1 against bg-surface —
+   * enough for the affordance to read as an interactive control at rest,
+   * without competing with body text for attention. */
+  border: 1.5px solid var(--text-muted);
+  border-radius: 3px;
+  color: transparent;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    border-color var(--transition-fast),
+    color var(--transition-fast);
+  outline: none;
+}
+.checkbox-square:hover {
+  border-color: var(--accent-primary);
+  background: var(--bg-surface);
+}
+.checkbox-square:focus-visible {
+  box-shadow: 0 0 0 2px var(--focus-glow);
+  border-color: var(--accent-primary);
+}
+/*
+ * Two selectors serve the same visual: `[aria-checked="true"]` is used
+ * by the STANDALONE variant (the CodeMirror task widget + landing-page
+ * task list, where the `.checkbox-square` element IS the interactive
+ * button and owns aria-checked directly). `.checked` is used by the
+ * Checkbox.svelte component, which puts aria-checked on the outer
+ * <button> and keeps the inner `.checkbox-square` decorative
+ * (aria-hidden); a plain `.checked` class on the inner span is the
+ * simplest bridge without leaking duplicate aria attributes.
+ */
+.checkbox-square[aria-checked="true"],
+.checkbox-square.checked {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--bg-base);
+}
+.checkbox-square:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+.checkbox-square svg {
+  flex-shrink: 0;
+}
+
 /* Keyboard-key chip. Inline `<kbd>⌘⇧S</kbd>` in prose renders as a tiny
  * pill so the shortcut reads as a "key on a keyboard" affordance, not a
  * mid-sentence font switch. Used in placeholder copy + future help text. */

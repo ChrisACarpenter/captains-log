@@ -93,6 +93,22 @@ pub fn iso_week_start(year: u32, week: u32) -> NaiveDate {
         .expect("valid ISO year-week")
 }
 
+/// Return the ISO year+week immediately preceding `(year, week)`.
+///
+/// Handles the year-boundary case: the week before ISO Week 1 lives in
+/// the prior *ISO* year (which may or may not match the prior *calendar*
+/// year) and can be either week 52 or week 53 depending on leap-week
+/// years. We resolve it by taking the Monday of `(year, week)` and
+/// subtracting one day, then reading the ISO year+week off of that
+/// date — same source of truth as `iso_year_week`.
+pub fn iso_previous_year_week(year: u32, week: u32) -> (u32, u32) {
+    if week > 1 {
+        return (year, week - 1);
+    }
+    let sunday_of_prev_week = iso_week_start(year, 1) - chrono::Duration::days(1);
+    iso_year_week(sunday_of_prev_week)
+}
+
 /// Render the scaffold for a brand-new weekly file: frontmatter, empty
 /// Weekly Summary, and an empty Weekly Notes section that subsequent Notes
 /// get appended into.
@@ -126,6 +142,10 @@ pub fn weekly_file_scaffold(year: u32, week: u32, now: chrono::DateTime<FixedOff
          \n\
          ### Labels\n\
          \n\
+         ### Tasks\n\
+         {tasks_anchor_inc}\n\
+         {tasks_anchor_done}\n\
+         \n\
          ## Weekly Notes\n",
         year = year,
         week = week,
@@ -133,6 +153,8 @@ pub fn weekly_file_scaffold(year: u32, week: u32, now: chrono::DateTime<FixedOff
         end_iso = end.format("%Y-%m-%d"),
         modified = now.format("%Y-%m-%dT%H:%M:%S%:z"),
         human_range = human_range,
+        tasks_anchor_inc = TASKS_ANCHOR_INCOMPLETE,
+        tasks_anchor_done = TASKS_ANCHOR_COMPLETED,
     )
 }
 
@@ -200,6 +222,17 @@ impl CaptureDraft {
 ///
 /// `last_updated` is a human-readable string (`YYYY-MM-DD HH:MM` in the user's
 /// local time when last saved) or `None` for never-saved.
+///
+/// **Phase 3d (Slice 6a)** added `tasks_body`: the raw markdown of the
+/// `### Tasks` section between `### Labels` and `## Weekly Notes`. Tasks
+/// used to live inline in `plans_and_priorities` as `- [ ]` / `- [x]`
+/// lines mixed with prose; they're now a first-class section anchored
+/// by HTML comment markers (`captainslog:tasks:incomplete` /
+/// `captainslog:tasks:completed`) so writes have deterministic
+/// insertion points and reads can survive user tampering with the
+/// human-readable heading. Legacy files (no `### Tasks` section) parse
+/// with `tasks_body = ""`; migration happens opportunistically on the
+/// next write.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WeeklySummary {
@@ -211,6 +244,11 @@ pub struct WeeklySummary {
     /// at the end of the Weekly Summary section, rendered as `#tag1 #tag2`.
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Raw markdown body of the `### Tasks` section — includes the HTML
+    /// anchor comments plus every `- [ ]` / `- [x]` line. `""` for
+    /// legacy files that haven't been migrated yet.
+    #[serde(default)]
+    pub tasks_body: String,
     pub last_updated: Option<String>,
 }
 
@@ -221,7 +259,19 @@ const SECTION_PLANS: &str = "### Plans and priorities for next week";
 const SECTION_CHALLENGES: &str = "### Challenges or roadblocks";
 const SECTION_OTHER: &str = "### Anything else on your mind";
 const SECTION_LABELS: &str = "### Labels";
+const SECTION_TASKS: &str = "### Tasks";
 const LAST_UPDATED_PREFIX: &str = "*Last updated: ";
+
+/// HTML comment anchor emitted right before the incomplete task list
+/// inside the `### Tasks` section. Writes find this anchor to know
+/// where to insert new `- [ ]` lines; if the anchor is missing (user
+/// tampered with the file), the writer falls back to appending at the
+/// end of the section.
+pub const TASKS_ANCHOR_INCOMPLETE: &str = "<!-- captainslog:tasks:incomplete -->";
+/// HTML comment anchor emitted right before the completed task list
+/// inside the `### Tasks` section. Same fallback semantics as
+/// [`TASKS_ANCHOR_INCOMPLETE`].
+pub const TASKS_ANCHOR_COMPLETED: &str = "<!-- captainslog:tasks:completed -->";
 
 /// Parse the Weekly Summary section out of a weekly file's full markdown.
 /// Missing/unparseable sections yield empty strings. Never panics.
@@ -254,6 +304,7 @@ pub fn parse_weekly_summary(file_content: &str) -> WeeklySummary {
     summary.plans_and_priorities = extract_subsection(section, SECTION_PLANS);
     summary.challenges_or_roadblocks = extract_subsection(section, SECTION_CHALLENGES);
     summary.anything_else = extract_subsection(section, SECTION_OTHER);
+    summary.tasks_body = extract_subsection(section, SECTION_TASKS);
 
     // Labels live as a free-form `### Labels` subsection. Body is one or more
     // `#tag` tokens (anything starting with #); whitespace between them is fine.
@@ -303,6 +354,12 @@ fn extract_subsection(section: &str, header: &str) -> String {
 
 /// Render a Weekly Summary section back to markdown, preserving the structure
 /// the scaffold uses (so the file stays diff-clean).
+///
+/// If `summary.tasks_body` is empty we emit the anchor scaffolding
+/// (both HTML comments with nothing between them). That way a
+/// freshly-scaffolded file already has valid insertion points for
+/// the first task write, and callers don't need to bootstrap the
+/// anchors themselves.
 pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
     let last_updated = summary.last_updated.as_deref().unwrap_or("never");
     let labels_line = if summary.labels.is_empty() {
@@ -314,6 +371,15 @@ pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
             .map(|l| format!("#{}", l.trim_start_matches('#')))
             .collect::<Vec<_>>()
             .join(" ")
+    };
+    let tasks_body = if summary.tasks_body.trim().is_empty() {
+        // Fresh scaffold — emit anchors with an empty completed-list
+        // beneath. Writes will insert task lines after the appropriate
+        // anchor. Both anchors live on their own lines so the parser's
+        // "find anchor" is a simple substring hit.
+        format!("{TASKS_ANCHOR_INCOMPLETE}\n{TASKS_ANCHOR_COMPLETED}")
+    } else {
+        summary.tasks_body.trim_end().to_string()
     };
     format!(
         "## Weekly Summary\n\
@@ -332,13 +398,17 @@ pub fn render_weekly_summary(summary: &WeeklySummary) -> String {
          {other}\n\
          \n\
          ### Labels\n\
-         {labels}\n",
+         {labels}\n\
+         \n\
+         ### Tasks\n\
+         {tasks}\n",
         last_updated = last_updated,
         key = trim_body(&summary.key_accomplishments),
         plans = trim_body(&summary.plans_and_priorities),
         challenges = trim_body(&summary.challenges_or_roadblocks),
         other = trim_body(&summary.anything_else),
         labels = labels_line,
+        tasks = tasks_body,
     )
 }
 
@@ -382,6 +452,133 @@ pub fn replace_weekly_summary_in_file(file_content: &str, new_summary: &WeeklySu
     }
 
     format!("{before}{new_section}\n{after}")
+}
+
+// ---------------------------------------------------------------------------
+// Legacy-task migration (Phase 3d Slice 6a)
+// ---------------------------------------------------------------------------
+
+/// Detect whether a weekly file predates the dedicated `### Tasks`
+/// section: it has `- [ ]` / `- [x]` lines in the "Plans and
+/// priorities" body AND no non-empty `### Tasks` section. Callers use
+/// this to decide whether to run migration before their normal write
+/// path.
+///
+/// A file that is already migrated (tasks live in `tasks_body`) or a
+/// task-free file (no checkboxes anywhere) reports `false`.
+pub fn needs_task_migration(file_content: &str) -> bool {
+    let summary = parse_weekly_summary(file_content);
+    if plans_body_has_tasks(&summary.plans_and_priorities)
+        && tasks_body_is_effectively_empty(&summary.tasks_body)
+    {
+        return true;
+    }
+    false
+}
+
+fn plans_body_has_tasks(plans: &str) -> bool {
+    plans.lines().any(is_task_line)
+}
+
+/// A tasks body counts as "effectively empty" if it contains no
+/// checkbox lines. Anchor comments alone (the fresh-scaffold state)
+/// are fine.
+fn tasks_body_is_effectively_empty(tasks_body: &str) -> bool {
+    !tasks_body.lines().any(is_task_line)
+}
+
+fn is_task_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let Some(rest) = trimmed.strip_prefix("- [") else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    let Some(marker) = chars.next() else { return false };
+    if !matches!(marker, ' ' | 'x' | 'X') {
+        return false;
+    }
+    matches!(chars.next(), Some(']'))
+}
+
+/// Migrate a legacy weekly file's tasks out of the "Plans and
+/// priorities" body and into the new `### Tasks` section. Returns
+/// `Some(new_content)` when a migration happened, `None` when the
+/// file was already migrated (or had no tasks to migrate).
+///
+/// Preserves everything else: frontmatter, prose in Plans + other
+/// summary sections, Weekly Notes, labels, and `last_updated`. Prose
+/// in the Plans body stays exactly where it was — only lines
+/// matching `- [ ]` / `- [x]` (any indentation, any case on `x`)
+/// relocate. Task identity (text + normalized-hash + ordinal) is
+/// preserved because the parser reads task lines in the same order
+/// from the same lines; the sidecar keys keep working without
+/// re-keying.
+pub fn migrate_tasks_from_plans(file_content: &str) -> Option<String> {
+    if !needs_task_migration(file_content) {
+        return None;
+    }
+    let mut summary = parse_weekly_summary(file_content);
+
+    // Split Plans body into task-lines + prose-lines, keeping order.
+    let plans = &summary.plans_and_priorities;
+    let mut task_lines: Vec<String> = Vec::new();
+    let mut prose_lines: Vec<&str> = Vec::new();
+    for line in plans.split('\n') {
+        if is_task_line(line) {
+            task_lines.push(line.to_string());
+        } else {
+            prose_lines.push(line);
+        }
+    }
+
+    // Rebuild the Plans body from prose only. Trim trailing blank
+    // lines but preserve inner blanks (paragraph separators).
+    let new_plans = {
+        let joined = prose_lines.join("\n");
+        joined.trim_end().to_string()
+    };
+
+    // Split task lines into incomplete/completed by checkbox state,
+    // preserving order within each group.
+    let mut incomplete: Vec<String> = Vec::new();
+    let mut completed: Vec<String> = Vec::new();
+    for line in task_lines {
+        let trimmed = line.trim_start();
+        // We already know it's a task line — safe to look at the marker.
+        let is_completed = trimmed
+            .strip_prefix("- [")
+            .and_then(|rest| rest.chars().next())
+            .map(|c| matches!(c, 'x' | 'X'))
+            .unwrap_or(false);
+        if is_completed {
+            completed.push(line);
+        } else {
+            incomplete.push(line);
+        }
+    }
+
+    // Rebuild tasks_body: anchor + incomplete lines + anchor + completed lines.
+    let mut new_tasks_body = String::new();
+    new_tasks_body.push_str(TASKS_ANCHOR_INCOMPLETE);
+    new_tasks_body.push('\n');
+    for line in &incomplete {
+        new_tasks_body.push_str(line);
+        new_tasks_body.push('\n');
+    }
+    new_tasks_body.push_str(TASKS_ANCHOR_COMPLETED);
+    new_tasks_body.push('\n');
+    for line in &completed {
+        new_tasks_body.push_str(line);
+        new_tasks_body.push('\n');
+    }
+    // Trim the final trailing newline — the renderer's format
+    // template adds one after the tasks slot.
+    let new_tasks_body = new_tasks_body.trim_end().to_string();
+
+    summary.plans_and_priorities = new_plans;
+    summary.tasks_body = new_tasks_body;
+
+    Some(replace_weekly_summary_in_file(file_content, &summary))
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +684,31 @@ mod tests {
         // 2025-12-29 (Monday) is ISO week 1 of 2026.
         let d = NaiveDate::from_ymd_opt(2025, 12, 29).unwrap();
         assert_eq!(iso_year_week(d), (2026, 1));
+    }
+
+    #[test]
+    fn iso_previous_year_week_within_year() {
+        assert_eq!(iso_previous_year_week(2026, 25), (2026, 24));
+        assert_eq!(iso_previous_year_week(2026, 2), (2026, 1));
+    }
+
+    #[test]
+    fn iso_previous_year_week_crosses_year_boundary() {
+        // 2026-W1 starts Mon 2025-12-29, so the day before it (Sun
+        // 2025-12-28) is the last day of 2025-W52. Regression guard
+        // for the year-boundary branch — the helper must derive the
+        // previous week from the actual calendar, not assume the
+        // prior year always ends on week 52 or 53.
+        assert_eq!(iso_previous_year_week(2026, 1), (2025, 52));
+    }
+
+    #[test]
+    fn iso_previous_year_week_from_53_week_year() {
+        // 2021-W1 → previous is ISO week 53 of 2020 (2020 has 53 ISO
+        // weeks — a leap-week year). Confirms we correctly read the
+        // 52-vs-53 distinction off of chrono's iso_week() rather than
+        // hardcoding an assumption.
+        assert_eq!(iso_previous_year_week(2021, 1), (2020, 53));
     }
 
     #[test]
@@ -662,6 +884,7 @@ mod tests {
             anything_else: "five".to_string(),
             labels: vec!["release".to_string(), "captains-log".to_string()],
             last_updated: Some("2026-06-22 17:00".to_string()),
+            ..Default::default()
         };
         let rendered = render_weekly_summary(&original);
         let parsed = parse_weekly_summary(&rendered);
@@ -671,6 +894,238 @@ mod tests {
         assert_eq!(parsed.anything_else, original.anything_else);
         assert_eq!(parsed.labels, original.labels);
         assert_eq!(parsed.last_updated, original.last_updated);
+    }
+
+    #[test]
+    fn scaffold_includes_tasks_section_with_both_anchors() {
+        let scaffold = weekly_file_scaffold(2026, 25, ts("2026-06-15T09:00:00-04:00"));
+        assert!(scaffold.contains("### Tasks"));
+        assert!(scaffold.contains(TASKS_ANCHOR_INCOMPLETE));
+        assert!(scaffold.contains(TASKS_ANCHOR_COMPLETED));
+        // Tasks section sits between Labels and Weekly Notes.
+        let labels_pos = scaffold.find("### Labels").unwrap();
+        let tasks_pos = scaffold.find("### Tasks").unwrap();
+        let notes_pos = scaffold.find("## Weekly Notes").unwrap();
+        assert!(labels_pos < tasks_pos);
+        assert!(tasks_pos < notes_pos);
+    }
+
+    #[test]
+    fn parse_summary_extracts_tasks_body() {
+        let scaffold = weekly_file_scaffold(2026, 25, ts("2026-06-15T09:00:00-04:00"));
+        let parsed = parse_weekly_summary(&scaffold);
+        // Fresh scaffold has empty tasks list but the anchors are
+        // present in tasks_body so writers can find insertion
+        // points on the first task action.
+        assert!(parsed.tasks_body.contains(TASKS_ANCHOR_INCOMPLETE));
+        assert!(parsed.tasks_body.contains(TASKS_ANCHOR_COMPLETED));
+    }
+
+    #[test]
+    fn render_summary_roundtrips_tasks_body_through_parse() {
+        let original = WeeklySummary {
+            tasks_body: format!(
+                "{TASKS_ANCHOR_INCOMPLETE}\n- [ ] one\n{TASKS_ANCHOR_COMPLETED}\n- [x] done"
+            ),
+            ..Default::default()
+        };
+        let rendered = render_weekly_summary(&original);
+        let parsed = parse_weekly_summary(&rendered);
+        assert!(parsed.tasks_body.contains("- [ ] one"));
+        assert!(parsed.tasks_body.contains("- [x] done"));
+        assert!(parsed.tasks_body.contains(TASKS_ANCHOR_INCOMPLETE));
+        assert!(parsed.tasks_body.contains(TASKS_ANCHOR_COMPLETED));
+    }
+
+    #[test]
+    fn needs_task_migration_true_for_legacy_files() {
+        // Plans body has tasks, no ### Tasks section → migration
+        // is required.
+        let legacy = "## Weekly Summary\n*Last updated: never*\n\
+                      \n### Key accomplishments\n\
+                      \n### Plans and priorities for next week\n\
+                      Some planning prose\n\
+                      - [ ] Ship the thing\n\
+                      - [x] Merged a PR\n\
+                      \n### Challenges or roadblocks\n\
+                      \n### Anything else on your mind\n\
+                      \n### Labels\n\
+                      \n## Weekly Notes\n";
+        assert!(needs_task_migration(legacy));
+    }
+
+    #[test]
+    fn needs_task_migration_false_for_already_migrated_files() {
+        // Tasks live in the new section — no migration needed.
+        let migrated = format!(
+            "## Weekly Summary\n*Last updated: never*\n\
+             \n### Key accomplishments\n\
+             \n### Plans and priorities for next week\n\
+             Just prose here.\n\
+             \n### Challenges or roadblocks\n\
+             \n### Anything else on your mind\n\
+             \n### Labels\n\
+             \n### Tasks\n\
+             {TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Ship the thing\n\
+             {TASKS_ANCHOR_COMPLETED}\n\
+             \n## Weekly Notes\n"
+        );
+        assert!(!needs_task_migration(&migrated));
+    }
+
+    #[test]
+    fn needs_task_migration_false_for_task_free_files() {
+        // No tasks anywhere — nothing to migrate.
+        let empty = "## Weekly Summary\n*Last updated: never*\n\
+                     \n### Key accomplishments\n\
+                     Some accomplishment prose.\n\
+                     \n### Plans and priorities for next week\n\
+                     Just prose here.\n\
+                     \n### Challenges or roadblocks\n\
+                     \n### Anything else on your mind\n\
+                     \n### Labels\n\
+                     \n## Weekly Notes\n";
+        assert!(!needs_task_migration(empty));
+    }
+
+    #[test]
+    fn migrate_tasks_relocates_tasks_and_preserves_prose() {
+        let legacy = "---\nperiod: 2026-W25\n---\n\n\
+                      # Week of June 15 - June 21, 2026\n\n\
+                      ## Weekly Summary\n*Last updated: never*\n\
+                      \n### Key accomplishments\n\
+                      - Filed some bugs\n\
+                      \n### Plans and priorities for next week\n\
+                      Some planning prose.\n\
+                      - [ ] Ship the thing\n\
+                      - [x] Merged a PR\n\
+                      More prose after tasks.\n\
+                      - [ ] Follow up\n\
+                      \n### Challenges or roadblocks\n\
+                      \n### Anything else on your mind\n\
+                      \n### Labels\n\
+                      \n## Weekly Notes\n\n\
+                      ### 2026-06-15 09:00 — Kickoff\n\
+                      **Labels:**\n\n\
+                      A note.\n";
+        let migrated = migrate_tasks_from_plans(legacy).expect("migration should fire");
+
+        // Tasks now live in the ### Tasks section, not the Plans body.
+        assert!(!migrated
+            .lines()
+            .skip_while(|l| !l.contains("Plans and priorities"))
+            .take_while(|l| !l.contains("### Challenges"))
+            .any(|l| l.contains("- [ ]") || l.contains("- [x]")));
+
+        // Both incomplete tasks land in the incomplete bucket.
+        let parsed = parse_weekly_summary(&migrated);
+        assert!(parsed.tasks_body.contains("- [ ] Ship the thing"));
+        assert!(parsed.tasks_body.contains("- [x] Merged a PR"));
+        assert!(parsed.tasks_body.contains("- [ ] Follow up"));
+
+        // Prose in the Plans body is preserved.
+        assert!(parsed.plans_and_priorities.contains("Some planning prose."));
+        assert!(parsed.plans_and_priorities.contains("More prose after tasks."));
+
+        // Weekly Notes untouched.
+        assert!(migrated.contains("### 2026-06-15 09:00 — Kickoff"));
+        assert!(migrated.contains("A note."));
+
+        // Key accomplishments prose preserved.
+        assert!(parsed.key_accomplishments.contains("- Filed some bugs"));
+    }
+
+    #[test]
+    fn migrate_tasks_preserves_task_hash_and_ordinal_identity() {
+        // Provenance keys are (year, week, textHash, ordinal). Migration
+        // relocates task lines but must NOT re-key anything. Verify by
+        // parsing tasks pre- and post-migration and matching identity.
+        let legacy = "## Weekly Summary\n*Last updated: never*\n\
+                      \n### Key accomplishments\n\
+                      \n### Plans and priorities for next week\n\
+                      Some prose\n\
+                      - [ ] Alpha\n\
+                      - [x] Beta\n\
+                      More prose\n\
+                      - [ ] Gamma\n\
+                      \n### Challenges or roadblocks\n\
+                      \n### Anything else on your mind\n\
+                      \n### Labels\n\
+                      \n## Weekly Notes\n";
+
+        // Pre-migration: parse tasks from Plans body via the legacy code path.
+        let pre_summary = parse_weekly_summary(legacy);
+        let pre_tasks = crate::tasks::parse_plans_tasks(&pre_summary.plans_and_priorities);
+
+        let migrated = migrate_tasks_from_plans(legacy).unwrap();
+        let post_summary = parse_weekly_summary(&migrated);
+        let post_tasks = crate::tasks::parse_plans_tasks(&post_summary.tasks_body);
+
+        // Migration groups by state (all `[ ]` before all `[x]`),
+        // so per-index order differs from the pre-migration file
+        // order. Match by (text_hash, is_completed) instead — that's
+        // the identity the sidecar keys on.
+        assert_eq!(pre_tasks.len(), post_tasks.len());
+        for pre in &pre_tasks {
+            let matched = post_tasks
+                .iter()
+                .find(|p| p.text_hash == pre.text_hash && p.is_completed == pre.is_completed)
+                .unwrap_or_else(|| panic!("no post-migration match for {}", pre.text));
+            assert_eq!(matched.text, pre.text);
+            assert_eq!(matched.ordinal, pre.ordinal);
+        }
+    }
+
+    #[test]
+    fn migrate_tasks_returns_none_when_already_migrated() {
+        let already = format!(
+            "## Weekly Summary\n*Last updated: never*\n\
+             \n### Key accomplishments\n\
+             \n### Plans and priorities for next week\n\
+             Just prose.\n\
+             \n### Challenges or roadblocks\n\
+             \n### Anything else on your mind\n\
+             \n### Labels\n\
+             \n### Tasks\n\
+             {TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Ship the thing\n\
+             {TASKS_ANCHOR_COMPLETED}\n\
+             \n## Weekly Notes\n"
+        );
+        assert!(migrate_tasks_from_plans(&already).is_none());
+    }
+
+    #[test]
+    fn migrate_tasks_handles_nested_indented_tasks() {
+        // Raw string so leading whitespace on indented lines
+        // survives — the escaped-continuation form (`\` at
+        // line-end) would eat the indent spaces silently.
+        let legacy = r#"## Weekly Summary
+*Last updated: never*
+
+### Key accomplishments
+
+### Plans and priorities for next week
+- [ ] Top-level task
+  - [ ] Nested task
+    - [x] Deeply nested done
+
+### Challenges or roadblocks
+
+### Anything else on your mind
+
+### Labels
+
+## Weekly Notes
+"#;
+        let migrated = migrate_tasks_from_plans(legacy).unwrap();
+        // All three tasks (regardless of indent depth) move to
+        // the Tasks section with their indentation preserved.
+        let parsed = parse_weekly_summary(&migrated);
+        assert!(parsed.tasks_body.contains("- [ ] Top-level task"));
+        assert!(parsed.tasks_body.contains("  - [ ] Nested task"));
+        assert!(parsed.tasks_body.contains("    - [x] Deeply nested done"));
     }
 
     #[test]
@@ -728,6 +1183,7 @@ mod tests {
             anything_else: String::new(),
             labels: vec![],
             last_updated: Some("2026-06-22 17:30".to_string()),
+            ..Default::default()
         };
 
         let updated = replace_weekly_summary_in_file(original, &new_summary);

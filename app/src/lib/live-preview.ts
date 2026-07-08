@@ -397,7 +397,10 @@ class TaskCheckboxWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'cm-md-task';
+    // `checkbox-square` carries the visual (see app.css); `cm-md-task`
+    // is the editor-local marker for margin/baseline tweaks and any
+    // future editor-only behaviours.
+    btn.className = 'cm-md-task checkbox-square';
     btn.setAttribute('role', 'checkbox');
     btn.setAttribute('aria-checked', this.checked ? 'true' : 'false');
     btn.setAttribute(
