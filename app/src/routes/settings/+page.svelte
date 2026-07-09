@@ -101,6 +101,7 @@
     showCompletedTimestamp: boolean;
     hideTaskList: boolean;
     autoRolloverEnabled: boolean;
+    autoImportCompleted: boolean;
   };
 
   type Settings = {
@@ -218,6 +219,7 @@
   let taskShowCompletedTimestamp = $state(false);
   let taskHideTaskList = $state(false);
   let taskAutoRolloverEnabled = $state(true);
+  let taskAutoImportCompleted = $state(true);
 
   // Rebuild-task-index state — mirrors isRebuildingIndex from the
   // Labels tab. `taskRebuildReceipt` renders inline in the tab body
@@ -1364,6 +1366,7 @@
       taskShowCompletedTimestamp = s.taskList?.showCompletedTimestamp ?? false;
       taskHideTaskList = s.taskList?.hideTaskList ?? false;
       taskAutoRolloverEnabled = s.taskList?.autoRolloverEnabled ?? true;
+      taskAutoImportCompleted = s.taskList?.autoImportCompleted ?? true;
       // Phase 2.8 — load the persisted custom palette (if any) so toggling
       // into Custom restores the user's last-saved theme verbatim.
       persistedCustomTheme = s.customTheme ?? null;
@@ -1516,7 +1519,8 @@
             openTasksFirst: taskOpenTasksFirst,
             showCompletedTimestamp: taskShowCompletedTimestamp,
             hideTaskList: taskHideTaskList,
-            autoRolloverEnabled: taskAutoRolloverEnabled
+            autoRolloverEnabled: taskAutoRolloverEnabled,
+            autoImportCompleted: taskAutoImportCompleted
           }
         }
       });
@@ -2553,6 +2557,17 @@
           <div class="section">
             <h2 class="section-title">Display</h2>
             <div class="checkbox-stack">
+              <!--
+                "Hide the Task List" leads the list per Chris's request:
+                if you're going to opt out of the whole feature, that
+                choice sits at the top. Everything below it is a
+                sub-preference of the "on" case.
+              -->
+              <Checkbox
+                bind:checked={taskHideTaskList}
+                label="Hide the Task List"
+                description="Removes the task list section entirely from the main page. Useful if you don't use the task feature."
+              />
               <Checkbox
                 bind:checked={taskShowCompleted}
                 label="Show Completed Tasks"
@@ -2574,9 +2589,9 @@
                 description="At the start of each week, any tasks you didn't finish last week are copied into this week's list. Rolled-over tasks show a small chip so you can see where they came from. Turn off to start each week with a clean list."
               />
               <Checkbox
-                bind:checked={taskHideTaskList}
-                label="Hide the Task List"
-                description="Removes the task list section entirely from the main page. Useful if you don't use the task feature."
+                bind:checked={taskAutoImportCompleted}
+                label="Auto Add Completed Tasks"
+                description="Once per day, automatically append every completed task from this week under a #### Completed Tasks heading in your Weekly Summary's Key accomplishments field. Same behavior as the /summary editor's Import button, but run for you. Duplicates are always skipped."
               />
             </div>
           </div>

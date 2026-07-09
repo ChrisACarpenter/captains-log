@@ -24,6 +24,7 @@
     showCompletedTimestamp: boolean;
     hideTaskList: boolean;
     autoRolloverEnabled: boolean;
+    autoImportCompleted: boolean;
   };
 
   type Settings = {
@@ -46,6 +47,7 @@
     showCompletedTimestamp: false,
     hideTaskList: false,
     autoRolloverEnabled: true,
+    autoImportCompleted: true,
   };
 
   // Shape mirrors the backend `TaskListEntry` (see
@@ -110,6 +112,39 @@
   let addTaskText = $state('');
   let addingTask = $state(false);
   let addError = $state('');
+
+  // Slice 6c delete confirmation state. Modal opens when the trash
+  // icon is clicked on a row. Task text is echoed back in the modal
+  // body so the user has a chance to reconsider before the row
+  // (and its provenance + timestamp) is gone.
+  let deleteConfirmTask = $state<TaskListEntry | null>(null);
+  let deletingTask = $state(false);
+  let deleteError = $state('');
+
+  // Slice 6b inline-edit state. Exactly one row can be in edit mode at
+  // a time (identified by `editingKey`); its input field is bound to
+  // `editText`. `editError` surfaces backend validation failures
+  // inline under the row so the user sees the reason next to the
+  // input they just tried to submit. `savingEdit` disables Enter
+  // during the IPC round-trip so a fast second Return doesn't
+  // double-submit. `editInputEl` is the DOM handle used by the
+  // $effect below to focus + select on open.
+  let editingKey = $state<string | null>(null);
+  let editText = $state('');
+  let editError = $state('');
+  let savingEdit = $state(false);
+  let editInputEl = $state<HTMLInputElement | null>(null);
+
+  // Autofocus + select-all on edit open. Tracks `editingKey` so it
+  // re-fires when the user switches between rows (pencil → other
+  // pencil). Guarded by an element check because the input only
+  // exists in the DOM while editingKey is non-null.
+  $effect(() => {
+    if (editingKey !== null && editInputEl) {
+      editInputEl.focus();
+      editInputEl.select();
+    }
+  });
 
   /** How long to wait for either IPC before we consider it hung. In a
    *  local Tauri app the write is nearly instant; 30s exists purely as
@@ -238,6 +273,18 @@
     return list;
   });
 
+  // Slice 6a: the landing page renders two grouped sub-lists
+  // (Incomplete / Completed) that match the file's `### Tasks`
+  // anchor partition. Both groups filter down from `visibleTasks`
+  // so they inherit the `showCompleted` toggle for free (turning it
+  // off collapses `completedVisibleTasks` to empty).
+  const incompleteVisibleTasks = $derived(
+    visibleTasks.filter((t) => !t.isCompleted),
+  );
+  const completedVisibleTasks = $derived(
+    visibleTasks.filter((t) => t.isCompleted),
+  );
+
   /**
    * Format an ISO 8601 completedAt string as a "checked Xm/h/d ago"
    * label. Deliberately coarse — we're rendering into a small chip
@@ -304,6 +351,127 @@
       }
     } finally {
       togglingKeys[key] = false;
+    }
+  }
+
+  // ---- Slice 6b: inline edit ----
+
+  type TaskEditResult = {
+    textHash: string;
+    ordinal: number;
+    isCompleted: boolean;
+  };
+
+  function openEdit(t: TaskListEntry): void {
+    // Guard against re-open of the same row (would clobber unsaved
+    // input text) but ALLOW switching from one row's edit to another:
+    // opening a second pencil implicitly cancels the first.
+    const key = taskKey(t);
+    if (editingKey === key) return;
+    editingKey = key;
+    editText = t.text;
+    editError = '';
+  }
+
+  function cancelEdit(): void {
+    if (savingEdit) return;
+    editingKey = null;
+    editText = '';
+    editError = '';
+  }
+
+  async function submitEdit(t: TaskListEntry): Promise<void> {
+    if (savingEdit) return;
+    const trimmed = editText.trim();
+    if (trimmed.length === 0) {
+      editError = "Task text can't be empty.";
+      return;
+    }
+    // Same-text edit is a no-op — dismiss without a round-trip so the
+    // user doesn't get a needless spinner + last_updated stamp for a
+    // change they didn't actually make.
+    if (trimmed === t.text.trim()) {
+      cancelEdit();
+      return;
+    }
+    savingEdit = true;
+    editError = '';
+    try {
+      await withTimeout(
+        invoke<TaskEditResult>('edit_task', {
+          year: t.year,
+          week: t.week,
+          textHash: t.textHash,
+          ordinal: t.ordinal,
+          text: trimmed,
+        }),
+        ADD_TASK_TIMEOUT_MS,
+        'Edit task',
+      );
+      tasks = await withTimeout(
+        invoke<TaskListEntry[]>('list_tasks'),
+        ADD_TASK_TIMEOUT_MS,
+        'Refresh task list',
+      );
+      editingKey = null;
+      editText = '';
+    } catch (err) {
+      editError = String(err);
+    } finally {
+      savingEdit = false;
+    }
+  }
+
+  function onEditKeydown(e: KeyboardEvent, t: TaskListEntry): void {
+    if (e.key === 'Enter' && !e.isComposing) {
+      e.preventDefault();
+      void submitEdit(t);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      cancelEdit();
+    }
+  }
+
+  // ---- Slice 6c: delete confirmation ----
+
+  function openDeleteConfirm(t: TaskListEntry): void {
+    if (deleteConfirmTask) return; // one confirm at a time
+    deleteConfirmTask = t;
+    deleteError = '';
+  }
+
+  function closeDeleteConfirm(): void {
+    if (deletingTask) return; // Modal also honors blockDismissal
+    deleteConfirmTask = null;
+    deleteError = '';
+  }
+
+  async function submitDelete(): Promise<void> {
+    const t = deleteConfirmTask;
+    if (!t || deletingTask) return;
+    deletingTask = true;
+    deleteError = '';
+    try {
+      await withTimeout(
+        invoke('delete_task', {
+          year: t.year,
+          week: t.week,
+          textHash: t.textHash,
+          ordinal: t.ordinal,
+        }),
+        ADD_TASK_TIMEOUT_MS,
+        'Delete task',
+      );
+      tasks = await withTimeout(
+        invoke<TaskListEntry[]>('list_tasks'),
+        ADD_TASK_TIMEOUT_MS,
+        'Refresh task list',
+      );
+      deleteConfirmTask = null;
+    } catch (err) {
+      deleteError = String(err);
+    } finally {
+      deletingTask = false;
     }
   }
 
@@ -408,12 +576,40 @@
     }
   }
 
+  // Slice 6c-followup: once-per-local-day auto-import of completed
+  // tasks into Key accomplishments. All gating (setting off + already-
+  // ran-today) is enforced by the backend; the frontend just fires
+  // the same trigger set as the rollover check. Idempotent, best-
+  // effort — errors are logged, never surfaced.
+  let autoImportInFlight = false;
+  async function checkAndApplyAutoImport(): Promise<void> {
+    if (autoImportInFlight) return;
+    if (loading || settings === null || settings.firstRun) return;
+    // Setting-gate here for a quick short-circuit + to skip the IPC
+    // when we already know the answer. The backend enforces the
+    // same rule authoritatively.
+    if (!taskListPrefs.autoImportCompleted) return;
+    autoImportInFlight = true;
+    try {
+      await invoke('check_and_apply_auto_task_import');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[auto-import] check failed:', err);
+    } finally {
+      autoImportInFlight = false;
+    }
+  }
+
   function onVisibilityChange(): void {
-    if (!document.hidden) void checkAndApplyRollover();
+    if (!document.hidden) {
+      void checkAndApplyRollover();
+      void checkAndApplyAutoImport();
+    }
   }
 
   function onWeekChangedEvent(): void {
     void checkAndApplyRollover();
+    void checkAndApplyAutoImport();
   }
 
   onMount(async () => {
@@ -435,6 +631,10 @@
     // this is safe to fire on every open even when we've already
     // rolled over for the current week.
     void checkAndApplyRollover();
+    // Slice 6c-followup — auto-import completed tasks. Backend gates
+    // on setting + last-import-date, so this is safe to fire alongside
+    // the rollover check on every trigger event.
+    void checkAndApplyAutoImport();
 
     // Cross-window sync: when the Settings tab saves a change, refetch
     // settings so `taskListPrefs` picks up the new toggles without a
@@ -457,6 +657,7 @@
     // boundary while the app is focused.
     unlistenFocus = await getCurrentWindow().listen('tauri://focus', () => {
       void checkAndApplyRollover();
+      void checkAndApplyAutoImport();
     });
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('captainslog:week-changed', onWeekChangedEvent);
@@ -466,7 +667,10 @@
     // Gated on !document.hidden so we don't burn cycles when the
     // window is minimized / on another Space.
     rolloverSafetyInterval = setInterval(() => {
-      if (!document.hidden) void checkAndApplyRollover();
+      if (!document.hidden) {
+        void checkAndApplyRollover();
+        void checkAndApplyAutoImport();
+      }
     }, 60_000);
   });
 
@@ -633,47 +837,76 @@
               the brand footer off-screen. `role=region` + label so
               screen-reader users hear a landmark before the scroll
               begins.
+
+              Slice 6a: tasks are visually grouped into "Incomplete
+              Tasks" and "Completed Tasks" sections, matching the
+              file's `### Tasks` anchor partition. The `<li>` template
+              is factored into a snippet so both sections share the
+              same rendering, provenance chip, timestamp chip, and
+              a11y wiring.
             -->
             <div
               class="task-scroll"
               role="region"
               aria-label="Task list (scrollable)"
             >
-              <ul class="task-items">
-                {#each visibleTasks as t (taskKey(t))}
-                  <li class="task-item" class:completed={t.isCompleted}>
-                    <!--
-                      Shared visual with the MarkdownEditor checkbox widget
-                      (see .checkbox-square in app.css). role=checkbox +
-                      aria-checked matches the ARIA-standard toggle pattern
-                      and drives the accent-primary fill via the
-                      `[aria-checked="true"]` selector.
-                    -->
-                    <button
-                      type="button"
-                      class="checkbox-square"
-                      role="checkbox"
-                      aria-checked={t.isCompleted}
-                      aria-label={t.isCompleted
-                        ? 'Done. Click to mark not done.'
-                        : 'Click to mark done.'}
-                      disabled={togglingKeys[taskKey(t)] === true}
-                      onclick={() => onToggle(t)}
+              {#snippet taskRow(t: TaskListEntry)}
+                {@const key = taskKey(t)}
+                {@const isEditing = editingKey === key}
+                <li class="task-item" class:completed={t.isCompleted} class:editing={isEditing}>
+                  <!--
+                    Shared visual with the MarkdownEditor checkbox widget
+                    (see .checkbox-square in app.css). role=checkbox +
+                    aria-checked matches the ARIA-standard toggle pattern
+                    and drives the accent-primary fill via the
+                    `[aria-checked="true"]` selector.
+                  -->
+                  <button
+                    type="button"
+                    class="checkbox-square"
+                    role="checkbox"
+                    aria-checked={t.isCompleted}
+                    aria-label={t.isCompleted
+                      ? 'Done. Click to mark not done.'
+                      : 'Click to mark done.'}
+                    disabled={togglingKeys[key] === true || isEditing}
+                    onclick={() => onToggle(t)}
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="12"
+                      height="12"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="3"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      aria-hidden="true"
                     >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="12"
-                        height="12"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="3"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="5 12 10 17 19 7" />
-                      </svg>
-                    </button>
+                      <polyline points="5 12 10 17 19 7" />
+                    </svg>
+                  </button>
+                  {#if isEditing}
+                    <!--
+                      Slice 6b inline edit. `use:autofocus` selects the
+                      full text on open so the user can immediately
+                      type-replace or tab through characters. Enter
+                      submits, Escape cancels, blur cancels — mirrors
+                      the AskUserQuestion patterns in the rest of the
+                      app so keyboard-only users get consistent
+                      behavior.
+                    -->
+                    <input
+                      type="text"
+                      class="task-edit-input"
+                      bind:this={editInputEl}
+                      bind:value={editText}
+                      onkeydown={(e) => onEditKeydown(e, t)}
+                      onblur={cancelEdit}
+                      disabled={savingEdit}
+                      aria-label="Task text"
+                    />
+                  {:else}
                     <!--
                       Server-sanitized HTML — see render_task_text_inline
                       in src-tauri/src/tasks.rs. Ammonia inline-only
@@ -707,9 +940,86 @@
                         </span>
                       {/if}
                     {/if}
-                  </li>
-                {/each}
-              </ul>
+                    <!--
+                      Slice 6b/6c row actions. Pencil (edit) sits
+                      closer to the text, trash (delete) at the far
+                      right — small extra mouse travel for the
+                      destructive action. Both disabled while a
+                      different row is being edited so keyboard focus
+                      stays pinned to the input the user is typing in.
+                    -->
+                    <button
+                      type="button"
+                      class="task-edit-btn"
+                      aria-label={`Edit task: ${t.text}`}
+                      title="Edit task"
+                      disabled={togglingKeys[key] === true || editingKey !== null}
+                      onclick={() => openEdit(t)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="task-delete-btn"
+                      aria-label={`Delete task: ${t.text}`}
+                      title="Delete task"
+                      disabled={togglingKeys[key] === true || editingKey !== null || deleteConfirmTask !== null}
+                      onclick={() => openDeleteConfirm(t)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
+                        <path d="M10 11v6" />
+                        <path d="M14 11v6" />
+                        <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  {/if}
+                </li>
+                {#if isEditing && editError}
+                  <li class="task-edit-error" role="alert">{editError}</li>
+                {/if}
+              {/snippet}
+
+              {#if incompleteVisibleTasks.length > 0}
+                <h3 class="task-group-header">Incomplete Tasks</h3>
+                <ul class="task-items">
+                  {#each incompleteVisibleTasks as t (taskKey(t))}
+                    {@render taskRow(t)}
+                  {/each}
+                </ul>
+              {/if}
+              {#if completedVisibleTasks.length > 0}
+                <h3 class="task-group-header">Completed Tasks</h3>
+                <ul class="task-items">
+                  {#each completedVisibleTasks as t (taskKey(t))}
+                    {@render taskRow(t)}
+                  {/each}
+                </ul>
+              {/if}
             </div>
           {/if}
         </section>
@@ -772,6 +1082,55 @@
           </button>
         </div>
       </form>
+    </Modal>
+
+    <!--
+      Slice 6c delete confirmation. Same Modal shell as Add Task,
+      but the primary action is destructive: btn-ruby carries the
+      "you're about to delete this" weight; Cancel is btn-marble
+      (neutral) so the color mapping stays predictable — red is
+      always danger, never escape.
+    -->
+    <Modal
+      open={deleteConfirmTask !== null}
+      onClose={closeDeleteConfirm}
+      title="Delete Task"
+      blockDismissal={deletingTask}
+    >
+      {#if deleteConfirmTask}
+        <div class="delete-confirm">
+          <p class="delete-confirm-lead">
+            Delete this task? Its completion timestamp and rollover
+            history will be dropped with it.
+          </p>
+          <blockquote class="delete-confirm-quote">
+            {deleteConfirmTask.text}
+          </blockquote>
+          {#if deleteError}
+            <TipBubble heading="Couldn't delete that task">
+              {deleteError}
+            </TipBubble>
+          {/if}
+          <div class="delete-confirm-actions">
+            <button
+              type="button"
+              class="btn btn-ruby"
+              onclick={() => void submitDelete()}
+              disabled={deletingTask}
+            >
+              {deletingTask ? 'Deleting…' : 'Delete'}
+            </button>
+            <button
+              type="button"
+              class="btn btn-marble"
+              onclick={closeDeleteConfirm}
+              disabled={deletingTask}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      {/if}
     </Modal>
   </main>
 {/if}
@@ -920,6 +1279,27 @@
     gap: var(--space-2);
   }
 
+  /* Slice 6a: group headers between the two anchor-partitioned
+     sub-lists. Small caps + a hairline underline give them the same
+     "section label" quality as the rest of the summary UI without
+     competing with the section H2 for hierarchy. */
+  .task-group-header {
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin: var(--space-4) 0 var(--space-2);
+    padding-bottom: var(--space-1);
+    border-bottom: 1px solid var(--border-decorative);
+  }
+  /* First header (Incomplete when both groups exist, or the sole
+     group when only one exists) shouldn't push the list off the top
+     of the scroll region. */
+  .task-group-header:first-child {
+    margin-top: 0;
+  }
+
   .task-item {
     display: flex;
     /* center, not baseline: the checkbox is an SVG-only <button> with
@@ -984,5 +1364,138 @@
     white-space: nowrap;
     /* Border-less pill; the color alone carries the "chip" cue. */
     font-style: italic;
+  }
+
+  /* Slice 6b pencil edit button. Sits at the row's trailing edge,
+     kept small + low-contrast so it doesn't compete with the task
+     text or the origin/time chips. Focus + hover bump the opacity
+     so keyboard-only users get clear feedback without a permanent
+     visual weight. */
+  .task-edit-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease;
+  }
+  .task-edit-btn:hover,
+  .task-edit-btn:focus-visible {
+    opacity: 1;
+    background: color-mix(in srgb, var(--text-muted) 10%, transparent);
+    border-color: var(--border-structural);
+    outline: none;
+  }
+  .task-edit-btn:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+
+  /* Inline edit input. Matches .task-text's flex:1 so the input
+     occupies the same slot as the text span it replaces. Border +
+     background make it clearly "in edit mode" without needing a
+     full theme swap; the .editing class on .task-item adds the
+     complementary outer treatment. */
+  .task-edit-input {
+    flex: 1;
+    min-width: 0;
+    padding: 4px var(--space-2);
+    font: inherit;
+    color: var(--text-primary);
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-primary);
+    border-radius: var(--radius-sm);
+  }
+  .task-edit-input:focus {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 1px;
+  }
+
+  .task-item.editing {
+    /* Subtle border bump so the whole row reads as "the one being
+       edited" — useful when tasks are dense and the input alone
+       could get lost visually. */
+    border-color: var(--accent-primary);
+  }
+
+  /* Error strip immediately under the edit input. Not a full
+     TipBubble — the input is right there, so a lightweight inline
+     message under the row keeps the error tightly coupled to the
+     control it belongs to. */
+  .task-edit-error {
+    list-style: none;
+    padding: 0 var(--space-3) 0 40px;
+    font-size: var(--text-caption);
+    color: var(--accent-danger, #b32d2d);
+  }
+
+  /* Slice 6c trash button. Same shape + sizing as .task-edit-btn so
+     the two row actions form a coherent trailing-edge pair, but the
+     hover tint leans red to signal destructiveness. */
+  .task-delete-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  .task-delete-btn:hover,
+  .task-delete-btn:focus-visible {
+    opacity: 1;
+    background: color-mix(in srgb, var(--brand-maroon) 12%, transparent);
+    border-color: color-mix(in srgb, var(--brand-maroon) 40%, transparent);
+    color: var(--brand-maroon);
+    outline: none;
+  }
+  .task-delete-btn:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+
+  /* Slice 6c delete-confirm modal body. Vertical stack of lead
+     copy → quoted task text → optional error tip → action row.
+     Matches the add-task-form's rhythm so the two modals feel like
+     siblings. */
+  .delete-confirm {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-4);
+  }
+  .delete-confirm-lead {
+    margin: 0;
+  }
+  /* Quoted task text — a subtle inset left border echoes the "this
+     is what you're about to delete" framing without stealing focus
+     from the action buttons below. */
+  .delete-confirm-quote {
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    border-left: 3px solid var(--brand-maroon);
+    background: color-mix(in srgb, var(--brand-maroon) 6%, transparent);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    font-style: italic;
+    word-break: break-word;
+  }
+  .delete-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-2);
   }
 </style>

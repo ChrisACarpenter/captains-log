@@ -499,6 +499,17 @@ pub struct TaskListSettings {
     /// a kill switch for anyone who prefers a fresh slate each week.
     #[serde(default = "default_true")]
     pub auto_rollover_enabled: bool,
+    /// Slice 6c-followup — when true, the app runs the "Import
+    /// completed tasks" workflow automatically once per local day
+    /// (piggybacking on the same trigger events as auto-rollover:
+    /// mount, focus, visibility, week-changed). Completed tasks land
+    /// under a `#### Completed Tasks` sub-heading in the current
+    /// week's Key accomplishments field, deduped against existing
+    /// content. When false, only the manual `/summary` button
+    /// imports. Default on so the pre-review "what did I do this
+    /// week" story writes itself.
+    #[serde(default = "default_true")]
+    pub auto_import_completed: bool,
 }
 
 /// Serde-default helper: `#[serde(default)]` uses `Default::default()`
@@ -518,6 +529,7 @@ impl Default for TaskListSettings {
             show_completed_timestamp: false,
             hide_task_list: false,
             auto_rollover_enabled: true,
+            auto_import_completed: true,
         }
     }
 }
@@ -1296,6 +1308,7 @@ mod tests {
         assert!(!s.show_completed_timestamp);
         assert!(!s.hide_task_list);
         assert!(s.auto_rollover_enabled);
+        assert!(s.auto_import_completed);
     }
 
     #[tokio::test]
@@ -1323,6 +1336,7 @@ mod tests {
         assert!(!loaded.task_list.show_completed_timestamp);
         assert!(!loaded.task_list.hide_task_list);
         assert!(loaded.task_list.auto_rollover_enabled);
+        assert!(loaded.task_list.auto_import_completed);
     }
 
     #[tokio::test]
@@ -1354,6 +1368,8 @@ mod tests {
         // default (false). Guard against accidental removal of the
         // `#[serde(default = "default_true")]` attribute.
         assert!(loaded.task_list.auto_rollover_enabled);
+        // Same story for `autoImportCompleted` (Slice 6c-followup).
+        assert!(loaded.task_list.auto_import_completed);
     }
 
     #[tokio::test]
@@ -1370,6 +1386,7 @@ mod tests {
                 show_completed_timestamp: true,
                 hide_task_list: true,
                 auto_rollover_enabled: false,
+                auto_import_completed: false,
             },
             ..JournalSettings::default()
         };
@@ -1380,6 +1397,7 @@ mod tests {
         assert!(loaded.task_list.show_completed_timestamp);
         assert!(loaded.task_list.hide_task_list);
         assert!(!loaded.task_list.auto_rollover_enabled);
+        assert!(!loaded.task_list.auto_import_completed);
     }
 
     #[tokio::test]

@@ -26,6 +26,14 @@
     anythingElse: string;
     labels: string[];
     lastUpdated: string | null;
+    /**
+     * Raw markdown of the `### Tasks` section (Slice 6a). Read-only in
+     * `/summary` — the field is mutated exclusively by the landing-page
+     * task commands (toggle/edit/delete/append). We reflect it here so
+     * the "Import completed tasks" button can parse `[x]` lines and
+     * seed the Key accomplishments field.
+     */
+    tasksBody: string;
   };
 
   // Send-to-manager types (SentRecord, ComposeResult) live in the
@@ -55,6 +63,10 @@
   let challengesOrRoadblocks = $state('');
   let anythingElse = $state('');
   let labels = $state<string[]>([]);
+  // Read-only mirror of the file's ### Tasks section; refreshed by
+  // every get_weekly_summary call. Used by the "Import completed
+  // tasks" button and NOT part of the isDirty / autosave loop.
+  let tasksBody = $state('');
 
   // Last-saved snapshot. We compare the live form values against this to
   // know whether the route is "dirty" (has unsaved edits). Reset on load
@@ -135,6 +147,7 @@
       anythingElse = s.anythingElse;
       labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
+      tasksBody = s.tasksBody ?? '';
       snapshot = {
         keyAccomplishments,
         plansAndPriorities,
@@ -315,6 +328,7 @@
       anythingElse = s.anythingElse;
       labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
+      tasksBody = s.tasksBody ?? '';
       // Baseline the dirty-comparison snapshot to what we just loaded.
       snapshot = {
         keyAccomplishments,
@@ -422,6 +436,12 @@
         // Refresh lastUpdated even on a no-op — external writers can bump
         // the timestamp without changing field contents (rare but possible).
         lastUpdated = s.lastUpdated;
+        // Also refresh tasksBody: the SummarySignature only tracks the 5
+        // editable fields, so a landing-page task check that mutates
+        // ### Tasks (but not Key accomplishments / Plans / etc) lands
+        // here as a "no-op" — but the "Import completed tasks" button
+        // needs the fresh disk state to work off of.
+        tasksBody = s.tasksBody ?? '';
         return;
       }
       if (isDirty) {
@@ -435,6 +455,7 @@
       anythingElse = s.anythingElse;
       labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
+      tasksBody = s.tasksBody ?? '';
       snapshot = {
         keyAccomplishments,
         plansAndPriorities,
@@ -463,6 +484,7 @@
       anythingElse = s.anythingElse;
       labels = s.labels ?? [];
       lastUpdated = s.lastUpdated;
+      tasksBody = s.tasksBody ?? '';
       snapshot = {
         keyAccomplishments,
         plansAndPriorities,
@@ -486,6 +508,10 @@
       clearTimeout(autoSaveTimer);
       autoSaveTimer = null;
     }
+    if (importReceiptTimer) {
+      clearTimeout(importReceiptTimer);
+      importReceiptTimer = null;
+    }
     weeklyFileUnlisten?.();
     weeklyFileUnlisten = null;
     focusUnlisten?.();
@@ -495,6 +521,77 @@
     document.removeEventListener('visibilitychange', onVisibilityChange);
     window.removeEventListener('captainslog:week-changed', onWeekChangedEvent);
   });
+
+  // ---- Slice 6c-followup: import completed tasks into Key Accomplishments ----
+
+  // Small inline receipt shown under the label row after each import
+  // attempt. Auto-clears after 5s so it doesn't linger and get stale.
+  type ImportReceipt = { text: string; tone: 'ok' | 'muted' | 'error' };
+  let importReceipt = $state<ImportReceipt | null>(null);
+  let importReceiptTimer: ReturnType<typeof setTimeout> | null = null;
+  let importInFlight = $state(false);
+
+  function scheduleImportReceiptClear(): void {
+    if (importReceiptTimer) clearTimeout(importReceiptTimer);
+    importReceiptTimer = setTimeout(() => {
+      importReceipt = null;
+      importReceiptTimer = null;
+    }, 5000);
+  }
+
+  type TaskImportResult = {
+    imported: number;
+    skipped: number;
+    noCompletedThisWeek: boolean;
+  };
+
+  async function importCompletedTasks(): Promise<void> {
+    if (!yearWeek || importInFlight) return;
+    importInFlight = true;
+    try {
+      // Flush any pending edits FIRST so the backend's import
+      // operates on the user's current-known key_accomplishments
+      // text. Skipping this would produce a false "external update"
+      // banner: backend writes → emits weekly-file-changed → our
+      // reconcileWithDisk sees isDirty=true and treats the emit as
+      // a conflict when it's actually our own workflow.
+      if (isDirty) {
+        await saveNow();
+      }
+      // Bare invoke — local Tauri file write is nearly instant. If
+      // it ever wedges the `Importing…` button label makes it
+      // obvious that something's stuck; no need for a rescue timer.
+      const result = await invoke<TaskImportResult>('import_completed_tasks', {
+        year: yearWeek.year,
+        week: yearWeek.week,
+      });
+      if (result.noCompletedThisWeek) {
+        importReceipt = { text: 'No completed tasks this week yet.', tone: 'muted' };
+      } else if (result.imported === 0) {
+        importReceipt = {
+          text: `Every completed task (${result.skipped}) is already in Key accomplishments.`,
+          tone: 'muted',
+        };
+      } else {
+        importReceipt = {
+          text:
+            result.skipped > 0
+              ? `Imported ${result.imported}, skipped ${result.skipped} already there.`
+              : `Imported ${result.imported} completed task${result.imported === 1 ? '' : 's'}.`,
+          tone: 'ok',
+        };
+      }
+      // The backend emits weekly-file-changed on non-zero imports;
+      // reconcileWithDisk will pick up the new key_accomplishments
+      // silently (form was clean going in). If imported=0 no event
+      // fires — nothing to reconcile.
+    } catch (err) {
+      importReceipt = { text: String(err), tone: 'error' };
+    } finally {
+      importInFlight = false;
+      scheduleImportReceiptClear();
+    }
+  }
 
   /// Save the current form to disk. Used by both the auto-save debounce and
   /// the manual Save button + Cmd+S / Cmd+↩ shortcuts. Idempotent: returns
@@ -676,7 +773,30 @@
           content exceeds; resize: vertical on the wrapper lets the user
           drag-grow each field, matching the textarea-era affordance. -->
         <div class="field">
-          <label for="key-acc">Key accomplishments…</label>
+          <!--
+            Slice 6c-followup: label + inline "Import completed tasks"
+            action live on the same row so the button is discoverable
+            where the user's already looking. Receipt line appears
+            underneath the row while active, above the editor, so it
+            doesn't fight for space with the editor's own content.
+          -->
+          <div class="field-header">
+            <label for="key-acc">Key accomplishments…</label>
+            <button
+              type="button"
+              class="btn btn-marble btn-sm"
+              onclick={() => void importCompletedTasks()}
+              disabled={importInFlight}
+              title="Append every completed task from this week's ### Tasks section as bullets under a #### Completed Tasks heading. Duplicates are skipped."
+            >
+              {importInFlight ? 'Importing…' : '+ Import completed tasks'}
+            </button>
+          </div>
+          {#if importReceipt}
+            <p class="import-receipt import-receipt-{importReceipt.tone}" role="status">
+              {importReceipt.text}
+            </p>
+          {/if}
           <MarkdownEditor
             id="key-acc"
             value={keyAccomplishments}
@@ -850,10 +970,41 @@
   }
 
   .field > label,
-  .field > .field-heading {
+  .field > .field-heading,
+  .field-header > label {
     font-family: var(--font-display);
     font-size: var(--text-button);
     color: var(--text-primary);
+  }
+
+  /* Slice 6c-followup: label + inline action share a row above the
+     Key accomplishments editor. Baseline-align keeps the small
+     button's typography sitting on the label's baseline rather than
+     hovering above it. Space-between so the button hugs the right
+     edge without needing a margin-auto. */
+  .field-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+
+  /* Inline receipt underneath the label row. Auto-clears after 5s.
+     Tone variants: `ok` = neutral positive, `muted` = "nothing to
+     do", `error` = red (unused today but reserved for future
+     failure modes). */
+  .import-receipt {
+    margin: 0;
+    font-size: var(--text-caption);
+  }
+  .import-receipt-ok {
+    color: var(--accent-primary-text);
+  }
+  .import-receipt-muted {
+    color: var(--text-muted);
+  }
+  .import-receipt-error {
+    color: var(--accent-danger, #b32d2d);
   }
 
   /* Editor chrome (background, border, focus glow, font, line-height) is

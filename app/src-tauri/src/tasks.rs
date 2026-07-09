@@ -33,6 +33,12 @@ const TASK_COMPLETIONS_FILE: &str = "task-completions.json";
 const CURRENT_TASK_COMPLETIONS_VERSION: u32 = 1;
 
 const ROLLOVER_LOG_FILE: &str = "rollover-log.json";
+
+/// Slice 6c-followup — persistent record of "when did the auto-
+/// import last run" so the trigger-event handlers can no-op if the
+/// same local day has already been serviced. Missing file →
+/// treated as "never run" (import runs on the next trigger).
+const AUTO_IMPORT_LOG_FILE: &str = "auto-import-log.json";
 const CURRENT_ROLLOVER_LOG_VERSION: u32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -260,6 +266,164 @@ pub fn toggle_checkbox_in_plans(
 /// human writes in a to-do line; the cap exists to bound the file's
 /// growth and keep the render pipeline predictable.
 pub const MAX_TASK_TEXT_LEN: usize = 1024;
+
+// ---------------------------------------------------------------------------
+// Import completed tasks into the Key accomplishments field
+// ---------------------------------------------------------------------------
+
+/// The sub-heading string the import inserts above imported bullets.
+/// Callers walk for it (case-insensitive on the label text) so
+/// repeated imports append under the SAME heading instead of stacking
+/// new heading blocks on every click.
+pub const COMPLETED_TASKS_HEADING: &str = "#### Completed Tasks";
+
+/// Result of [`merge_completed_tasks_into_key_accomplishments`].
+/// The command layer converts this into a user-facing receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeCompletedResult {
+    /// New key_accomplishments text (may equal input verbatim if
+    /// every candidate was deduped).
+    pub new_key_accomplishments: String,
+    /// Number of completed tasks actually added.
+    pub imported: u32,
+    /// Number of completed tasks skipped because a normalized match
+    /// already existed in the body.
+    pub skipped: u32,
+}
+
+/// Merge a list of completed task texts into a Key accomplishments
+/// body. Handles two concerns at once:
+///
+/// **Dedupe.** Each candidate is normalized via [`normalize_task_text`]
+/// and compared against every line already in the body (with any
+/// leading `- ` bullet marker stripped before normalization). If the
+/// normalized form already exists, the candidate is skipped — so
+/// repeated imports don't stack duplicates and hand-typed prose that
+/// happens to match a completed task also wins.
+///
+/// **Placement.** If the body already contains a
+/// [`COMPLETED_TASKS_HEADING`] line, new bullets are inserted at the
+/// END of the contiguous bullet block that follows that heading
+/// (walking forward, accepting blank lines interspersed, stopping at
+/// any new heading or non-blank prose line). If no such heading
+/// exists, a fresh heading + bullets block is appended to the body,
+/// separated by a blank line if the body was non-empty.
+pub fn merge_completed_tasks_into_key_accomplishments(
+    key_accomplishments: &str,
+    completed_task_texts: &[String],
+) -> MergeCompletedResult {
+    // Build the dedupe set: every existing line's normalized form.
+    let existing_norms: std::collections::HashSet<String> = key_accomplishments
+        .split('\n')
+        .map(|line| {
+            let stripped = line.trim_start().trim_start_matches("- ").trim();
+            normalize_task_text(stripped)
+        })
+        .filter(|n| !n.is_empty())
+        .collect();
+
+    // Walk candidates in order. Track our own additions in `seen` so
+    // two identical completed tasks in the same batch don't both land.
+    let mut seen = existing_norms;
+    let mut fresh: Vec<&str> = Vec::new();
+    let mut skipped: u32 = 0;
+    for text in completed_task_texts {
+        let norm = normalize_task_text(text);
+        if norm.is_empty() {
+            continue;
+        }
+        if seen.contains(&norm) {
+            skipped += 1;
+        } else {
+            fresh.push(text.as_str());
+            seen.insert(norm);
+        }
+    }
+
+    if fresh.is_empty() {
+        return MergeCompletedResult {
+            new_key_accomplishments: key_accomplishments.to_string(),
+            imported: 0,
+            skipped,
+        };
+    }
+
+    let bullets: Vec<String> = fresh.iter().map(|t| format!("- {}", t)).collect();
+    let imported: u32 = fresh.len() as u32;
+
+    // Look for an existing "#### Completed Tasks" heading. Tolerate
+    // case + trailing-whitespace variants ("#### completed tasks  ").
+    let lines: Vec<&str> = key_accomplishments.split('\n').collect();
+    let heading_idx = lines.iter().position(|line| {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("#### ") {
+            normalize_task_text(rest) == "completed tasks"
+        } else {
+            false
+        }
+    });
+
+    let new_body = if let Some(hi) = heading_idx {
+        // Walk forward to find the end of the contiguous bullet block
+        // under this heading. Blank lines are tolerated (folks
+        // separate bullet groups with blanks); a new heading OR a
+        // non-blank prose line ends the block.
+        let mut last_bullet_idx: Option<usize> = None;
+        for j in (hi + 1)..lines.len() {
+            let trimmed = lines[j].trim_start();
+            if is_markdown_heading_line(trimmed) {
+                break;
+            } else if trimmed.starts_with("- ") {
+                last_bullet_idx = Some(j);
+            } else if trimmed.is_empty() {
+                continue;
+            } else {
+                break;
+            }
+        }
+        let insert_idx = last_bullet_idx.map(|i| i + 1).unwrap_or(hi + 1);
+        let mut new_lines: Vec<String> = lines[..insert_idx]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for b in &bullets {
+            new_lines.push(b.clone());
+        }
+        for l in &lines[insert_idx..] {
+            new_lines.push(l.to_string());
+        }
+        new_lines.join("\n")
+    } else {
+        let base = key_accomplishments.trim_end();
+        let block = format!("{}\n{}", COMPLETED_TASKS_HEADING, bullets.join("\n"));
+        if base.is_empty() {
+            block
+        } else {
+            format!("{}\n\n{}", base, block)
+        }
+    };
+
+    MergeCompletedResult {
+        new_key_accomplishments: new_body,
+        imported,
+        skipped,
+    }
+}
+
+/// True if the (trimmed-leading) line reads as a Markdown ATX heading:
+/// 1-6 leading `#` characters followed by either a space or end-of-line.
+/// A bare `#Foo` (no space) is NOT a heading.
+fn is_markdown_heading_line(trimmed: &str) -> bool {
+    if !trimmed.starts_with('#') {
+        return false;
+    }
+    let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return false;
+    }
+    let rest = &trimmed[hashes..];
+    rest.is_empty() || rest.starts_with(' ')
+}
 
 /// Append a new open task to the end of a Plans-section body.
 ///
@@ -526,6 +690,189 @@ pub fn toggle_task_in_tasks_body(
     let new_is_completed = !target.is_completed;
 
     Ok((render_tasks_body(&bd), new_is_completed))
+}
+
+/// Outcome of a successful `edit_task_in_tasks_body` call. `new_ordinal`
+/// is the task's per-hash file-position rank AFTER the rename — the
+/// command layer needs it to re-key sidecar and provenance entries
+/// when the normalized text (and thus the hash) actually changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditTaskOutcome {
+    pub new_body: String,
+    pub new_text_hash: String,
+    pub new_ordinal: u32,
+    pub is_completed: bool,
+}
+
+/// Rename a task in `tasks_body` in-place. Located via the existing
+/// `(text_hash, ordinal)` identity, the task line's prefix
+/// (leading whitespace + `- [ ]` / `- [x]`) is preserved verbatim,
+/// only the text portion is swapped.
+///
+/// Rejects the same inputs as `append_task_to_tasks_body`: empty
+/// text, embedded newlines, oversize, and text starting with `- [`.
+/// Case-preserving: an uppercase-X marker stays uppercase.
+pub fn edit_task_in_tasks_body(
+    tasks_body: &str,
+    text_hash: &str,
+    ordinal: u32,
+    new_text: &str,
+) -> Result<EditTaskOutcome, String> {
+    let trimmed = new_text.trim();
+    if trimmed.is_empty() {
+        return Err("Task text can't be empty.".to_string());
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err("Task text can't span multiple lines.".to_string());
+    }
+    if trimmed.len() > MAX_TASK_TEXT_LEN {
+        return Err(format!(
+            "Task text is too long (max {MAX_TASK_TEXT_LEN} bytes)."
+        ));
+    }
+    if trimmed.starts_with("- [") {
+        return Err(
+            "Don't include the `- [ ]` prefix — we add it for you.".to_string(),
+        );
+    }
+
+    let all_tasks = parse_plans_tasks(tasks_body);
+    let target = all_tasks
+        .iter()
+        .find(|t| t.text_hash == text_hash && t.ordinal == ordinal)
+        .ok_or_else(|| {
+            eprintln!(
+                "[edit] task not found in tasks_body (hash={text_hash}, ordinal={ordinal})"
+            );
+            "That task couldn't be found in your weekly file — it may have been edited or removed since this list loaded."
+                .to_string()
+        })?;
+
+    let mut bd = parse_tasks_body(tasks_body);
+    let source_lines = if target.is_completed {
+        &mut bd.completed_lines
+    } else {
+        &mut bd.incomplete_lines
+    };
+
+    // Same rank-within-state math as toggle_task_in_tasks_body —
+    // count how many same-hash tasks in the source state come before
+    // the target in the outer parse.
+    let rank_in_source: usize = all_tasks
+        .iter()
+        .take_while(|t| !(t.text_hash == text_hash && t.ordinal == ordinal))
+        .filter(|t| t.text_hash == text_hash && t.is_completed == target.is_completed)
+        .count();
+
+    let mut match_count: usize = 0;
+    let mut source_idx: Option<usize> = None;
+    for (i, line) in source_lines.iter().enumerate() {
+        let line_hash = task_line_text_hash(line);
+        if line_hash.as_deref() == Some(text_hash) {
+            if match_count == rank_in_source {
+                source_idx = Some(i);
+                break;
+            }
+            match_count += 1;
+        }
+    }
+    let source_idx = source_idx.ok_or_else(|| {
+        "internal error: source line index not resolvable from ordinal".to_string()
+    })?;
+
+    // Preserve the exact leading whitespace + "- [X]" + one-space
+    // separator by locating where the text starts. Everything before
+    // that offset stays byte-identical; only the text tail is swapped.
+    let original_line = &source_lines[source_idx];
+    let (_, text_start) = match_task_marker(original_line).ok_or_else(|| {
+        "internal error: extracted line lost its checkbox marker".to_string()
+    })?;
+    let prefix = &original_line[..text_start];
+    let new_line = format!("{prefix}{trimmed}");
+    source_lines[source_idx] = new_line;
+
+    let new_hash = hash_task_text(&normalize_task_text(trimmed));
+    let new_body = render_tasks_body(&bd);
+
+    // Compute the renamed task's new outer ordinal in the fresh body.
+    // The rename doesn't reorder any lines, so we can identify our
+    // renamed task by its position within its state sub-list
+    // (source_idx) and pull its ordinal from the re-parsed outer view.
+    let new_ordinal = parse_plans_tasks(&new_body)
+        .into_iter()
+        .filter(|t| t.is_completed == target.is_completed)
+        .nth(source_idx)
+        .map(|t| t.ordinal)
+        .ok_or_else(|| {
+            "internal error: renamed task not found in fresh parse".to_string()
+        })?;
+
+    Ok(EditTaskOutcome {
+        new_body,
+        new_text_hash: new_hash,
+        new_ordinal,
+        is_completed: target.is_completed,
+    })
+}
+
+/// Remove a task line from `tasks_body`. Located via the existing
+/// `(text_hash, ordinal)` identity. The line is dropped verbatim
+/// (including its leading whitespace + checkbox marker); everything
+/// else in the body — anchor comments, other tasks, prose between
+/// anchors — stays byte-identical. Returns the new tasks_body.
+///
+/// Callers on the command layer must ALSO drop the deleted task's
+/// entries from the completion sidecar + rollover-log provenance
+/// (via a positional re-key pass) — see `delete_task_impl` for the
+/// bookkeeping shape.
+pub fn delete_task_from_tasks_body(
+    tasks_body: &str,
+    text_hash: &str,
+    ordinal: u32,
+) -> Result<String, String> {
+    let all_tasks = parse_plans_tasks(tasks_body);
+    let target = all_tasks
+        .iter()
+        .find(|t| t.text_hash == text_hash && t.ordinal == ordinal)
+        .ok_or_else(|| {
+            eprintln!(
+                "[delete] task not found in tasks_body (hash={text_hash}, ordinal={ordinal})"
+            );
+            "That task couldn't be found in your weekly file — it may have been edited or removed since this list loaded."
+                .to_string()
+        })?;
+
+    let mut bd = parse_tasks_body(tasks_body);
+    let source_lines = if target.is_completed {
+        &mut bd.completed_lines
+    } else {
+        &mut bd.incomplete_lines
+    };
+
+    let rank_in_source: usize = all_tasks
+        .iter()
+        .take_while(|t| !(t.text_hash == text_hash && t.ordinal == ordinal))
+        .filter(|t| t.text_hash == text_hash && t.is_completed == target.is_completed)
+        .count();
+
+    let mut match_count: usize = 0;
+    let mut source_idx: Option<usize> = None;
+    for (i, line) in source_lines.iter().enumerate() {
+        let line_hash = task_line_text_hash(line);
+        if line_hash.as_deref() == Some(text_hash) {
+            if match_count == rank_in_source {
+                source_idx = Some(i);
+                break;
+            }
+            match_count += 1;
+        }
+    }
+    let source_idx = source_idx.ok_or_else(|| {
+        "internal error: source line index not resolvable from ordinal".to_string()
+    })?;
+    source_lines.remove(source_idx);
+
+    Ok(render_tasks_body(&bd))
 }
 
 /// Compute the same normalized text-hash the identity model uses,
@@ -864,6 +1211,63 @@ impl RolloverLog {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-import log
+// ---------------------------------------------------------------------------
+
+/// Slice 6c-followup — one-line sidecar tracking when the automated
+/// "import completed tasks" workflow last fired. The value is a
+/// local YYYY-MM-DD string; the trigger-event handler compares
+/// today's local date and no-ops if they match, so we run the
+/// import exactly once per local day regardless of how many
+/// mount/focus events the app sees.
+///
+/// Missing file → treated as "never run". Corrupt file → same, with
+/// a stderr warning (matches the RolloverLog + TaskCompletions
+/// posture; losing the log just means the next trigger re-runs).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoImportLog {
+    #[serde(default = "AutoImportLog::current_version")]
+    pub version: u32,
+    /// Last local date the import successfully ran, as YYYY-MM-DD.
+    /// `None` when never run.
+    #[serde(default)]
+    pub last_import_date: Option<String>,
+    /// Wall-clock RFC-3339 of the last run. Diagnostic only —
+    /// today-vs-yesterday gating uses `last_import_date`.
+    #[serde(default)]
+    pub last_import_at: Option<String>,
+}
+
+impl AutoImportLog {
+    fn current_version() -> u32 {
+        1
+    }
+
+    pub async fn load<B: StorageBackend + ?Sized>(backend: &B) -> StorageResult<Self> {
+        match backend.read_metadata(AUTO_IMPORT_LOG_FILE).await? {
+            Some(content) => match serde_json::from_str::<AutoImportLog>(&content) {
+                Ok(log) => Ok(log),
+                Err(e) => {
+                    eprintln!(
+                        "auto-import-log.json failed to parse ({}). Starting with an empty log.",
+                        e
+                    );
+                    Ok(Self::default())
+                }
+            },
+            None => Ok(Self::default()),
+        }
+    }
+
+    pub async fn save<B: StorageBackend + ?Sized>(&self, backend: &B) -> StorageResult<()> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| StorageError::Serde(e.to_string()))?;
+        backend.write_metadata(AUTO_IMPORT_LOG_FILE, &content).await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1187,6 +1591,442 @@ mod tests {
         assert!(append_task_to_tasks_body("", "  \n  ").is_err());
         assert!(append_task_to_tasks_body("", "line one\nline two").is_err());
         assert!(append_task_to_tasks_body("", "- [ ] pre-prefixed").is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // edit_task_in_tasks_body tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn edit_task_renames_incomplete_task_and_returns_new_hash() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Original text\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let old_hash = hash_task_text(&normalize_task_text("Original text"));
+        let out = edit_task_in_tasks_body(&body, &old_hash, 0, "Renamed text").unwrap();
+        assert!(!out.is_completed);
+        let expected_new_hash = hash_task_text(&normalize_task_text("Renamed text"));
+        assert_eq!(out.new_text_hash, expected_new_hash);
+        assert_ne!(out.new_text_hash, old_hash);
+        assert_eq!(out.new_ordinal, 0);
+        let bd = parse_tasks_body(&out.new_body);
+        assert_eq!(bd.incomplete_lines, vec!["- [ ] Renamed text".to_string()]);
+        assert!(bd.completed_lines.is_empty());
+    }
+
+    #[test]
+    fn edit_task_preserves_completed_marker_case() {
+        // A file the user hand-typed with `[X]` should keep the
+        // uppercase X after an edit — we're renaming, not re-checking.
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             {TASKS_ANCHOR_COMPLETED}\n\
+             - [X] Old"
+        );
+        let hash = hash_task_text(&normalize_task_text("Old"));
+        let out = edit_task_in_tasks_body(&body, &hash, 0, "New").unwrap();
+        assert!(out.is_completed);
+        assert!(
+            out.new_body.contains("- [X] New"),
+            "must preserve uppercase X marker: {}",
+            out.new_body
+        );
+    }
+
+    #[test]
+    fn edit_task_preserves_leading_whitespace_on_indented_line() {
+        // Users can hand-edit `### Tasks` and drop in an indented
+        // task line — an edit must not re-flow their formatting.
+        // Raw string here so the Rust line-continuation quirk doesn't
+        // strip the two leading spaces on the task line.
+        let body = format!(
+            "{}\n  - [ ] Indented\n{}",
+            TASKS_ANCHOR_INCOMPLETE, TASKS_ANCHOR_COMPLETED,
+        );
+        let hash = hash_task_text(&normalize_task_text("Indented"));
+        let out = edit_task_in_tasks_body(&body, &hash, 0, "Renamed").unwrap();
+        assert!(
+            out.new_body.contains("  - [ ] Renamed"),
+            "leading whitespace must be preserved: {}",
+            out.new_body
+        );
+    }
+
+    #[test]
+    fn edit_task_normalizes_new_text_for_hash_but_stores_visible_verbatim() {
+        // Punctuation + case affect the visible line but not the
+        // normalized hash — same rules as append/toggle. Verifies the
+        // stored line uses the trimmed user input.
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] before\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let old_hash = hash_task_text(&normalize_task_text("before"));
+        let out = edit_task_in_tasks_body(&body, &old_hash, 0, "  AFTER!! ").unwrap();
+        // Stored verbatim after `.trim()`.
+        assert!(out.new_body.contains("- [ ] AFTER!!"), "visible: {}", out.new_body);
+        // Hash uses normalized form ("after").
+        assert_eq!(out.new_text_hash, hash_task_text(&normalize_task_text("after")));
+    }
+
+    #[test]
+    fn edit_task_targets_correct_duplicate_via_ordinal() {
+        // Three identical tasks. Editing ordinal=1 (middle) must
+        // rename ONLY the middle one; ord=0 and ord=2 stay literal.
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Standup\n\
+             - [ ] Standup\n\
+             - [ ] Standup\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Standup"));
+        let out = edit_task_in_tasks_body(&body, &hash, 1, "Middle standup").unwrap();
+        let bd = parse_tasks_body(&out.new_body);
+        assert_eq!(
+            bd.incomplete_lines,
+            vec![
+                "- [ ] Standup".to_string(),
+                "- [ ] Middle standup".to_string(),
+                "- [ ] Standup".to_string(),
+            ]
+        );
+        // Renamed task's new hash has no duplicate before it → ord=0.
+        assert_eq!(out.new_ordinal, 0);
+    }
+
+    #[test]
+    fn edit_task_errors_on_missing_hash() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Only\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let err =
+            edit_task_in_tasks_body(&body, "not-a-real-hash", 0, "Renamed").unwrap_err();
+        assert!(err.contains("couldn't be found"), "err: {err}");
+    }
+
+    #[test]
+    fn edit_task_shares_validation_with_append() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Task\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Task"));
+        assert!(edit_task_in_tasks_body(&body, &hash, 0, "").is_err());
+        assert!(edit_task_in_tasks_body(&body, &hash, 0, "   ").is_err());
+        assert!(edit_task_in_tasks_body(&body, &hash, 0, "one\ntwo").is_err());
+        assert!(edit_task_in_tasks_body(&body, &hash, 0, "- [ ] prefixed").is_err());
+    }
+
+    // ---------------------------------------------------------------
+    // merge_completed_tasks_into_key_accomplishments tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn merge_completed_empty_body_gets_heading_and_bullets() {
+        let out = merge_completed_tasks_into_key_accomplishments(
+            "",
+            &vec!["Ship the widget".to_string(), "Fix the bug".to_string()],
+        );
+        assert_eq!(out.imported, 2);
+        assert_eq!(out.skipped, 0);
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- Ship the widget\n- Fix the bug"
+        );
+    }
+
+    #[test]
+    fn merge_completed_prose_only_appends_block_with_blank_separator() {
+        let out = merge_completed_tasks_into_key_accomplishments(
+            "Had a great sprint.",
+            &vec!["Ship the widget".to_string()],
+        );
+        assert_eq!(out.imported, 1);
+        assert_eq!(
+            out.new_key_accomplishments,
+            "Had a great sprint.\n\n#### Completed Tasks\n- Ship the widget"
+        );
+    }
+
+    #[test]
+    fn merge_completed_existing_heading_appends_under_existing_bullets() {
+        // KEY behavior — the reason we're rewriting this. Second
+        // import must not add a duplicate heading. New bullets go at
+        // the END of the contiguous bullet block under the heading.
+        let body = "#### Completed Tasks\n- Ship the widget\n- Fix the bug";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["Write the docs".to_string()],
+        );
+        assert_eq!(out.imported, 1);
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- Ship the widget\n- Fix the bug\n- Write the docs"
+        );
+    }
+
+    #[test]
+    fn merge_completed_existing_heading_with_trailing_prose_inserts_before_prose() {
+        let body = "#### Completed Tasks\n- A\n- B\n\nAlso had a great meeting.";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["C".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- A\n- B\n- C\n\nAlso had a great meeting."
+        );
+    }
+
+    #[test]
+    fn merge_completed_dedupes_against_bullets_via_normalization() {
+        // Existing bullet "- ship it" should match a candidate
+        // "Ship It!" via normalized form (case + trailing punctuation).
+        let body = "#### Completed Tasks\n- ship it";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["Ship It!".to_string(), "Fix the bug".to_string()],
+        );
+        assert_eq!(out.imported, 1);
+        assert_eq!(out.skipped, 1);
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- ship it\n- Fix the bug"
+        );
+    }
+
+    #[test]
+    fn merge_completed_dedupes_against_plain_prose_lines() {
+        // Prose line "Ship the widget" (no bullet marker) should
+        // still block a duplicate import of a "Ship the widget" task.
+        let body = "Highlights this week:\nShip the widget went perfectly.";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["Ship the widget went perfectly.".to_string()],
+        );
+        assert_eq!(out.imported, 0);
+        assert_eq!(out.skipped, 1);
+        // Body unchanged, no heading added.
+        assert_eq!(out.new_key_accomplishments, body);
+    }
+
+    #[test]
+    fn merge_completed_all_duplicates_returns_body_verbatim() {
+        let body = "#### Completed Tasks\n- Foo\n- Bar";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["foo".to_string(), "BAR!".to_string()],
+        );
+        assert_eq!(out.imported, 0);
+        assert_eq!(out.skipped, 2);
+        assert_eq!(out.new_key_accomplishments, body);
+    }
+
+    #[test]
+    fn merge_completed_duplicates_within_batch_only_add_once() {
+        let out = merge_completed_tasks_into_key_accomplishments(
+            "",
+            &vec![
+                "Standup".to_string(),
+                "Standup".to_string(),
+                "Standup".to_string(),
+            ],
+        );
+        assert_eq!(out.imported, 1);
+        assert_eq!(out.skipped, 2);
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- Standup"
+        );
+    }
+
+    #[test]
+    fn merge_completed_stops_bullet_walk_at_next_heading() {
+        // Second heading (of any level) breaks the bullet-block scan.
+        // Insert must land BEFORE the second heading.
+        let body = "#### Completed Tasks\n- A\n\n### Another Section\n- prose bullet";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["B".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- A\n- B\n\n### Another Section\n- prose bullet"
+        );
+    }
+
+    #[test]
+    fn merge_completed_heading_case_variation_still_matches() {
+        // User hand-typed "#### completed tasks" (lowercase) before
+        // clicking Import — we still recognize it and append under it,
+        // not stack a new heading.
+        let body = "#### completed tasks\n- foo";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["bar".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### completed tasks\n- foo\n- bar"
+        );
+    }
+
+    #[test]
+    fn merge_completed_heading_present_but_no_bullets_inserts_immediately_below() {
+        let body = "#### Completed Tasks\nSome intro prose.";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["A".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- A\nSome intro prose."
+        );
+    }
+
+    #[test]
+    fn merge_completed_heading_is_last_line_appends_bullets_after() {
+        let body = "Great sprint.\n\n#### Completed Tasks";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["A".to_string(), "B".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "Great sprint.\n\n#### Completed Tasks\n- A\n- B"
+        );
+    }
+
+    #[test]
+    fn merge_completed_empty_candidates_is_noop() {
+        let body = "#### Completed Tasks\n- A";
+        let out = merge_completed_tasks_into_key_accomplishments(body, &vec![]);
+        assert_eq!(out.imported, 0);
+        assert_eq!(out.skipped, 0);
+        assert_eq!(out.new_key_accomplishments, body);
+    }
+
+    #[test]
+    fn merge_completed_first_of_multiple_headings_wins() {
+        // If two "#### Completed Tasks" headings exist (from pre-fix
+        // imports), we append under the FIRST one. User can
+        // consolidate the second block manually.
+        let body = "#### Completed Tasks\n- A\n\n#### Completed Tasks\n- B";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["C".to_string()],
+        );
+        assert_eq!(
+            out.new_key_accomplishments,
+            "#### Completed Tasks\n- A\n- C\n\n#### Completed Tasks\n- B"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // delete_task_from_tasks_body tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn delete_task_removes_only_targeted_line() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Keep A\n\
+             - [ ] Drop me\n\
+             - [ ] Keep B\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Drop me"));
+        let new_body = delete_task_from_tasks_body(&body, &hash, 0).unwrap();
+        let bd = parse_tasks_body(&new_body);
+        assert_eq!(
+            bd.incomplete_lines,
+            vec!["- [ ] Keep A".to_string(), "- [ ] Keep B".to_string()]
+        );
+        assert!(bd.completed_lines.is_empty());
+    }
+
+    #[test]
+    fn delete_task_targets_correct_duplicate_via_ordinal() {
+        // Three identical tasks. Deleting ordinal=1 (middle) must
+        // remove ONLY the middle one; ord=0 and ord=2 survive.
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Standup\n\
+             - [ ] Standup\n\
+             - [ ] Standup\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Standup"));
+        let new_body = delete_task_from_tasks_body(&body, &hash, 1).unwrap();
+        let bd = parse_tasks_body(&new_body);
+        assert_eq!(
+            bd.incomplete_lines,
+            vec!["- [ ] Standup".to_string(), "- [ ] Standup".to_string()]
+        );
+    }
+
+    #[test]
+    fn delete_task_removes_completed_task_and_leaves_anchors_intact() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Still open\n\
+             {TASKS_ANCHOR_COMPLETED}\n\
+             - [x] Nuke me"
+        );
+        let hash = hash_task_text(&normalize_task_text("Nuke me"));
+        let new_body = delete_task_from_tasks_body(&body, &hash, 0).unwrap();
+        assert!(new_body.contains(TASKS_ANCHOR_INCOMPLETE));
+        assert!(new_body.contains(TASKS_ANCHOR_COMPLETED));
+        assert!(new_body.contains("- [ ] Still open"));
+        assert!(!new_body.contains("Nuke me"));
+    }
+
+    #[test]
+    fn delete_task_errors_on_missing_hash() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Only\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let err = delete_task_from_tasks_body(&body, "not-a-real-hash", 0).unwrap_err();
+        assert!(err.contains("couldn't be found"), "err: {err}");
+    }
+
+    #[test]
+    fn delete_task_errors_on_wrong_ordinal_for_existing_hash() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Only one\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Only one"));
+        // Task exists at ord=0, but caller asked for ord=1.
+        let err = delete_task_from_tasks_body(&body, &hash, 1).unwrap_err();
+        assert!(err.contains("couldn't be found"), "err: {err}");
+    }
+
+    #[test]
+    fn delete_task_last_task_leaves_empty_body_with_anchors() {
+        let body = format!(
+            "{TASKS_ANCHOR_INCOMPLETE}\n\
+             - [ ] Last one\n\
+             {TASKS_ANCHOR_COMPLETED}"
+        );
+        let hash = hash_task_text(&normalize_task_text("Last one"));
+        let new_body = delete_task_from_tasks_body(&body, &hash, 0).unwrap();
+        let bd = parse_tasks_body(&new_body);
+        assert!(bd.incomplete_lines.is_empty());
+        assert!(bd.completed_lines.is_empty());
+        // Anchors survive so subsequent appends land in the right place.
+        assert!(new_body.contains(TASKS_ANCHOR_INCOMPLETE));
+        assert!(new_body.contains(TASKS_ANCHOR_COMPLETED));
     }
 
     #[test]
