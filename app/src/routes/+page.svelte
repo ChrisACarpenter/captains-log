@@ -120,6 +120,18 @@
   let deleteConfirmTask = $state<TaskListEntry | null>(null);
   let deletingTask = $state(false);
   let deleteError = $state('');
+  // DOM handle for the Delete button so we can focus it when the
+  // confirmation modal opens. Modal itself focuses the dialog card
+  // (tabindex=-1) — for a two-button destructive prompt, moving
+  // focus to the primary action (Delete) is the standard pattern.
+  // Users can Escape or Tab-to-Cancel just as easily.
+  let deleteBtnEl = $state<HTMLButtonElement | null>(null);
+  $effect(() => {
+    if (deleteConfirmTask !== null && deleteBtnEl) {
+      // Microtask hop so we run AFTER Modal's own focus() on the card.
+      queueMicrotask(() => deleteBtnEl?.focus());
+    }
+  });
 
   // Slice 6b inline-edit state. Exactly one row can be in edit mode at
   // a time (identified by `editingKey`); its input field is bound to
@@ -1115,6 +1127,7 @@
             <button
               type="button"
               class="btn btn-ruby"
+              bind:this={deleteBtnEl}
               onclick={() => void submitDelete()}
               disabled={deletingTask}
             >
@@ -1483,12 +1496,15 @@
   }
   /* Quoted task text — a subtle inset left border echoes the "this
      is what you're about to delete" framing without stealing focus
-     from the action buttons below. */
+     from the action buttons below. `--bg-elevated` (rather than a
+     low-alpha color-mix on brand-maroon) keeps the panel legible in
+     dark theme; the maroon accent stripe carries the destructive
+     signaling. */
   .delete-confirm-quote {
     margin: 0;
     padding: var(--space-2) var(--space-3);
     border-left: 3px solid var(--brand-maroon);
-    background: color-mix(in srgb, var(--brand-maroon) 6%, transparent);
+    background: var(--bg-elevated);
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     font-style: italic;
     word-break: break-word;

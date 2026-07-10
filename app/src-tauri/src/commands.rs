@@ -1471,6 +1471,7 @@ pub struct TaskToggleResult {
 /// markdown-wins-state rule).
 #[tauri::command]
 pub async fn toggle_task(
+    app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     year: u32,
     week: u32,
@@ -1484,7 +1485,13 @@ pub async fn toggle_task(
     // clobber the earlier one. Matches the pattern set by
     // `create_note` (label index) and `set_label_color`.
     let storage = storage_state.write().await;
-    toggle_task_impl(&*storage, year, week, &text_hash, ordinal).await
+    let result = toggle_task_impl(&*storage, year, week, &text_hash, ordinal).await?;
+    // Emit weekly-file-changed to match the pattern set by edit_task /
+    // delete_task / import_completed_tasks. /summary listens for
+    // this and reconciles when a landing-page toggle mutates the file
+    // it's currently editing.
+    emit_weekly_file_changed(&app, year, week);
+    Ok(result)
 }
 
 /// Trait-object seam for [`toggle_task`]. Integration tests drive this
@@ -2174,7 +2181,13 @@ pub(crate) async fn import_completed_tasks_impl<B: StorageBackend + ?Sized>(
         // All duplicates. If migration ran we still need to write
         // the migrated content — otherwise the file stays legacy on
         // disk and every subsequent read migrates in memory again.
+        // Stamp last_updated here too so the file's timestamp reflects
+        // when the migration was persisted (otherwise a summary that
+        // hadn't been touched in a month would still show its last-
+        // real-edit timestamp even though we just rewrote it).
         if was_migrated {
+            let now = Local::now();
+            summary.last_updated = Some(now.format("%Y-%m-%d %H:%M").to_string());
             let new_content = replace_weekly_summary_in_file(&content, &summary);
             backend
                 .write_week(year, week, &new_content)
