@@ -57,6 +57,11 @@
     /** Fired when the picker should close (outside-click, Escape,
      *  successful pick). */
     onClose,
+    /** Optional: fired when the user hits the "Clear due date" button
+     *  in the footer. When absent, the button doesn't render (keeps
+     *  the editor date-chip use case unchanged). Used by task rows
+     *  where a due date is optional and cleanable. */
+    onClear,
   }: {
     iso: string;
     from: number;
@@ -64,6 +69,7 @@
     anchorEl: HTMLElement;
     onCommit: (newIso: string) => void;
     onClose: () => void;
+    onClear?: () => void;
   } = $props();
 
   /** Parse the inbound ISO string into local-time year/month/day. */
@@ -343,6 +349,17 @@
       class="dp-action"
       onclick={goToToday}
     >Today</button>
+    {#if onClear}
+      <button
+        type="button"
+        class="dp-action dp-action-clear"
+        onclick={() => {
+          onClear();
+          onClose();
+        }}
+        title="Remove the due date from this task"
+      >Clear</button>
+    {/if}
     <button
       type="button"
       class="dp-action"
@@ -481,5 +498,16 @@
   }
   .dp-action:hover {
     background: var(--bg-surface);
+  }
+  /* Clear action reads as destructive — same maroon tint as the
+     trash-row hover state in +page.svelte, but never at rest so it
+     stays a peer of Today / Cancel until the user actually goes for
+     it. Only rendered when the caller passed `onClear`. */
+  .dp-action-clear:hover,
+  .dp-action-clear:focus-visible {
+    color: var(--brand-maroon);
+    background: color-mix(in srgb, var(--brand-maroon) 12%, transparent);
+    border-color: color-mix(in srgb, var(--brand-maroon) 40%, transparent);
+    outline: none;
   }
 </style>

@@ -10,6 +10,7 @@
   import Modal from '$lib/Modal.svelte';
   import InputField from '$lib/InputField.svelte';
   import RolloverReceipt from '$lib/RolloverReceipt.svelte';
+  import DatePickerPopover from '$lib/DatePickerPopover.svelte';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -73,6 +74,13 @@
      * "from Wxx" chip so users see the paper trail.
      */
     originalWeek: { year: number; week: number } | null;
+    /**
+     * Phase 3e — optional due date (YYYY-MM-DD, local). `null` when
+     * the task has no date set. The row renders a "Due …" chip when
+     * present; overdue tasks (dueDate < today) surface at the top of
+     * the Incomplete section under an "Overdue" heading.
+     */
+    dueDate: string | null;
   };
 
   // ---- State ----
@@ -120,6 +128,14 @@
   let deleteConfirmTask = $state<TaskListEntry | null>(null);
   let deletingTask = $state(false);
   let deleteError = $state('');
+
+  // Phase 3e — due-date picker state. Exactly one picker can be open
+  // at a time, keyed by the target task. Storing the anchor element
+  // (the calendar button) lets DatePickerPopover position itself
+  // relative to that button, just like the editor's date-chip picker.
+  let dueDatePickerTask = $state<TaskListEntry | null>(null);
+  let dueDatePickerAnchor = $state<HTMLElement | null>(null);
+  let dueDatePickerBusy = $state(false);
   // DOM handle for the Delete button so we can focus it when the
   // confirmation modal opens. Modal itself focuses the dialog card
   // (tabindex=-1) — for a two-button destructive prompt, moving
@@ -290,12 +306,33 @@
   // anchor partition. Both groups filter down from `visibleTasks`
   // so they inherit the `showCompleted` toggle for free (turning it
   // off collapses `completedVisibleTasks` to empty).
+  //
+  // Phase 3e — the Incomplete group further splits into "Overdue"
+  // (any task with dueDate strictly earlier than today's LOCAL
+  // date) and the regular Incomplete list. "Due today" is NOT
+  // overdue per the locked design (one grace day). Overdue tasks
+  // sort by earliest date first; regular Incomplete stays in file
+  // order. Completed tasks never appear in Overdue regardless of
+  // date — the debt was paid.
   const incompleteVisibleTasks = $derived(
     visibleTasks.filter((t) => !t.isCompleted),
   );
   const completedVisibleTasks = $derived(
     visibleTasks.filter((t) => t.isCompleted),
   );
+  const overdueVisibleTasks = $derived.by(() => {
+    const today = todayIso();
+    return incompleteVisibleTasks
+      .filter((t) => t.dueDate !== null && t.dueDate < today)
+      .slice() // .sort mutates — copy first so the derived source stays intact
+      .sort((a, b) => dateStringCompare(a.dueDate ?? '', b.dueDate ?? ''));
+  });
+  const incompleteNonOverdueTasks = $derived.by(() => {
+    const today = todayIso();
+    return incompleteVisibleTasks.filter(
+      (t) => t.dueDate === null || t.dueDate >= today,
+    );
+  });
 
   /**
    * Format an ISO 8601 completedAt string as a "checked Xm/h/d ago"
@@ -485,6 +522,110 @@
     } finally {
       deletingTask = false;
     }
+  }
+
+  // ---- Phase 3e: due-date picker ----
+
+  /** Local today as YYYY-MM-DD — used as the picker's seed date when
+   *  a task has no due date yet, and as the reference for the
+   *  "overdue" test in the derived-groups computation below. */
+  function todayIso(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  function openDueDatePicker(t: TaskListEntry, anchor: HTMLElement): void {
+    if (dueDatePickerTask || dueDatePickerBusy) return;
+    dueDatePickerTask = t;
+    dueDatePickerAnchor = anchor;
+  }
+
+  function closeDueDatePicker(): void {
+    if (dueDatePickerBusy) return;
+    dueDatePickerTask = null;
+    dueDatePickerAnchor = null;
+  }
+
+  async function commitDueDate(iso: string): Promise<void> {
+    const t = dueDatePickerTask;
+    if (!t || dueDatePickerBusy) return;
+    dueDatePickerBusy = true;
+    try {
+      await invoke('set_task_due_date', {
+        year: t.year,
+        week: t.week,
+        textHash: t.textHash,
+        ordinal: t.ordinal,
+        dueDate: iso,
+      });
+      tasks = await invoke<TaskListEntry[]>('list_tasks');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[due-date] set failed:', err);
+      // TODO: surface a user-facing error like editError / deleteError
+      // does. For now the picker closes and the task list refetches
+      // don't reflect the failed change; user can retry.
+    } finally {
+      dueDatePickerBusy = false;
+      dueDatePickerTask = null;
+      dueDatePickerAnchor = null;
+    }
+  }
+
+  async function clearDueDate(): Promise<void> {
+    const t = dueDatePickerTask;
+    if (!t || dueDatePickerBusy) return;
+    dueDatePickerBusy = true;
+    try {
+      await invoke('set_task_due_date', {
+        year: t.year,
+        week: t.week,
+        textHash: t.textHash,
+        ordinal: t.ordinal,
+        dueDate: null,
+      });
+      tasks = await invoke<TaskListEntry[]>('list_tasks');
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error('[due-date] clear failed:', err);
+    } finally {
+      dueDatePickerBusy = false;
+    }
+  }
+
+  /** Compare two YYYY-MM-DD strings as calendar dates. `a < b` iff
+   *  the calendar day represented by `a` is strictly earlier. String
+   *  comparison works because the format is zero-padded left-to-right
+   *  numeric. */
+  function dateStringCompare(a: string, b: string): number {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+  }
+
+  /** Format a YYYY-MM-DD as a compact chip label:
+   *  - "Due today" when the date == today's local date
+   *  - "Due <Weekday>" when within the next 6 days
+   *  - "Due Jul 15" when this year
+   *  - "Due Jul 15, 2027" otherwise
+   */
+  function formatDueDateLabel(iso: string): string {
+    const [y, m, d] = iso.split('-').map((n) => parseInt(n, 10));
+    if (!y || !m || !d) return iso;
+    const date = new Date(y, m - 1, d);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const days = Math.round((date.getTime() - today.getTime()) / 86_400_000);
+    if (days === 0) return 'Due today';
+    // Within a week either direction → weekday name (helps triage
+    // near-term commitments at a glance).
+    if (days > 0 && days < 7) {
+      return `Due ${date.toLocaleDateString('en-US', { weekday: 'short' })}`;
+    }
+    if (y === now.getFullYear()) {
+      return `Due ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+    }
+    return `Due ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
   }
 
   // Refetch settings — used both on mount and whenever the backend
@@ -952,13 +1093,31 @@
                         </span>
                       {/if}
                     {/if}
+                    {#if t.dueDate && !t.isCompleted}
+                      {@const overdue = t.dueDate < todayIso()}
+                      <!--
+                        Phase 3e due-date chip. Overdue rows get the
+                        `.overdue` variant (maroon tint) — the same
+                        signal is reinforced by the row landing under
+                        the "Overdue" section header. Chip is only
+                        rendered for OPEN tasks; a completed task's
+                        due date is history, not a signal.
+                      -->
+                      <span
+                        class="task-due-chip"
+                        class:overdue
+                        title={`Due ${t.dueDate}`}
+                      >
+                        {formatDueDateLabel(t.dueDate)}
+                      </span>
+                    {/if}
                     <!--
-                      Slice 6b/6c row actions. Pencil (edit) sits
-                      closer to the text, trash (delete) at the far
-                      right — small extra mouse travel for the
-                      destructive action. Both disabled while a
-                      different row is being edited so keyboard focus
-                      stays pinned to the input the user is typing in.
+                      Slice 6b/6c/3e row actions. Order (text → right):
+                      pencil (edit), calendar (due date), trash (delete).
+                      Destructive action stays farthest from primary
+                      tap targets. All three disabled while a different
+                      row is being edited or a delete confirmation is
+                      open so keyboard focus can't wander.
                     -->
                     <button
                       type="button"
@@ -981,6 +1140,31 @@
                       >
                         <path d="M12 20h9" />
                         <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      class="task-due-btn"
+                      aria-label={t.dueDate ? `Change due date for: ${t.text}` : `Set a due date for: ${t.text}`}
+                      title={t.dueDate ? 'Change due date' : 'Set a due date'}
+                      disabled={togglingKeys[key] === true || editingKey !== null || deleteConfirmTask !== null || dueDatePickerTask !== null}
+                      onclick={(e) => openDueDatePicker(t, e.currentTarget as HTMLElement)}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="14"
+                        height="14"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                        <line x1="16" y1="2" x2="16" y2="6" />
+                        <line x1="8" y1="2" x2="8" y2="6" />
+                        <line x1="3" y1="10" x2="21" y2="10" />
                       </svg>
                     </button>
                     <button
@@ -1016,10 +1200,25 @@
                 {/if}
               {/snippet}
 
-              {#if incompleteVisibleTasks.length > 0}
+              {#if overdueVisibleTasks.length > 0}
+                <!--
+                  Phase 3e — Overdue group at the top of the
+                  Incomplete section. Only rendered when there's at
+                  least one overdue task; empty group never surfaces.
+                  Sorted by earliest due date first — the oldest
+                  debt sits on top.
+                -->
+                <h3 class="task-group-header task-group-header-overdue">Overdue</h3>
+                <ul class="task-items">
+                  {#each overdueVisibleTasks as t (taskKey(t))}
+                    {@render taskRow(t)}
+                  {/each}
+                </ul>
+              {/if}
+              {#if incompleteNonOverdueTasks.length > 0}
                 <h3 class="task-group-header">Incomplete Tasks</h3>
                 <ul class="task-items">
-                  {#each incompleteVisibleTasks as t (taskKey(t))}
+                  {#each incompleteNonOverdueTasks as t (taskKey(t))}
                     {@render taskRow(t)}
                   {/each}
                 </ul>
@@ -1145,6 +1344,28 @@
         </div>
       {/if}
     </Modal>
+
+    {#if dueDatePickerTask && dueDatePickerAnchor}
+      <!--
+        Phase 3e due-date picker. Reuses the same DatePickerPopover
+        the editor's inline date chips use. `from`/`to` are irrelevant
+        for this call site (they exist for the CodeMirror-transaction
+        commit path); we pass 0/0 as placeholders. Seed the picker
+        with the task's current date if any, else today. `onClear` is
+        wired only for rows that already have a date — passing it
+        conditionally makes the picker's Clear button appear only
+        when there's something to clear.
+      -->
+      <DatePickerPopover
+        iso={dueDatePickerTask.dueDate ?? todayIso()}
+        from={0}
+        to={0}
+        anchorEl={dueDatePickerAnchor}
+        onCommit={(iso) => void commitDueDate(iso)}
+        onClose={closeDueDatePicker}
+        onClear={dueDatePickerTask.dueDate ? () => void clearDueDate() : undefined}
+      />
+    {/if}
   </main>
 {/if}
 
@@ -1480,6 +1701,71 @@
   .task-delete-btn:disabled {
     opacity: 0.25;
     cursor: default;
+  }
+
+  /* Phase 3e — calendar button. Same shape/size as edit + trash so
+     the three row-actions form a coherent trailing-edge group. Hover
+     leans accent-primary (task-list feature color) instead of maroon
+     (which is destructive) or muted (neutral). */
+  .task-due-btn {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 120ms ease, background 120ms ease,
+      border-color 120ms ease, color 120ms ease;
+  }
+  .task-due-btn:hover,
+  .task-due-btn:focus-visible {
+    opacity: 1;
+    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+    border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
+    color: var(--accent-primary-text);
+    outline: none;
+  }
+  .task-due-btn:disabled {
+    opacity: 0.25;
+    cursor: default;
+  }
+
+  /* Phase 3e — due-date chip. Same rhythm as .task-origin +
+     .task-time so multi-chip rows stay coherent. Accent-primary-text
+     for on-time (echoes the calendar icon color); the .overdue
+     variant flips to maroon tones + a stronger background so an
+     overdue row is impossible to miss even without the Overdue
+     header. `title` carries the raw ISO date for anyone who wants
+     precision. */
+  .task-due-chip {
+    flex-shrink: 0;
+    font-size: var(--text-caption);
+    color: var(--accent-primary-text);
+    white-space: nowrap;
+    padding: 1px 6px;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+  }
+  .task-due-chip.overdue {
+    color: var(--brand-maroon);
+    background: color-mix(in srgb, var(--brand-maroon) 12%, transparent);
+    font-weight: 600;
+  }
+
+  /* Phase 3e — Overdue section header. Same visual as the other
+     group headers (small caps + hairline underline) but the label
+     itself + underline tint maroon so the section reads as
+     "attention required" before the user even scans the rows. */
+  .task-group-header-overdue {
+    color: var(--brand-maroon);
+    border-bottom-color: color-mix(in srgb, var(--brand-maroon) 45%, transparent);
   }
 
   /* Slice 6c delete-confirm modal body. Vertical stack of lead
