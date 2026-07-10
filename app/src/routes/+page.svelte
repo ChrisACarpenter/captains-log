@@ -1093,15 +1093,21 @@
                         </span>
                       {/if}
                     {/if}
-                    {#if t.dueDate && !t.isCompleted}
-                      {@const overdue = t.dueDate < todayIso()}
+                    {#if t.dueDate}
+                      {@const overdue = !t.isCompleted && t.dueDate < todayIso()}
                       <!--
-                        Phase 3e due-date chip. Overdue rows get the
-                        `.overdue` variant (maroon tint) — the same
-                        signal is reinforced by the row landing under
-                        the "Overdue" section header. Chip is only
-                        rendered for OPEN tasks; a completed task's
-                        due date is history, not a signal.
+                        Phase 3e due-date chip. Rendered on both
+                        OPEN and COMPLETED tasks — the historical
+                        date stays visible after a task is checked
+                        off (useful when reviewing past completions).
+                        The `.overdue` class is applied ONLY for
+                        INCOMPLETE tasks with a past date; completed
+                        tasks render in the neutral style regardless
+                        of when they were due, since the debt was
+                        paid. Overdue signal is reinforced by the
+                        row landing under the "Overdue" section
+                        header — completed tasks never route through
+                        that group.
                       -->
                       <span
                         class="task-due-chip"
@@ -1754,8 +1760,11 @@
     background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
   }
   .task-due-chip.overdue {
-    color: var(--brand-maroon);
-    background: color-mix(in srgb, var(--brand-maroon) 12%, transparent);
+    /* --brand-maroon-text is theme-adjusted for readability: lifted
+       to a bright red in dark theme, kept as the darker base maroon
+       in light theme. See app.css. */
+    color: var(--brand-maroon-text);
+    background: color-mix(in srgb, var(--brand-maroon-text) 18%, transparent);
     font-weight: 600;
   }
 
@@ -1764,8 +1773,8 @@
      itself + underline tint maroon so the section reads as
      "attention required" before the user even scans the rows. */
   .task-group-header-overdue {
-    color: var(--brand-maroon);
-    border-bottom-color: color-mix(in srgb, var(--brand-maroon) 45%, transparent);
+    color: var(--brand-maroon-text);
+    border-bottom-color: color-mix(in srgb, var(--brand-maroon-text) 45%, transparent);
   }
 
   /* Slice 6c delete-confirm modal body. Vertical stack of lead

@@ -157,11 +157,17 @@
     onClose();
   }
 
+  /** Jump the view to today's month AND commit today's date. Users
+   *  expect "Today" to be a one-click shortcut, not just a view
+   *  navigator that still requires another click on the day cell.
+   *  If a caller ever needs pure view-navigation (no commit), we can
+   *  split this into two actions — no consumer has asked yet. */
   function goToToday(): void {
     const t = today();
     viewYear = t.year;
     viewMonth = t.month;
     focusedDay = t.day;
+    selectDay(t.day);
   }
 
   // -- Keyboard nav --

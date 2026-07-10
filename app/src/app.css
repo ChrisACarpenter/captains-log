@@ -36,6 +36,7 @@
   --accent-primary: #ff5c08;
   --accent-primary-text: #ff8e51; /* For orange text on dark surfaces. Lifted from #ff7a3a — that hue was 4.41:1 on bg-elevated, just under WCAG AA. This value clears ~5:1 on bg-elevated and ~6.6:1 on bg-base while staying recognisably "Prodigy orange". */
   --accent-maroon: #6c1e38;
+  --brand-maroon-text: #ff7080; /* Lifted maroon for dark-surface readability (Phase 3e overdue chip + heading). The raw #6c1e38 is only ~1.9:1 on bg-base in dark; this lifts to ~5.4:1 on bg-base and ~4.7:1 on bg-elevated while staying recognisably red. Light theme overrides below use the darker original since it reads well on cream. */
 
   /* Lines & focus */
   --border-decorative: rgba(255, 92, 8, 0.14);
@@ -143,6 +144,7 @@
 
   --accent-primary-text: #c44400; /* For orange text on light surfaces (4.6:1 on cream) */
   --accent-pink-text: #b50079; /* For pink text on cream surfaces (5.5:1 on bg-base) */
+  --brand-maroon-text: var(--accent-maroon); /* The base maroon (#6c1e38) reads fine on cream — no lift needed in light theme. */
 
   --border-decorative: rgba(255, 92, 8, 0.18);
   --border-structural: rgba(28, 22, 18, 0.12);
