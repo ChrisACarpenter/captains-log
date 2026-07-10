@@ -444,39 +444,55 @@ Slice 5 shipped the aggregator on top of "tasks embedded in the Plans-and-priori
 
 ### Phase 3e — Task due dates
 
-Add optional due dates to tasks with a calendar-icon row action and a landing-page "Overdue" heading. Design brief to be captured in a follow-up plans-out session; storage + UI locked before build.
+Add optional due dates to tasks with a calendar-icon row action + a landing-page "Overdue" section. Design locked 2026-07-10 in a four-question plans-out — spec below is the final shape going into build.
 
-**Row action + picker** (planned)
+**Storage (locked)**
 
-- [ ] Third inline icon between the pencil and the trash: a calendar. Click opens a small popup with `DatePickerPopover` (already exists — Phase 2.5's Confluence-style widget) and a heading like "Pick a due date". Tasks that already have a due date show the picker seeded to that date; clearing the date is a first-class action inside the popup.
+- [ ] New sidecar `.metadata/task-due-dates.json`. Keyed by `(year, week, textHash, ordinal)` — identical shape to `TaskCompletions` + `RolloverLog`. Value: `{ dueDate: "YYYY-MM-DD" }` (local date; no time-of-day).
+- [ ] `TaskDueDates::load` / `save` following the sidecar posture already established: missing file → empty; corrupt file → empty + stderr warning; atomic write via staged `.tmp` + rename.
+- [ ] Reconciliation: on `list_tasks`, join the sidecar with parsed tasks by `(year, week, hash, ord)`. Orphan entries (no matching task) are ignored on read and swept by Rebuild on demand. Same posture as `TaskCompletions`.
 
-**Storage** (design open)
+**Row action + picker (locked)**
 
-- [ ] Encode the due date in the markdown task line or in a sidecar? Decision TBD — options include:
-  - Inline suffix on the task line (e.g. `- [ ] Ship the widget <!-- due:2026-07-15 -->` or `📅 2026-07-15`). Portable but Obsidian Tasks flagged emoji-metadata as Unicode-fragile.
-  - Sidecar (`.metadata/task-due-dates.json`) keyed by `(year, week, textHash, ordinal)` — same shape as `TaskCompletions`. Fragile if user edits the task text outside the app (identity drifts).
-  - Frontmatter or `### Tasks` section metadata comment (e.g. `<!-- captainslog:tasks:due:{hash}:{ordinal}:2026-07-15 -->`). Machine-readable but noisier to read raw.
-- Locked at design time before any code lands.
+- [ ] Third inline icon between the pencil and the trash: a calendar. Click opens a popover with `DatePickerPopover` (already exists — Phase 2.5's Confluence-style widget) anchored to the icon.
+- [ ] Popover contents: title ("Set a due date"), the month grid, a **Clear due date** action (disabled when the task has no date), primary **Set** button (Enter commits). Tasks that already have a date open the picker seeded to that date.
+- [ ] New Tauri command `set_task_due_date(year, week, text_hash, ordinal, due_date: Option<String>)`. `Some` = set/update; `None` = clear. Same read-migrate-backup-write shape as toggle/edit/delete for consistency.
 
-**Display** (planned)
+**Display (locked)**
 
-- [ ] Tasks with a due date render a chip next to the origin chip: "Due Fri" / "Due Jul 15" (this year) / "Due Jul 15, 2027" (different year). Chip clicks open the picker.
-- [ ] Landing-page Incomplete section splits into two sub-groups when there are overdue tasks: **Overdue** (a new header at the top) followed by the existing **Incomplete Tasks** header. Overdue = due date strictly earlier than today's local date, and the task is `[ ]`. Completed tasks never appear in Overdue regardless of due date.
-- [ ] Sort within Overdue: earliest due date first (oldest debt on top). Sort within Incomplete: file order (unchanged).
+- [ ] Tasks with a due date render a chip alongside the origin + timestamp chips: "Due today" (equal to local date) / "Due Fri" (this week) / "Due Jul 15" (this year) / "Due Jul 15, 2027" (different year). Chip click opens the picker seeded to the current date.
+- [ ] `.task-due-chip` for on-time; `.task-due-chip.overdue` for overdue — the overdue class flips the background + text to `--brand-maroon` tones so it reads as danger. Both dark + light theme tested for AA.
+- [ ] Landing-page Incomplete section splits into two sub-groups when there are overdue tasks: **Overdue** header at the top (new group header, same visual weight as "Incomplete Tasks" / "Completed Tasks"), followed by the existing **Incomplete Tasks** header. When there are zero overdue, only "Incomplete Tasks" renders (no empty "Overdue" section).
+- [ ] Overdue definition: `due_date` strictly earlier than today's LOCAL date. A task due today shows "Due today" chip but sits in the regular Incomplete section (one grace day). Completed tasks never appear in Overdue regardless of date.
+- [ ] Sort within Overdue: earliest due date first (oldest debt on top). Sort within Incomplete: file order (unchanged from today). Sort within Completed: file order (unchanged).
 
-**Interactions with existing systems** (planned)
+**Interactions with existing systems (locked)**
 
-- [ ] Rollover carries the due date forward with the task (part of provenance or storage-per-week — depends on storage choice).
-- [ ] Auto-import to Key Accomplishments: due-date info doesn't propagate (completed tasks don't have deadlines to enforce).
-- [ ] Edit-task: renaming a task preserves its due date (identity re-key).
-- [ ] Delete-task: drops any due-date record for the deleted task.
-- [ ] Toggle-task to `[x]`: due-date record is preserved (so uncheck later restores it).
+- [ ] **Rollover** carries the due date forward VERBATIM. A task that was overdue in last week's file stays overdue in this week's — the debt is real; don't hide it. The rollover command loads `TaskDueDates`, and when it copies an open task forward it copies the due-date entry too (keyed to the new `(year, week, hash, ordinal)`).
+- [ ] **Edit-task**: due-date entry re-keyed by the positional key-map (same pass as sidecar + provenance). Renaming a task preserves its due date.
+- [ ] **Delete-task**: drops the due-date entry outright, plus applies the positional key-map to remaining entries in the same week.
+- [ ] **Toggle-task**: due-date entry preserved across check/uncheck (so unchecking a completed dated task restores the chip). Re-keyed by the same positional map the sidecar uses.
+- [ ] **Rebuild task index**: sweeps orphan due-date entries (no matching task line in any weekly file) the same way it prunes stale completions.
+- [ ] **Auto-import to Key Accomplishments**: due-date info doesn't propagate into the "Completed Tasks" bullets — completed tasks don't have deadlines to enforce, and the bullets are prose destined for a weekly email.
 
 **Out of scope**
 
 - Recurring due dates.
 - Time-of-day components (dates only, per BuJo).
-- Reminders / notifications on due dates (nice, but a separate scheduler is a chunk of work — leave for Phase 4+ if it comes up).
+- Reminders / notifications on due dates. Interesting but a separate scheduler surface; revisit if the calendar chip proves compelling.
+- Setting a due date at task-add time. The + Add Task modal stays text-only; users set the date via the calendar icon on the row after adding. Keeps the modal narrow.
+- Global setting to disable the due-date feature. Opt-in per task (no date = no chip); no global toggle needed.
+
+**Verification approach**
+
+- Sidecar load/save roundtrip test + missing-file / corrupt-file posture tests.
+- Set-then-clear roundtrip.
+- Rollover carries a due date forward, and an overdue-in-source-week task is still overdue in the target week (asserted against `today_local()` seam if we add one for testability).
+- Edit-then-check preserves the due date under the new hash.
+- Delete drops the entry cleanly + applies the positional re-key to same-week same-hash siblings.
+- Toggle to `[x]` and back to `[ ]` preserves the date.
+- Rebuild orphan sweep: manually inject an orphan entry, verify Rebuild prunes it.
+- Manual: add a task, set a date for yesterday → row surfaces under "Overdue" with a red chip. Set date to today → chip says "Due today" but row moves back to regular Incomplete. Clear the date → chip disappears.
 
 ## Phase 4 — Link Enrichment
 
