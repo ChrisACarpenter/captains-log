@@ -335,21 +335,47 @@ fn extract_subsection(section: &str, header: &str) -> String {
         Some(n) => start + n + 1,
         None => return String::new(),
     };
-    // Body runs until the next `### ` subsection header. We used to
-    // also stop at any `\n## ` here as a defensive backstop for
-    // `## Weekly Notes`, but the caller (parse_weekly_summary) already
-    // slices `section` at NOTES_HEADER — so that check was redundant
-    // AND actively harmful: it truncated user-authored H2 headings
-    // ("## Sub-header" inside Key accomplishments) as if they were
-    // section boundaries, causing content below them to disappear on
-    // read-back. Users should be free to structure their field content
-    // with any markdown they like.
-    let body_end = section
-        .get(body_start..)
-        .and_then(|s| s.find("\n### "))
-        .map(|i| body_start + i)
-        .unwrap_or(section.len());
+    // Walk forward looking for the next `\n### `. A raw `\n### ` alone
+    // is NOT a boundary — the user may have typed their own H3 inside
+    // this field's content (e.g. "### Claude Code Workflow:" to
+    // structure Key accomplishments). Only OUR known field headers
+    // count as boundaries; any other H3 is user prose and we keep
+    // walking. Same story for `\n## ` — the outer parse_weekly_summary
+    // slice at NOTES_HEADER is the authoritative section end, so
+    // user-typed H2s inside a field survive too.
+    let mut search_from = body_start;
+    let body_end = loop {
+        let Some(idx) = section[search_from..].find("\n### ") else {
+            break section.len();
+        };
+        let candidate = search_from + idx;
+        // Extract the heading LINE (from the char after \n to the next \n).
+        let heading_line_start = candidate + 1;
+        let heading_line_end = section[heading_line_start..]
+            .find('\n')
+            .map(|n| heading_line_start + n)
+            .unwrap_or(section.len());
+        let heading_line = section[heading_line_start..heading_line_end].trim_end();
+        if is_known_summary_subsection_header(heading_line) {
+            break candidate;
+        }
+        // User-authored H3 — advance past this line and keep looking.
+        search_from = heading_line_end;
+    };
     section[body_start..body_end].trim().to_string()
+}
+
+/// True if a line matches one of the Weekly Summary's own subsection
+/// headers exactly. Used by extract_subsection to distinguish OUR
+/// section boundaries from arbitrary user-authored `### H3` content
+/// inside a field.
+fn is_known_summary_subsection_header(line: &str) -> bool {
+    line == SECTION_KEY_ACC
+        || line == SECTION_PLANS
+        || line == SECTION_CHALLENGES
+        || line == SECTION_OTHER
+        || line == SECTION_LABELS
+        || line == SECTION_TASKS
 }
 
 /// Render a Weekly Summary section back to markdown, preserving the structure
@@ -908,6 +934,88 @@ mod tests {
         assert_eq!(s.plans_and_priorities, "- ship baz");
         assert_eq!(s.challenges_or_roadblocks, "none");
         assert_eq!(s.anything_else, "feeling good");
+    }
+
+    #[test]
+    fn parse_summary_preserves_user_authored_h3_inside_a_field() {
+        // Regression (Chris hit 2026-07-10): typing `### Claude Code
+        // Workflow:` inside Key accomplishments looked like the start
+        // of a new field. extract_subsection's `\n### ` stop caught it
+        // and truncated key_accomplishments at that line — everything
+        // below vanished on read-back, surfacing the /summary external-
+        // update banner and threatening real content loss on Reload.
+        // Only OUR known subsection headers ("### Key accomplishments",
+        // "### Plans and priorities for next week", etc.) count as
+        // boundaries. Any other H3 is user prose.
+        let file = "## Weekly Summary\n*Last updated: 2026-07-10 09:26*\n\
+                    \n### Key accomplishments\n\
+                    # THIS WAS A GOOD WEEK!!!!\n\
+                    \n### Claude Code Workflow:\n\
+                    - Pick the batch — 3 or 4 sibling tests\n\
+                    - Set up isolated worktrees\n\
+                    - Phase 1 — parallel conversion\n\
+                    - Retrospective diff\n\
+                    - Phase 2 — serial headed review\n\
+                    \nConcrete tools used: Workflow tool for fan-out, gh for PR pages.\n\
+                    \n### Plans and priorities for next week\n\
+                    - ship the bonfire tests\n\
+                    \n### Challenges or roadblocks\n\
+                    - Code reviews are slow\n\
+                    \n### Anything else on your mind\n\n\
+                    \n### Labels\n#full-regressions #ai-workflow\n\
+                    \n### Tasks\n\
+                    <!-- captainslog:tasks:incomplete -->\n\
+                    <!-- captainslog:tasks:completed -->\n\
+                    - [x] Old task\n\
+                    \n## Weekly Notes\n";
+
+        let s = parse_weekly_summary(file);
+        // Every line under the user's H3 survives.
+        assert!(s.key_accomplishments.contains("# THIS WAS A GOOD WEEK!!!!"));
+        assert!(
+            s.key_accomplishments.contains("### Claude Code Workflow:"),
+            "user's H3 must survive: {}",
+            s.key_accomplishments
+        );
+        assert!(s.key_accomplishments.contains("- Pick the batch"));
+        assert!(s.key_accomplishments.contains("- Retrospective diff"));
+        assert!(s.key_accomplishments.contains("Concrete tools used"));
+        // Later fields still parse — OUR H3s ARE still boundaries.
+        assert_eq!(s.plans_and_priorities, "- ship the bonfire tests");
+        assert_eq!(s.challenges_or_roadblocks, "- Code reviews are slow");
+        // Labels + tasks_body still parse.
+        assert_eq!(s.labels, vec!["full-regressions".to_string(), "ai-workflow".to_string()]);
+        assert!(s.tasks_body.contains("- [x] Old task"));
+    }
+
+    #[test]
+    fn parse_summary_walks_past_multiple_user_h3s_in_same_field() {
+        // Multi-H3 in the same field — verify the walk loop advances
+        // correctly past each non-boundary H3 without stopping early.
+        let file = "## Weekly Summary\n*Last updated: 2026-07-10 10:00*\n\
+                    \n### Key accomplishments\n\
+                    ### First subsection\n\
+                    body a\n\
+                    ### Second subsection\n\
+                    body b\n\
+                    ### Third subsection\n\
+                    body c\n\
+                    \n### Plans and priorities for next week\n- plan\n\
+                    \n### Challenges or roadblocks\n\n\
+                    \n### Anything else on your mind\n\n\
+                    \n## Weekly Notes\n";
+        let s = parse_weekly_summary(file);
+        for user_h3 in ["First subsection", "Second subsection", "Third subsection"] {
+            assert!(
+                s.key_accomplishments.contains(user_h3),
+                "user's H3 '{user_h3}' must survive: {}",
+                s.key_accomplishments
+            );
+        }
+        assert!(s.key_accomplishments.contains("body a"));
+        assert!(s.key_accomplishments.contains("body b"));
+        assert!(s.key_accomplishments.contains("body c"));
+        assert_eq!(s.plans_and_priorities, "- plan");
     }
 
     #[test]
