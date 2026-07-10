@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 3b ✅ done — next up Phase 3c (Task list aggregator)
+## Current phase: Phase 3d Slice 6c ✅ done — next up Phase 3e (Task due dates)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -10,7 +10,9 @@ Phase 3a shipped 2026-07-06 — the Label Library viewer got its "Referenced In"
 
 Phase 3b shipped 2026-07-06 — full-text search across every weekly file (Weekly Summary content + Note bodies) with an optional label filter, dedicated `/search` route reachable from the `/journal` sidebar OR global `Cmd+K` shortcut, result cards grouped by surface (Summary/Note kind badge + `YYYY-Wnn` label + Note timestamp + labels), click-to-jump into `/journal?year=Y&week=W&scrollTo=<byte-offset>` with MarkdownEditor scrolling the target byte into view. MVP started narrower (Summary-only) and expanded to Notes + scroll-to-position once the pattern proved out.
 
-**Next up: Phase 3c — Task list aggregator.** See the full spec below — aggregate `- [ ]` items from every weekly file's "Plans and priorities for next week" section into a live task view on the landing page. Bidirectional sync back to source markdown, week-rollover mechanic that appends completed tasks to the new week's Key Accomplishments. Design brief captured in the DEVELOPMENT-JOURNAL 2026-07-06 entry.
+**Phase 3c (task list aggregator) + Phase 3d (task rearchitecture, Slices 6a–6c + auto-import) are done.** The aggregator shipped as designed, then the whole task feature was rearchitected around a dedicated `### Tasks` section with HTML-comment anchors — tasks became first-class objects with a locked-down UI while markdown stayed the storage layer. Row actions (pencil edit + trash delete), Copy-Completed-to-Key-Accomplishments, and once-per-day auto-import all landed on top. See both phase sections below for the full receipts.
+
+**Next up: Phase 3e — Task due dates.** Calendar-icon action between the pencil and trash on each task row → date-picker popup → tasks with dates render a chip; overdue tasks rise to the top of the landing-page list under an "Overdue" heading. Design brief to be captured in the next DEVELOPMENT-JOURNAL entry; a follow-up plans-out session will lock UX + storage before build.
 
 ---
 
@@ -339,72 +341,142 @@ Sequenced intentionally: the Label library viewer (3a) is the natural starter be
 
 **Verification:** 13 Rust tests total (7 existing + 4 new for Note-body search / scroll offset / kind discrimination / label filter on notes + 2 for literal-metacharacter / cross-field / unicode). All 259 tests pass. Frontend `svelte-check` 422/0/0. Manual smoke: Summary-only searches, Note-only searches, mixed weeks, deep-link scroll-to, Cmd+K from `/journal` / `/settings` / `/summary` all landing correctly.
 
-### Phase 3c — Task list aggregator
+### Phase 3c — Task list aggregator ✅ (shipped 2026-07-07)
 
-Aggregate `- [ ]` items from every weekly file's "Plans and priorities for next week" section into a live task view on the landing page. Bidirectional sync — checking a task on the main screen rewrites the source markdown line. Opt-in week-rollover mechanic appends completed tasks to the new week's Key Accomplishments. Design derived from a prior-art sweep (Obsidian Tasks / Logseq / Things 3 / Bullet Journal); decision brief captured in the DEVELOPMENT-JOURNAL entry for 2026-07-06.
+Aggregates `- [ ]` items from every weekly file into a live task view on the landing page, with bidirectional sync back to source markdown. Design derived from a prior-art sweep (Obsidian Tasks / Logseq / Things 3 / Bullet Journal); decision brief captured in the DEVELOPMENT-JOURNAL 2026-07-06 entry.
 
-**Task identity model (locked)**
+**Slice 1 — read-only task list** (commit `d1c2421`)
 
-Markdown is the sole source of truth for checkbox state. A sidecar (`.metadata/task-completions.json`) is a rebuildable cache that stores `completedAt` timestamps and nothing else.
+- [x] `list_tasks` Tauri command: parses `- [ ] / - [x]` lines out of the current week's Plans-and-priorities body, returns `{year, week, text, textHash, ordinal, isCompleted, completedAt, originalWeek}`. Server-side render of `render_task_text_inline` (pulldown-cmark → ammonia inline-only allowlist) so bold/italic/strike/code/br land safely into `{@html}`.
+- [x] Scrollable task list below the three primary landing-page buttons. Row = ARIA checkbox + task text + provenance chip + optional timestamp chip. Empty state via shared `<TipBubble>`.
+- [x] Composite identity `(year, week, textHash, ordinal)` with `normalize_task_text` = trim + collapse whitespace + lowercase + strip trailing `.,!?:;`. Ordinal disambiguates same-hash duplicates by per-hash file-order rank.
 
-- Composite key: `(weekId, normalizedTextHash)`. Normalization: trim, collapse internal whitespace, lowercase, strip trailing punctuation.
-- Duplicate task text within the same week's Plans section: append an `ordinal` disambiguator (kicks in only when duplicates exist, so single occurrences stay stable across reordering).
-- Reconciliation on load: markdown wins for checkbox state, sidecar wins for timestamps. `[x]` in file + no sidecar entry → backfill `completedAt` from file mtime (em-dash display if unreadable). `[ ]` in file + sidecar entry → drop the entry. Sidecar entry with no matching file line → garbage-collect.
-- Text rewritten externally → treated as a new task; old sidecar entry GC'd on next scan. User mental model: *"A task is a `- [ ]` line I wrote. Rename it substantially and it becomes a new task — same as crossing it out and writing fresh."*
+**Slice 2 — toggle** (commit `d1c2421`)
 
-**Landing-page task view**
+- [x] `toggle_task` command flips the checkbox marker byte in-place and updates the `.metadata/task-completions.json` sidecar. Markdown wins for state; sidecar wins for timestamp. Emits `weekly-file-changed` so `/summary` reconciles.
+- [x] Sidecar posture: missing file → empty; corrupt file → empty + stderr warning. Losing the sidecar costs precise timestamps for pre-existing checks and nothing else.
 
-- [ ] Scrollable task list below the three primary buttons (weekly summary / browse journal / settings). Visual treatment based on the Labels viewer in Settings → Labels.
-- [ ] Tasks grouped by **"From Week N"** headers — the week the task was written in, not planned for. BuJo's model: the date of a task is its origin, not its deadline.
-- [ ] Per-task **"Written in Week N"** badge always visible — doubles as the staleness signal without needing a separate overdue concept.
-- [ ] **+ Add task** button centered under the list. Opens a shared-Modal popup with a single text-input field; on submit, appends `- [ ]` to the current week's Plans section (creates the file / section if missing).
-- [ ] Empty state: shared `<TipBubble>` directing the user to add `- [ ]` items in the Plans and priorities for next week section of their journal.
+**Slice 3 — add task** (commit `d1c2421`)
 
-**Bidirectional sync**
+- [x] `append_task_to_current_week` command + landing-page **+ Add Task** modal. Validation: non-empty after trim, no embedded newlines, `MAX_TASK_TEXT_LEN = 1024` bytes, no `- [` prefix. Scaffolds the weekly file if missing.
 
-- [ ] Check off task on main screen → matching line in source markdown rewritten to `- [x]` via the existing `write_week` Tauri command.
-- [ ] Emits the standard `weekly-file-changed` event so `/journal` + `/summary` reconcile if open on the same week (uses the Phase 2.5b `pendingCommit` guard to prevent own-save race).
+**Slice 4 — task-list settings tab** (commit `d1c2421`)
 
-**Sidecar (`.metadata/task-completions.json`)**
+- [x] Settings > Tasks tab with four toggles: `showCompleted` (default on), `openTasksFirst` (default on), `showCompletedTimestamp` (default off), `hideTaskList` (default off). All persist to `.metadata/settings.json` under `taskList`.
+- [x] **Rebuild task index** button + Tip: walks every weekly file, backfills missing sidecar entries, prunes stale ones, and sweeps stranded incomplete tasks from any older week into the current week.
 
-- [ ] Atomic writes via staged `.tmp` + rename (same pattern as `labels.json` from Phase 2.8b).
-- [ ] Full rebuild-from-source on load: scan every weekly file's Plans section, reconcile against sidecar per the locked identity model.
-- [ ] **Rebuild task index** button in Settings → Task List, with a tip explaining when to use it (rare escape hatch: "if things look off, click here"). Discoverable but not intrusive — no hotkey.
-- [ ] Handles sidecar deletion / tampering: on next load, mtime backfill for existing `[x]` tasks; nothing worse than losing precise completion timestamps for pre-existing checks.
+**Slice 5 — weekly rollover with provenance** (commit `d1c2421`)
 
-**Week rollover**
+- [x] `check_and_apply_rollover` command copies incomplete tasks from the immediately-previous ISO week into the current week's Plans section. `RolloverLog` sidecar (`.metadata/rollover-log.json`) tracks `last_run_to_week` (per-week idempotence) + `provenance` (`{year, week, textHash, ordinal, originalYear, originalWeek, originalCreatedAt}` — survives multi-hop rollovers).
+- [x] Frontend triggers: onMount + `tauri://focus` + `visibilitychange` + `captainslog:week-changed` + 60s safety interval. Rollover receipt toast on the landing page when tasks are carried forward. `taskList.autoRolloverEnabled` toggle in settings (default on).
+- [x] Rebuild sweep uses `open_first_seen` HashMap to dedupe stranded tasks across weeks — the earliest occurrence wins, and its provenance is preserved.
 
-Fires on the first day of the ISO week (per user's reminder day-of-week convention). Lazy trigger: no background writes while the app is closed. Two entry points hit the same handler:
+**Verification:** `cargo test`: 411 → 414 → 417 → … → 433 passing across slices. `svelte-check`: clean at 422/0/0. Manual smoke on real journal: multiple toggles, adds, rollovers across the ISO week boundary — no data loss, correct provenance chips.
 
-- [ ] Scheduler tick at midnight of the first-day boundary (handles app-left-open case) — dispatches the rollover.
-- [ ] On-mount check when the main window opens (handles fresh-launch-in-new-week case) — compares last-known-rollover-week against current week; if we're behind, run rollover.
-- [ ] Rollover action: for each `- [x]` task in the previous week's Plans section, append `- ` + task text to that week's `### Key accomplishments` section under a **"Rolled over from Week N"** subheading. Appends below any existing user-written content in that section so the user's own writing stays first.
-- [ ] Receipt toast on `/summary` with an **Undo** affordance (removes the appended block + reverts source-task check state). Undo available until dismissed or until the next rollover fires.
-- [ ] Per-line **"Rolled over from Week N"** badge in the rendered Key Accomplishments list so the lineage survives visually even after the toast is gone.
+### Phase 3d — Task rearchitecture (Slices 6a → 6c) ✅ (shipped 2026-07-10)
 
-**Settings → Task List tab**
+Slice 5 shipped the aggregator on top of "tasks embedded in the Plans-and-priorities body." Slice 6 rearchitects tasks into a dedicated `### Tasks` section with HTML-comment anchors, promotes them to first-class objects in the UI, and layers row-actions + import + auto-import on top. Locked design brief in `~/.claude/.../memory/project_captains_log_slice6_design.md`.
 
-- [ ] **Use task list** (default on) — master toggle. When off, hides the main-screen list AND every other option in this tab.
-- [ ] **Add completed tasks to next week's Key accomplishments** (default on).
-- [ ] **Hide completed tasks** (default on) — checked-off tasks vanish from the main-screen list immediately. When off, completed tasks remain visible; add a tip noting all history will appear (older completed tasks stay in the list forever unless re-checked).
-- [ ] **Rebuild task index** button + tip.
+**Slice 6a — tasks as first-class objects** (commit `d1c2421` + `52f4199` finishing touches)
 
-**Out of scope (intentional — parked for later)**
+- [x] **New `### Tasks` section** in each weekly file, anchored by HTML comments so parsing survives header renames or accidental edits:
+  ```
+  ### Tasks
+  <!-- captainslog:tasks:incomplete -->
+  - [ ] Task text
+  <!-- captainslog:tasks:completed -->
+  - [x] Done task
+  ```
+- [x] **Lazy migration on first write.** Legacy files (`[ ]`/`[x]` in Plans body, no `### Tasks` section) migrate on the next mutation (toggle, edit, delete, append, import, rollover). Pre-migration bytes back up to `.metadata/pre-slice6-backups/{YYYY}-Www.md` (idempotent by file presence — never clobbers an existing backup).
+- [x] **Move-on-check.** Toggling `- [ ]` moves the line from the Incomplete anchor block to the end of the Completed anchor block (and back on uncheck). Position within a state's sub-list is the identity; ordinal is recomputed on each parse.
+- [x] **Positional sidecar re-key on toggle.** Moving a same-hash duplicate can shift every same-hash task's ordinal. The toggle rebuilds the `(year, week, hash)` group in the sidecar by pairing pre-toggle completed_at values (with `Option<String>` slots for manually-added tasks that never had one) with the NEW file positions in file order. No timestamp is ever handed to the wrong task.
+- [x] **Landing-page visual headers.** Task list rendered in two grouped sub-lists ("Incomplete Tasks" / "Completed Tasks") matching the file's anchor partition, via a Svelte 5 snippet.
+- [x] **Rollover source-dedup fix.** Rollover now dedupes source-week tasks by text_hash in file order — two identical open source tasks copy forward as one.
+- [x] **`/summary` editor drops task rendering** naturally: migration moves tasks out of the Plans body → `plansAndPriorities` in the WeeklySummary IPC becomes prose-only. `update_weekly_summary` explicitly preserves the on-disk `tasks_body` so a summary save never clobbers the task list.
 
-- Due dates on tasks (`📅 2026-07-15` syntax). Deliberately deferred — Obsidian Tasks' emoji-metadata approach was flagged by their own docs for Unicode/non-breaking-space fragility.
-- Sourcing tasks from anywhere besides "Plans and priorities for next week" (Note bodies, other Weekly Summary sections). Narrow scope for v1; leave room to expand later if asked.
+**Slice 6b — inline row actions: edit** (commit `52f4199`)
+
+- [x] **Pencil icon** at the trailing edge of each task row. Click → text swaps for an inline input (autofocus + select-all via `bind:this` + `$effect`), Enter saves, Escape cancels, blur cancels. Same-text edits short-circuit with no round-trip.
+- [x] `edit_task_in_tasks_body` helper: locates task by `(hash, ordinal)`, preserves leading whitespace + checkbox marker case (`[X]` stays uppercase), swaps only the text portion. Returns `(new_body, new_hash, new_ordinal, is_completed)`.
+- [x] `edit_task` Tauri command: read-migrate-backup-write shape; positional key-map re-keys sidecar + provenance across the hash change so completion timestamp + "from last week" chip survive typo fixes. Handles same-hash sibling drift.
+
+**Slice 6c — inline row actions: delete** (commit `52f4199`)
+
+- [x] **Trash icon** at the row's far trailing edge. Modal confirmation (`btn-ruby` Delete + `btn-marble` Cancel; task text quoted in a bordered blockquote; blockDismissal while in-flight).
+- [x] `delete_task_from_tasks_body` helper + `delete_task` command. Positional key-map handles sibling ordinal drift (`old_all` and `new_all` differ in length by 1; map old position i to new position i or i-1 depending on the deleted task's position).
+
+**Slice 6c-followup — Copy Completed → Key Accomplishments** (commit `52f4199`)
+
+- [x] `merge_completed_tasks_into_key_accomplishments` helper: (a) dedupe candidates against every existing line in the field via `normalize_task_text` (bullets and prose both count as "already there"), (b) find an existing `#### Completed Tasks` heading and append new bullets at the end of its contiguous bullet block; if no heading, append a fresh block at the end with a blank-line separator. Repeated imports never stack duplicate headings.
+- [x] `import_completed_tasks` Tauri command. `/summary` **+ Import completed tasks** button uses the backend command; flushes pending dirty edits via `saveNow()` FIRST (avoids a false external-update banner) then invokes.
+
+**Slice 6c-followup — auto-import** (commit `52f4199`)
+
+- [x] `AutoImportLog` sidecar (`.metadata/auto-import-log.json`) with `last_import_date` (local YYYY-MM-DD).
+- [x] `check_and_apply_auto_task_import` Tauri command. Two gates: (a) `taskList.autoImportCompleted` setting toggle (default on), (b) local-date match with `last_import_date`. When both open, delegates to `import_completed_tasks_impl` and stamps the log. Stamped even on "no completed tasks" runs so we don't re-check every trigger event all day.
+- [x] Landing-page triggers fire alongside `check_and_apply_rollover` on onMount + `tauri://focus` + `visibilitychange` + `captainslog:week-changed` + 60s safety interval.
+
+**Slice 6c audit fixes** (commit `4511f44`)
+
+- [x] `import_completed_tasks_impl`: stamp `last_updated` in the all-duplicates + was-migrated branch (was writing the migrated file with a stale timestamp).
+- [x] `toggle_task` takes `AppHandle` + emits `weekly-file-changed` — aligns it with `edit_task` / `delete_task` / `import_completed_tasks`. `/summary` now reconciles a landing-page toggle if it's open on the same week.
+- [x] Delete confirmation modal focuses the Delete button on open (was landing on the dialog card; keyboard users had to Tab past copy).
+- [x] `.delete-confirm-quote` background switched from `color-mix(brand-maroon 6%, transparent)` to `--bg-elevated` — was near-invisible in dark theme.
+
+**Verification:** 470 Rust tests (~60 new). Manual smoke on Chris's real journal covered delete of an incomplete + a completed task, delete of one of two duplicate tasks, delete of one of four duplicates spanning both states — sidecar + provenance stayed in perfect bijection with the file across all cases.
+
+**Deferred to Phase 3e** — Task due dates (calendar action, overdue heading, date chip). See below.
+
+**Deferred as post-3d follow-ups** (documented in DEVELOPMENT-JOURNAL 2026-07-10 entry):
+
+- Focus restoration after successful edit or delete (currently focus lands on document.body).
+- Edit-input `onblur = cancel` — arguable; may want save-on-blur.
+- Auto-import silent failure surface (backend errors console.error only).
+- Import receipt error-tone auto-clears after 5s (should persist errors).
+- Orphan sidecar/provenance entries after manual file edits (Rebuild handles it; low real-world impact).
+
+**Out of scope (intentional)**
+
 - Task states beyond `- [ ]` / `- [x]` (BuJo has cancelled, migrated, scheduled — not yet).
-- Inline task editing in the aggregator (edit text without opening `/journal`).
-- Drag-reorder within the aggregated view.
-- Gamification (streaks, counts, achievements). BuJo's explicit anti-pattern: *"don't conflate task state with worth."*
-- Multiple task formats (emoji format vs. dataview format). Plain `- [ ]` only, no metadata sigils.
+- Drag-reorder within the task list.
+- Gamification (streaks, counts, achievements) — BuJo anti-pattern.
+- Multiple task formats (emoji format vs. dataview format). Plain `- [ ]` only, no metadata sigils *(revisited in Phase 3e for due dates)*.
 
-**Verification approach**
+### Phase 3e — Task due dates
 
-- Sidecar-deletion recovery: manually delete `.metadata/task-completions.json`, reload, all state rebuilt from markdown with mtime backfill.
-- External-editor toggle: open weekly file in TextEdit, flip a checkbox, reopen Captain's Log, sidecar reconciles per the locked rules.
-- Weekend-sleep rollover: leave app open Friday, wake Monday, verify rollover fires exactly once and receipt toast appears.
-- Cross-route dirty guard: `/journal` open on last week's file with unsaved edits, rollover fires — `externalUpdate` banner surfaces instead of silent clobber.
+Add optional due dates to tasks with a calendar-icon row action and a landing-page "Overdue" heading. Design brief to be captured in a follow-up plans-out session; storage + UI locked before build.
+
+**Row action + picker** (planned)
+
+- [ ] Third inline icon between the pencil and the trash: a calendar. Click opens a small popup with `DatePickerPopover` (already exists — Phase 2.5's Confluence-style widget) and a heading like "Pick a due date". Tasks that already have a due date show the picker seeded to that date; clearing the date is a first-class action inside the popup.
+
+**Storage** (design open)
+
+- [ ] Encode the due date in the markdown task line or in a sidecar? Decision TBD — options include:
+  - Inline suffix on the task line (e.g. `- [ ] Ship the widget <!-- due:2026-07-15 -->` or `📅 2026-07-15`). Portable but Obsidian Tasks flagged emoji-metadata as Unicode-fragile.
+  - Sidecar (`.metadata/task-due-dates.json`) keyed by `(year, week, textHash, ordinal)` — same shape as `TaskCompletions`. Fragile if user edits the task text outside the app (identity drifts).
+  - Frontmatter or `### Tasks` section metadata comment (e.g. `<!-- captainslog:tasks:due:{hash}:{ordinal}:2026-07-15 -->`). Machine-readable but noisier to read raw.
+- Locked at design time before any code lands.
+
+**Display** (planned)
+
+- [ ] Tasks with a due date render a chip next to the origin chip: "Due Fri" / "Due Jul 15" (this year) / "Due Jul 15, 2027" (different year). Chip clicks open the picker.
+- [ ] Landing-page Incomplete section splits into two sub-groups when there are overdue tasks: **Overdue** (a new header at the top) followed by the existing **Incomplete Tasks** header. Overdue = due date strictly earlier than today's local date, and the task is `[ ]`. Completed tasks never appear in Overdue regardless of due date.
+- [ ] Sort within Overdue: earliest due date first (oldest debt on top). Sort within Incomplete: file order (unchanged).
+
+**Interactions with existing systems** (planned)
+
+- [ ] Rollover carries the due date forward with the task (part of provenance or storage-per-week — depends on storage choice).
+- [ ] Auto-import to Key Accomplishments: due-date info doesn't propagate (completed tasks don't have deadlines to enforce).
+- [ ] Edit-task: renaming a task preserves its due date (identity re-key).
+- [ ] Delete-task: drops any due-date record for the deleted task.
+- [ ] Toggle-task to `[x]`: due-date record is preserved (so uncheck later restores it).
+
+**Out of scope**
+
+- Recurring due dates.
+- Time-of-day components (dates only, per BuJo).
+- Reminders / notifications on due dates (nice, but a separate scheduler is a chunk of work — leave for Phase 4+ if it comes up).
 
 ## Phase 4 — Link Enrichment
 

@@ -1467,4 +1467,123 @@ Window-level `keydown` listener in `+layout.svelte`. Guards: skipped on `/captur
 
 Phase 3c — task list aggregator. Full design brief already captured in the 2026-07-06 morning entry. Should be the biggest of the three 3-phase items: bidirectional sync, sidecar for completion timestamps, week-rollover mechanic.
 
+---
+
+## 2026-07-07 through 2026-07-10 — Phase 3c (task aggregator) + Phase 3d (Slice 6 rearchitecture)
+
+Big multi-session arc. The plan going in was "ship Phase 3c per the roadmap spec"; what actually happened was ship Phase 3c end-to-end, discover the aggregator model was fighting the way tasks WANTED to be modeled inside the app, rearchitect around a dedicated `### Tasks` section with anchor comments, then layer inline row-actions + import + auto-import on top. Three commits: `d1c2421` (Phase 3c + Slice 6a groundwork), `52f4199` (Slice 6b/6c + followups), `4511f44` (audit fixes).
+
+### Phase 3c — read-only list, toggle, add, settings, rollover
+
+Shipped exactly per the roadmap spec. Landing-page task list with the identity model, sidecar completion timestamps, add-task modal, four-toggle settings tab, and a weekly rollover with provenance. Sidecar files: `.metadata/task-completions.json` + `.metadata/rollover-log.json`. Rebuild button in Settings > Tasks sweeps stranded incomplete tasks from ANY older week into the current week, not just the immediately-previous one — that turned out to matter because Chris hit exactly that "task added to week 22 via journal editor while composing week 28" scenario during smoke testing.
+
+### The pivot — Slice 6
+
+After Slice 5 shipped and Chris was smoke-testing, one exchange changed the direction:
+
+> Chris: "the task landed under this weeks 'Plans and priorities for next week…' But what happens when I check it off today? It should move to 'Key accomplishments…' no?"
+
+We talked through it. The old model — tasks live in the Plans body, check moves them elsewhere — didn't have a natural home. And Chris said the phrase that locked the pivot:
+
+> "The more we work on this the more I want tasks to be an independent thing, rather then existing within a weekly summary text field. Like, tasks should be associated with a week."
+
+So we rearchitected. Tasks became first-class objects backed by markdown storage, not markdown lines with a UI on top.
+
+**Locked design** (memory: `project_captains_log_slice6_design.md`):
+
+- `### Tasks` section with `<!-- captainslog:tasks:incomplete -->` and `<!-- captainslog:tasks:completed -->` HTML-comment anchors. Parser precedence: anchors → subheader text → whole-section scan.
+- Move-on-check: `- [ ]` → `[x]` toggles move the line from Incomplete to end of Completed. Task position within its state sub-list is its identity.
+- Landing page ONLY (drop `/summary` task rendering). Plans field becomes prose-only.
+- Inline row actions (pencil + trash) instead of the label-style details-button-→-modal.
+- Edit-only scope initially: "Just edit for now. This is a big enough change as is."
+- Lazy migration on first write; pre-migration backup at `.metadata/pre-slice6-backups/{YYYY}-Www.md`.
+
+### Slice 6a — the rearchitecture
+
+The backend rewrite: `WeeklySummary` gained `tasks_body`, `parse_weekly_summary` extracted the new section, `render_weekly_summary` emitted it with both anchors, `weekly_file_scaffold` included the anchor block. `migrate_tasks_from_plans` walked the Plans body line-by-line, split checkbox lines from prose, relocated tasks to the new section grouped by state, and left prose in place. All five task-mutating commands (list, toggle, append, rollover, rebuild) rewired to read from `tasks_body`.
+
+**Positional sidecar re-key on toggle.** The subtlest piece. Under move-on-check, toggling one of N same-hash duplicates renumbers every same-hash task's ordinal. The first pass used a naive `retain` clause that dropped entries at `(ordinal_old OR ordinal_new)` — which nuked sibling entries whose ordinal happened to match either. First adversarial-verify workflow caught this (finding: "sibling completed_at stamps get lost when a duplicate is toggled"). Fix: build `old_stamps: Vec<Option<String>>` from the pre-toggle FILE state (not the sidecar) by looking up each old completed same-hash task's sidecar entry, then pair the adjusted list positionally with the NEW file's completed same-hash tasks. Manually-added completed tasks (which have no sidecar entry) stay stamp-less; the toggled task gets `now`; siblings keep their originals.
+
+**Rollover source-dedup fix.** Same verify workflow found: rollover captured `existing_target_hashes` once before the loop and never updated it, so two identical open source tasks both copied forward. Fix: `HashSet<String>` of `text_hash` in file order, filtered with `!t.is_completed && seen.insert(hash)` — short-circuit AND means completed tasks never enter the set.
+
+**Landing-page visual headers.** The two anchor-partitioned sub-lists surface as two `<h3 class="task-group-header">` labels above their respective row groups, factored via a Svelte 5 snippet so the row template lives once. `showCompleted` toggle collapses the Completed group + header together.
+
+**Adversarial verification round 1 — 4 lenses:**
+
+1. Migration: fenced code blocks containing `- [ ]` would be picked up as tasks. **Real but Chris's usage doesn't hit it** — deferred with a note.
+2. Migration: partial `### Tasks` section with hand-typed notes would get clobbered on first write. **Real but extremely rare** — deferred.
+3. Anchor tampering: refuted=false. Parser degrades gracefully across every attack tried.
+4. Sidecar re-key on toggle: real bug (see above).
+5. Rollover source-dedup: real bug (see above).
+
+### Slice 6b — inline pencil edit
+
+Pencil icon at the row's trailing edge. Click swaps the text span for an inline input via `bind:this` + `$effect` (autofocus + select-all). Enter saves via `edit_task` IPC, Escape cancels, blur cancels. Same-text edits short-circuit with no round-trip.
+
+`edit_task_in_tasks_body`: locates the task by `(hash, ordinal)`, preserves leading whitespace + checkbox marker case, swaps only the text portion. Returns `EditTaskOutcome { new_body, new_text_hash, new_ordinal, is_completed }`.
+
+**Positional key-map re-key on edit.** Edit doesn't add or remove task lines, so `parse_plans_tasks(old_body)` and `parse_plans_tasks(new_body)` produce vectors of IDENTICAL length in IDENTICAL file-position order. Zipping them yields the exact `(old_key → new_key)` map. Applied to sidecar + provenance in a single pass. Handles the renamed task + all same-hash siblings uniformly. `debug_assert_eq!(old_all.len(), new_all.len())` catches future regressions where an edit accidentally adds/removes a line.
+
+### Slice 6c — inline trash delete
+
+Trash icon at the row's far trailing edge. Modal confirmation (btn-ruby Delete + btn-marble Cancel, task text quoted in a bordered blockquote, `blockDismissal` while in-flight).
+
+`delete_task_from_tasks_body`: locates + removes the line. Anchors survive even when the deleted task was the last one.
+
+**Positional key-map for delete.** `old_all.len() == new_all.len() + 1`. Deleted task's position P found by identity; then old indices `[0..P)` map to new indices `[0..P)` unchanged, old indices `(P..N)` map to new `[P..N-1)` (shifted up by one). Sidecar and provenance re-keyed by the map; the deleted task's own entry is dropped outright.
+
+### Slice 6c-followup — Copy Completed → Key Accomplishments
+
+Started as "add the button that copies completed tasks under a `#### Completed Tasks` heading in Key accomplishments." Then Chris hit the multi-import edge case: second click created a SECOND heading block. Rewrote to be heading-aware.
+
+`merge_completed_tasks_into_key_accomplishments` walks candidates against every existing line (normalized via `normalize_task_text` — case + trailing-punctuation-tolerant), skips duplicates, then finds an existing `#### Completed Tasks` heading and inserts new bullets at the END of its contiguous bullet block (blank lines OK, stops at a new heading or non-blank prose). If no heading exists, appends a fresh block. 14 unit tests cover empty body, prose-only, existing heading, existing heading with trailing prose, dedupe vs. bullets + prose, all-duplicates, in-batch duplicates, next-heading terminator, case variation, heading-with-no-bullets-yet, heading-as-last-line, empty candidates, and multi-heading first-wins.
+
+Frontend button uses the backend command. Flushes pending dirty edits via `saveNow()` FIRST — otherwise the backend write + emit → reconcile round-trip surfaces a false "external update" banner because `isDirty=true`.
+
+### Slice 6c-followup — auto-import
+
+Chris asked for once-per-day automation: essentially, "press the Import button for me at end of day." Semantically that's "at least once per local day."
+
+`AutoImportLog` sidecar with `last_import_date` (YYYY-MM-DD local, not UTC — matters for the user's actual calendar). `check_and_apply_auto_task_import` gates on (a) `taskList.autoImportCompleted` setting, (b) local-date equality with `last_import_date`. When both open, delegates to `import_completed_tasks_impl` and stamps the log. Log stamped even on "no completed tasks" runs so we don't re-check every trigger event all day.
+
+Frontend triggers piggyback on the auto-rollover trigger set: onMount + `tauri://focus` + `visibilitychange` + `captainslog:week-changed` + 60s safety interval.
+
+### 4-lens audit workflow after the whole pile committed
+
+Ran a workflow across correctness / consistency / security / UX + a11y lenses on commit 52f4199. Four real findings applied as commit 4511f44:
+
+1. `import_completed_tasks_impl` all-duplicates + was-migrated branch wrote the migrated file without stamping `last_updated`. Now stamps in both branches.
+2. `toggle_task` didn't emit `weekly-file-changed`, breaking pattern with edit/delete/import. `/summary` wouldn't reconcile a landing-page toggle if it was open on the same week. Now takes `AppHandle` + emits.
+3. Delete confirmation modal focused the dialog card (tabindex=-1); keyboard users had to Tab past copy to reach Delete. `bind:this` + `$effect` + `queueMicrotask` now moves focus to the primary action on open.
+4. `.delete-confirm-quote` background at `color-mix(brand-maroon 6%, transparent)` was near-invisible in dark theme (~2:1). Switched to `--bg-elevated`.
+
+Security lens returned zero findings (rare and reassuring — new commands go through the same validation + escaping pipeline as existing ones). Consistency lens's other findings were style-only. UX lens surfaced deferred items (see below).
+
+### Lessons worth keeping
+
+- **Locked design memories pay for themselves.** Slice 6 spanned 3+ conversations and multiple compactions; the `project_captains_log_slice6_design.md` memory kept the pivot's intent intact across all of them. Every session started with "we're at slice X, decisions Y and Z are locked, next item is A."
+- **Positional key-maps are the natural expression of "one line changed."** Both edit and delete needed re-key logic for sibling ordinal drift. Both got the same shape: parse old, parse new, zip (or index-map for delete), apply. Simpler than the "find the affected entries and fix them" alternative and easier to reason about.
+- **Adversarial verify workflows earn their keep on identity/re-key logic.** Round 1 found real sidecar re-key bugs I would not have caught by manual test cases. Round 2 (audit on the whole commit) found the missing `last_updated` stamp and the toggle-event drift — both surfaced by cross-command consistency checks, not by any single-command test.
+- **False positives are OK — but trust code over verifier when they conflict.** Round 2's "edit's `.nth(source_idx)` is wrong" claim traced through the verifier's own analysis and ended at "correct by accident." Actually correct BY CONSTRUCTION — edit doesn't reorder lines, so source_idx in the state sub-list == index in the filtered new_all list. Read the trace, not the label.
+- **`update_weekly_summary` doesn't need `tasks_body`.** The `/summary` editor doesn't render tasks. But its Rust input struct also DOESN'T have a `tasks_body` field — meaning the backend explicitly preserves whatever's on disk when the user saves the four prose fields + labels. Slice 6c's "drop task rendering from /summary" was mostly a no-op — the isolation was already there.
+
+### Verification
+
+- `cargo test`: 470 passed, 0 failed (was 259 before Phase 3c). ~211 new tests across the arc — ~60 in the Slice 6b/6c commit alone, covering sibling-drift regressions, migration-on-write, backup idempotence, positional re-key, and every branch of the merge helper.
+- `svelte-check`: 425 files, 0 errors, 0 warnings.
+- `vite build`: clean.
+- Manual smoke on Chris's real journal covered: (1) delete of one incomplete + one completed task, (2) delete of one of two duplicate tasks, (3) delete of one of four duplicates spanning both anchor sections. In all three cases the surviving sidecar/provenance entries stayed in perfect bijection with the file — the "sibling drift preserves the RIGHT stamp, not just some stamp" guarantee held up.
+
+### Deferred as follow-ups
+
+- **Focus restoration after successful edit or delete.** Currently focus lands on document.body when the edit input unmounts or a row disappears. Should return to the pencil button (edit) or a sensible landing target (delete: next row's pencil, or the "+ Add Task" button).
+- **Edit-input `onblur = cancel`.** Verifier flagged as prone to accidental data loss if user tabs out mid-edit. Currently intentional (matches Escape). Save-on-blur is arguable; needs a design call.
+- **Auto-import silent failure surface.** `console.error` only. If disk full / permission denied, user has no in-app signal that yesterday's completions didn't auto-merge.
+- **Import receipt error-tone auto-clears after 5s.** Error tone should persist until dismissed.
+- **Orphan sidecar/provenance entries after external file tampering.** Rebuild handles it; low real-world impact.
+
+### Next
+
+Phase 3e — Task due dates. Third row action (calendar icon between pencil and trash) → date picker popup → tasks with dates render a chip → overdue tasks rise to the top of the landing-page list under an "Overdue" heading. Design open on storage (inline suffix vs sidecar vs anchor comment) — lock before build. Roadmap has the design brief.
+
 
