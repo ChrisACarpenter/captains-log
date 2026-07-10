@@ -92,10 +92,9 @@ The optional `color` field (Phase 2.8b) is an explicit per-label hex override; a
 
 ### Update rules
 
-- **On Note save:** parse all labels in the Note, increment counts in the index, update `last_used`, create new label entries if needed.
-- **On Note edit (label removed):** decrement counts; if count reaches zero, leave the entry but flag for cleanup.
-- **On Note delete:** same as edit (decrement).
-- **Periodic cleanup:** entries with `count = 0` and `last_used` older than a configurable threshold (default: 90 days) get removed.
+- **On Note save:** parse all labels in the Note, increment counts in the index, extend `last_used` / `first_used` to cover the Note's date, create new label entries if needed. `LabelIndex::touch()` is monotonic — it only increments.
+- **On explicit label delete** (Settings > Labels > Delete Selected, or the `delete_label_cascade` command): the entry is removed from `labels.json` outright, and every occurrence of `#name` in explicit-labels sites (Note `**Labels:**` lines + Weekly Summary `### Labels` subsections) across all weekly files is stripped. Inline `#hashtag` prose is left alone.
+- **Decrement-on-edit, note deletion, and periodic cleanup:** not currently supported. There is no decrement path, no zero-count sweep, and note deletion isn't a wired-up operation. Entries only leave the index via explicit delete or a full rebuild.
 
 ### Rebuild
 
@@ -118,6 +117,15 @@ Settings → Labels lists every label with count + first/last used dates. Clicki
 - **Rename** — change the label everywhere it's referenced (updates all weekly files + the index). Confirm via [ConfirmDialog](../app/src/lib/ConfirmDialog.svelte)
 - **Delete** — remove the label from every Note and Weekly Summary's labels list (inline `#hashtag` text in note bodies is left alone)
 
-## Bulk label management (Phase 3a — planned, not yet shipped)
+## Bulk label management (Phase 3a Slice 2 — shipped)
 
-The library viewer that lets you operate on many labels at once — browse / filter, drill into Notes that use a label, and bulk **rename / merge / delete** with atomic writes. Builds on the per-label plumbing above; Phase 3a is next on the roadmap.
+Settings > Labels has a multi-select toolbar layered on top of the per-label list:
+
+- Row checkboxes plus a "select all visible" checkbox in the header
+- **Delete Selected** — runs `delete_label_cascade` for each selected label
+- **Merge Into** — pick a canonical label from the selection, then run `rename_label` from every other selected label into that canonical name (labels.json entries merge, weekly files are rewritten)
+- Execution is sequential and continues on failure; when the pass finishes a success / failure banner appears above the list summarising files modified, occurrences touched, and any per-label errors
+
+### Deferred
+
+- Label library viewer that drills into the Notes using a given label — still planned, not shipped.

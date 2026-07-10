@@ -18,16 +18,20 @@ When the index and the in-file header disagree, **trust the header**. Open an is
 | [PointerFinger](#pointerfinger) | Chrome | Onboarding guide that points to the next unfilled field with a gentle bobbing animation to draw user attention |
 | [TipBubble](#tipbubble) | Chrome | A styled callout bubble that delivers in-context guidance with a consistent visual signal (info icon + bold heading + caption body) |
 | [DatePickerPopover](#datepickerpopover) | Form | A hand-rolled date picker popover that anchors to a chip element, handles month/year navigation and keyboard input, and commits selected dates back to a CodeMirror 6 editor extension |
+| [Checkbox](#checkbox) | Form | Canonical checkbox control with inline (glyph + one-line label) and card (heading + description) variants; source of truth for every checkbox in the app |
 | [InputField](#inputfield) | Form | Standard "label + text input + hint" field component used across settings, capture, and onboarding steps |
 | [LabelInput](#labelinput) | Form | Autocomplete tag/label input with chip display, filtering against a persisted label index, and optional per-label hex coloring |
 | [PathPickerField](#pathpickerfield) | Form | A labeled path input field with a folder-picker button and optional hint/error messaging for directory selection tasks |
 | [MarkdownEditor](#markdowneditor) | Editor | CodeMirror 6 wrapper for markdown editing that preserves source formatting byte-for-byte, with optional live preview and formatting toolbar |
 | [MarkdownToolbar](#markdowntoolbar) | Editor | Formatting toolbar for MarkdownEditor that renders icon buttons for text styles (bold, italic, lists, etc.) and dispatches CodeMirror transactions |
+| [RolloverReceipt](#rolloverreceipt) | Status | Transient pill announcing "Rolled over N tasks from last week" with polite aria-live and auto-dismiss after 5s |
 | [SaveStatus](#savestatus) | Status | Small italic status indicator that surfaces the autosave state next to a Save or Done button |
 | [WeekStripe](#weekstripe) | Status | A 4px fixed progress meter pinned to the top of the main window that displays the week elapsed and optional Noot mascot reminders |
 | [Icon](#icon) | Atom | Render a themed inline SVG icon from a curated set of text-formatting, UI, and informational icons |
 | [LabelDetailsModal](#labeldetailsmodal) | Feature | Modal popup for viewing and editing individual label details including usage stats, color customization, renaming, and deletion |
 | [SendToManagerButton](#sendtomanagerbutton) | Feature | Send-to-Manager button + confirmation modal + sent-status display for sharing weekly summaries to the default mail client |
+| [TaskMetaChip](#taskmetachip) | Feature | Pill chip for task-row metadata — provenance (origin), completed-at time (time), due date (due), or maroon overdue-due variant |
+| [TaskRowActionButton](#taskrowactionbutton) | Feature | Inline pencil/trash/calendar action button on task rows, with variant-driven hover tint and bindable button element for popover anchoring |
 | [StepHeader](#stepheader) | Onboarding | Renders a shared header block (with heading and optional lead text) for onboarding step pages |
 | [Wizard](#wizard) | Onboarding | First-run onboarding wizard with five-step flow for capturing user info, manager details, and journal settings |
 | [WizardFrame](#wizardframe) | Onboarding | Renders the visual chrome (card frame, Ed character, progress dots) shared across every onboarding wizard step |
@@ -273,6 +277,60 @@ Body content rendering follows strict rules to ensure consistency across all tip
 ## Form
 
 _Form-field primitives — label + input + hint trios, chip-based label inputs, date pickers._
+
+### Checkbox
+
+**Source:** [`Checkbox.svelte`](app/src/lib/Checkbox.svelte)
+
+Canonical checkbox control with inline (glyph + one-line label) and card (heading + description) variants; source of truth for every checkbox in the app.
+
+**When to use.** Use this whenever you need a boolean toggle in a form or settings pane. The inline variant is the default and matches the `.checkbox-square` glyph used by CodeMirror task widgets and the landing-page task list. Opt into the card variant by supplying both `label` and `description` — it mirrors the radio cards on the Theme and Mail tabs so preference-heavy settings read as one control language.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `checked` | `boolean` | **yes** | Bindable via bind:checked. Source of truth for the on/off state. |
+| `onchange` | `(checked: boolean) => void` | no | Fires after each user toggle with the new value. Use for Set-based state where bind:checked can't round-trip through your data structure. |
+| `disabled` | `boolean` | no | When true, clicks and Space/Enter are no-ops and the row dims. Defaults to false. |
+| `ariaLabel` | `string` | no | Accessible name when no visible label text is provided (glyph-only usage like the task-row checkbox). |
+| `label` | `string` | no | Heading text for the card variant, or a plain-text alternative to the `children` snippet in the inline variant. |
+| `description` | `string` | no | Descriptive paragraph rendered under `label`. Presence of `description` is what switches the component into the card variant; without it, only the inline variant renders. |
+| `children` | `Snippet` | no | Content rendered next to the square in the inline variant (allows inline markup like `<strong>` or `<em>`). Ignored in card variant. |
+
+**Usage**
+
+```svelte
+<!-- Inline with bindable state: -->
+<Checkbox bind:checked={reminderEnabled}>
+  Send me a weekly reminder to fill in the Weekly Summary
+</Checkbox>
+
+<!-- Inline driven by external Set-based state: -->
+<Checkbox
+  checked={selectedNames.has(name)}
+  onchange={() => toggleSelection(name)}
+>
+  {name}
+</Checkbox>
+
+<!-- Card variant — Settings > Tasks: -->
+<Checkbox
+  bind:checked={showCompleted}
+  label="Show completed tasks"
+  description="Keep finished tasks in view. Turn off to focus on what's left."
+/>
+
+<!-- Glyph-only (task row): -->
+<Checkbox
+  bind:checked={done}
+  ariaLabel={done ? 'Mark not done' : 'Mark done'}
+/>
+```
+
+**Notes**
+
+Clicking anywhere on the row toggles state; focus lands on the button so Space/Enter work for keyboard users. The card variant is triggered by presence of `description` — `label` alone keeps the inline variant and just replaces the `children` snippet. Focus indicator hugs the inner `.checkbox-square` rather than the whole row so the ring reads consistently against both the task list and the padded card. Uses `role="checkbox"` + `aria-checked` on a `<button>` rather than a native `<input type="checkbox">` so the visual matches the CodeMirror task widget and landing-page task list — Chris flagged the drift between native inputs and the custom `.checkbox-square` glyph, and this component is the single destination every checkbox migrates to.
 
 ### DatePickerPopover
 
@@ -524,6 +582,38 @@ Per-editor design (not floating/shared) is intentional—multi-editor pages (fou
 
 _State indicators that surface where the user is or what just happened._
 
+### RolloverReceipt
+
+**Source:** [`RolloverReceipt.svelte`](app/src/lib/RolloverReceipt.svelte)
+
+Transient pill announcing "Rolled over N tasks from last week" with polite aria-live and auto-dismiss after 5s.
+
+**When to use.** Use this to acknowledge an automatic task rollover the moment it completes. Mount it conditionally when `tasksCopied > 0` — the receipt does not gate itself on the count. Pair it with a parent that clears its own state in `onDismiss` so the receipt doesn't re-mount if the trigger fires again in the same session.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `tasksCopied` | `number` | **yes** | How many tasks moved. Rendered as a pluralized count ("1 task" / "2 tasks"). Zero means "don't render at all" — parent should conditional-mount rather than pass 0. |
+| `sourceLabel` | `string` | **yes** | Human-readable name for where the tasks came from ("last week", "Week 27, 2026"). Kept as a plain string so the parent can localize or vary the format. |
+| `onDismiss` | `() => void` | no | Called on manual close OR the 5s auto-timeout. Parent clears its own trigger state here. |
+
+**Usage**
+
+```svelte
+{#if rolloverCount > 0}
+  <RolloverReceipt
+    tasksCopied={rolloverCount}
+    sourceLabel="last week"
+    onDismiss={() => (rolloverCount = 0)}
+  />
+{/if}
+```
+
+**Notes**
+
+Uses `role="status"` + `aria-live="polite"` + `aria-atomic="true"` so screen readers announce the count and tail as one utterance without interrupting the user. Auto-dismiss timer is a 5s `setTimeout` cleared on manual close or destroy; the effect only runs once since the props that would retrigger it (`tasksCopied`, `sourceLabel`) don't change during the receipt's lifetime — the parent remounts on new rollovers. The numeric count renders in `--accent-primary-text` to echo the "checked N ago" chip elsewhere, signaling quantitative info without leaning on color alone. Border uses `--border-structural` rather than the orange-tinted `--border-decorative` so the pill reads against `--bg-elevated` in both themes.
+
 ### SaveStatus
 
 **Source:** [`SaveStatus.svelte`](app/src/lib/SaveStatus.svelte)
@@ -602,7 +692,7 @@ Render a themed inline SVG icon from a curated set of text-formatting, UI, and i
 
 | Prop | Type | Required | Description |
 |---|---|---|---|
-| `name` | `'heading' \| 'bold' \| 'italic' \| 'strikethrough' \| 'list' \| 'list-ordered' \| 'list-checks' \| 'quote' \| 'link' \| 'code' \| 'calendar' \| 'help' \| 'info'` | **yes** | The icon to render. Must be one of the supported icon names. |
+| `name` | `'heading' \| 'bold' \| 'italic' \| 'strikethrough' \| 'list' \| 'list-ordered' \| 'list-checks' \| 'quote' \| 'link' \| 'code' \| 'calendar' \| 'help' \| 'info' \| 'search' \| 'pencil' \| 'trash' \| 'check'` | **yes** | The icon to render. Must be one of the 17 supported icon names. |
 | `size` | `number` | no | Icon width and height in pixels. Default 18px (formatting toolbar size); pass 24 for Lucide-standard sizing. |
 
 **Usage**
@@ -614,6 +704,11 @@ Render a themed inline SVG icon from a curated set of text-formatting, UI, and i
 
 <!-- Larger inline icon (tip-bubble header, callouts): -->
 <Icon name="info" size={16} />
+
+<!-- Task-row action glyphs (rendered inside TaskRowActionButton at size={14}): -->
+<TaskRowActionButton icon="pencil" variant="neutral" ariaLabel="Edit task" title="Edit" onclick={edit} />
+<TaskRowActionButton icon="trash" variant="destructive" ariaLabel="Delete task" title="Delete" onclick={remove} />
+<TaskRowActionButton icon="calendar" variant="accent" ariaLabel="Set due date" title="Set due date" onclick={openPicker} />
 ```
 
 **Notes**
@@ -708,6 +803,111 @@ Send-to-Manager button + confirmation modal + sent-status display for sharing we
 **Notes**
 
 Owns all internal gating (dirty check, save-in-progress, already-sent-unchanged, re-send detection). Re-fetches sent-record + content hash on mount and whenever year/week changes. Listens to Tauri events (weekly-file-changed, settings-changed) to invalidate state if other routes edit the same week. Supports three mail send modes (Gmail web URL, native Mac Mail with AppleScript, Outlook web) and two body-delivery strategies (prefilled vs. clipboard-paste). Preview modal renders HTML iframe or plaintext depending on send mode. Gmail URLs triggering truncation warning show a warn-and-allow flow (Send anyway / Cancel) instead of blocking. The parent is responsible for placing the sentStatusText output line wherever its layout calls for, not inside this component.
+
+### TaskMetaChip
+
+**Source:** [`TaskMetaChip.svelte`](app/src/lib/TaskMetaChip.svelte)
+
+Pill chip for task-row metadata — provenance (origin), completed-at time (time), due date (due), or maroon overdue-due variant.
+
+**When to use.** Use this on the trailing edge of a task row wherever a small piece of metadata used to live as an inline `.task-origin` / `.task-time` / `.task-due-chip` span. Four variants collapse those cases into one component; the caller picks the variant that describes what the label means.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `variant` | `'origin' \| 'time' \| 'due' \| 'due-overdue'` | **yes** | Chip flavor. `origin` is italic accent-primary-text ("from W26") with no chip background — the Slice 5 provenance cue. `time` is muted with `tabular-nums` so "checked 4h ago" and "checked 11h ago" line up. `due` is accent-tinted for on-time due dates on incomplete rows. `due-overdue` is a maroon-tinted bold pill (uses the theme-adjusted `--brand-maroon-text` token) rendered when `due_date < today`. |
+| `label` | `string` | **yes** | The chip text. |
+| `title` | `string` | no | Native tooltip on hover. Defaults to empty string. |
+
+**Usage**
+
+```svelte
+<!-- Slice 5 provenance on a rolled-over task: -->
+<TaskMetaChip variant="origin" label="from W26" title="Rolled over from Week 26, 2026" />
+
+<!-- Completed-at timestamp: -->
+<TaskMetaChip variant="time" label="checked 2h ago" />
+
+<!-- On-time due date: -->
+<TaskMetaChip variant="due" label="Due Jul 15" />
+
+<!-- Overdue on an incomplete row: -->
+<TaskMetaChip variant="due-overdue" label="Due Jul 5" title="Overdue since Jul 5" />
+```
+
+**Related:** [TaskRowActionButton](#taskrowactionbutton)
+
+**Notes**
+
+All variants share `flex-shrink: 0` + `--text-caption` size + `white-space: nowrap` so a multi-chip row stays coherent as widths change. The `due-overdue` variant reinforces the "Overdue" group header on the landing page — the chip is a per-row signal, the header is the group signal, both drive the same reading. `--brand-maroon-text` is the theme-adjusted maroon (lighter red in dark theme, base maroon in light) — using the raw `--brand-maroon` here would fail contrast in dark mode.
+
+### TaskRowActionButton
+
+**Source:** [`TaskRowActionButton.svelte`](app/src/lib/TaskRowActionButton.svelte)
+
+Inline pencil/trash/calendar action button on task rows, with variant-driven hover tint and bindable button element for popover anchoring.
+
+**When to use.** Use this for any 24×24 action glyph that sits on the trailing edge of a landing-page task row. It absorbs the previously-duplicated `.task-edit-btn` / `.task-delete-btn` / `.task-due-btn` markup and CSS — three near-identical Svelte + style blocks collapse into one component. The `variant` prop drives the hover/focus tint; the icon prop picks the glyph.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `icon` | `'pencil' \| 'trash' \| 'calendar'` | **yes** | The glyph to render. Must map to an [Icon](#icon) name; adding a new glyph means extending both this union and Icon's `IconName` union. |
+| `variant` | `'neutral' \| 'destructive' \| 'accent'` | no | Hover/focus tint. `neutral` = muted text/edge (edit). `destructive` = maroon tint (delete). `accent` = accent-primary tint (due date). Defaults to `'neutral'`. |
+| `ariaLabel` | `string` | **yes** | Accessible name for the button (glyph-only, so aria-label carries meaning). |
+| `title` | `string` | **yes** | Native tooltip on hover. |
+| `disabled` | `boolean` | no | When true, click and focus are no-ops and opacity drops to 0.25. Callers own the disable logic (e.g. row + other-row-editing + modal-open state combined). Defaults to false. |
+| `onclick` | `(e: MouseEvent) => void` | **yes** | Click handler. Receives the DOM event so callers can `stopPropagation` from the surrounding row click. |
+| `el` | `HTMLButtonElement \| null` | no | Bindable DOM handle. Required for the calendar action so the parent can anchor [DatePickerPopover](#datepickerpopover) to this button via `bind:el`. |
+
+**Usage**
+
+```svelte
+<TaskRowActionButton
+  icon="pencil"
+  variant="neutral"
+  ariaLabel="Edit task"
+  title="Edit"
+  onclick={(e) => { e.stopPropagation(); startEdit(); }}
+/>
+
+<TaskRowActionButton
+  icon="trash"
+  variant="destructive"
+  ariaLabel="Delete task"
+  title="Delete"
+  disabled={otherRowEditing}
+  onclick={(e) => { e.stopPropagation(); confirmDelete(); }}
+/>
+
+<!-- Calendar action anchors DatePickerPopover to its own <button>: -->
+<TaskRowActionButton
+  icon="calendar"
+  variant="accent"
+  ariaLabel="Set due date"
+  title="Set due date"
+  bind:el={dueBtnEl}
+  onclick={openDuePicker}
+/>
+{#if duePickerOpen && dueBtnEl}
+  <DatePickerPopover
+    iso={currentIso}
+    from={0}
+    to={0}
+    anchorEl={dueBtnEl}
+    onCommit={applyDue}
+    onClose={() => (duePickerOpen = false)}
+  />
+{/if}
+```
+
+**Related:** [Icon](#icon), [TaskMetaChip](#taskmetachip), [DatePickerPopover](#datepickerpopover)
+
+**Notes**
+
+Rest state is muted (opacity 0.55, no border) so a row full of chrome doesn't dominate the eye; the variant tint only paints on hover and `:focus-visible`. Callers still own the disabled logic — the button just consumes the boolean. The `el` handle is `$bindable()` because the calendar action needs a real DOM reference to anchor DatePickerPopover; without it, the popover has nothing to position against. Icons render at `size={14}` inside the 24×24 button so the glyph reads at the small scale.
 
 ## Onboarding
 

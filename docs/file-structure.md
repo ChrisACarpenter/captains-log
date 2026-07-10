@@ -10,7 +10,12 @@ How journal data is laid out on disk.
 │   ├── labels.json                       # Label index (see label-system.md)
 │   ├── settings.json                     # Journal-level settings (see data-format.md)
 │   ├── sent-log.json                     # Per-week send-to-manager history (Phase 2.6)
-│   └── capture-draft.json                # In-flight quick-capture draft (Phase 2 auto-save)
+│   ├── capture-draft.json                # In-flight quick-capture draft (Phase 2 auto-save)
+│   ├── task-completions.json             # Phase 3c task completion timestamps
+│   ├── task-due-dates.json               # Phase 3e task due dates
+│   ├── rollover-log.json                 # Phase 3c rollover provenance
+│   ├── auto-import-log.json              # Phase 3c/Slice 6c auto-import trigger log
+│   └── pre-slice6-backups/               # Pre-6a byte-identical weekly-file backups
 ├── 2026/
 │   ├── 2026-W01.md
 │   ├── 2026-W02.md
@@ -26,6 +31,16 @@ How journal data is laid out on disk.
 - **Year folders:** `YYYY/` (4 digits).
 - **Weekly files:** `YYYY-Www.md` (ISO 8601 week number).
 - **Metadata folder:** `.metadata/` (dotfile = hidden in Finder, signals "internal" / "app-managed").
+
+## Task-related sidecars
+
+`task-completions.json` stores per-task completion timestamps + state; `rollover-log.json` tracks which tasks were rolled forward from prior weeks with provenance; `auto-import-log.json` logs when auto-import triggers to prevent duplicate processing; `task-due-dates.json` maps tasks to optional local due dates (Phase 3e).
+
+Tasks now live in a dedicated `### Tasks` section within the Weekly Summary (Phase 3c+), not in Plans and priorities. See data-format.md for the updated weekly file structure.
+
+## Pre-Slice-6 backups
+
+`pre-slice6-backups/` holds byte-identical snapshots of legacy weekly files taken just before the Slice-6a task-section migration first touches them. Users do not interact with this directory directly; each file is created once and never overwritten, so a hand-recovery is always possible if the migration output looks wrong.
 
 ## Why a dot-metadata folder?
 

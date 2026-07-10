@@ -1,9 +1,11 @@
 //! Phase 3c task-list aggregator.
 //!
-//! Extracts `- [ ]` / `- [x]` items from the "Plans and priorities for
-//! next week" subsection of each weekly file, and reconciles them with
-//! a sidecar (`.metadata/task-completions.json`) that stores completion
-//! timestamps keyed by `(year, week, text_hash, ordinal)`.
+//! Extracts `- [ ]` / `- [x]` items from the `### Tasks` section of
+//! each weekly file (delimited by `<!-- captainslog:tasks:incomplete -->`
+//! and `<!-- captainslog:tasks:completed -->` anchors), and reconciles
+//! with sidecars (`task-completions.json`, `task-due-dates.json`,
+//! `rollover-log.json`). Completion timestamps are keyed by
+//! `(year, week, text_hash, ordinal)`.
 //!
 //! **Identity model.** A task is identified by the composite key
 //! `(year, week, text_hash, ordinal)`. The hash is SHA-256 of the

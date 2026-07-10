@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 3d Slice 6c ✅ done — next up Phase 3e (Task due dates)
+## Current phase: Phase 3e ✅ done — task feature closed out, next up Phase 4 (Link Enrichment)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -10,9 +10,9 @@ Phase 3a shipped 2026-07-06 — the Label Library viewer got its "Referenced In"
 
 Phase 3b shipped 2026-07-06 — full-text search across every weekly file (Weekly Summary content + Note bodies) with an optional label filter, dedicated `/search` route reachable from the `/journal` sidebar OR global `Cmd+K` shortcut, result cards grouped by surface (Summary/Note kind badge + `YYYY-Wnn` label + Note timestamp + labels), click-to-jump into `/journal?year=Y&week=W&scrollTo=<byte-offset>` with MarkdownEditor scrolling the target byte into view. MVP started narrower (Summary-only) and expanded to Notes + scroll-to-position once the pattern proved out.
 
-**Phase 3c (task list aggregator) + Phase 3d (task rearchitecture, Slices 6a–6c + auto-import) are done.** The aggregator shipped as designed, then the whole task feature was rearchitected around a dedicated `### Tasks` section with HTML-comment anchors — tasks became first-class objects with a locked-down UI while markdown stayed the storage layer. Row actions (pencil edit + trash delete), Copy-Completed-to-Key-Accomplishments, and once-per-day auto-import all landed on top. See both phase sections below for the full receipts.
+**Phase 3c (task list aggregator), Phase 3d (task rearchitecture, Slices 6a–6c + auto-import), and Phase 3e (task due dates + reminders) are done.** The aggregator shipped as designed, then the whole task feature was rearchitected around a dedicated `### Tasks` section with HTML-comment anchors — tasks became first-class objects with a locked-down UI while markdown stayed the storage layer. Row actions (pencil edit + trash delete), Copy-Completed-to-Key-Accomplishments, and once-per-day auto-import all landed on top of 3d. Phase 3e then added optional due dates (calendar action, DatePickerPopover reuse, red-chip Overdue heading, sort-earliest-first, rollover carries the debt forward) and OS-notification task reminders wired to a dedicated tokio scheduler parallel to the journal reminder, all with a Noot icon. See phase sections below for the full receipts.
 
-**Next up: Phase 3e — Task due dates + reminders.** Calendar-icon action between the pencil and trash on each task row → date-picker popup → tasks with dates render a chip; overdue tasks rise to the top of the landing-page list under an "Overdue" heading. On top of that: OS notification reminders fired "X days before due, at time Y" using the journal-reminder scheduling infrastructure, with a Noot icon instead of the book. Design brief locked 2026-07-10 across two plans-out rounds — spec fully written below; prerequisite is a higher-res Noot PNG (256×256+).
+**Next up: Phase 4 — Link Enrichment.** Detect URLs in Notes (Jira, GitHub, Slack, Confluence to start), fetch metadata via MCP connectors, cache under `.metadata/links/`, and render enriched cards in the rendered view.
 
 ---
 
@@ -425,7 +425,7 @@ Slice 5 shipped the aggregator on top of "tasks embedded in the Plans-and-priori
 
 **Verification:** 470 Rust tests (~60 new). Manual smoke on Chris's real journal covered delete of an incomplete + a completed task, delete of one of two duplicate tasks, delete of one of four duplicates spanning both states — sidecar + provenance stayed in perfect bijection with the file across all cases.
 
-**Deferred to Phase 3e** — Task due dates (calendar action, overdue heading, date chip). See below.
+**Deferred to Phase 3e** — Task due dates (calendar action, overdue heading, date chip). Shipped 2026-07-10; see Phase 3e section below for the receipt.
 
 **Deferred as post-3d follow-ups** (documented in DEVELOPMENT-JOURNAL 2026-07-10 entry):
 
@@ -442,88 +442,56 @@ Slice 5 shipped the aggregator on top of "tasks embedded in the Plans-and-priori
 - Gamification (streaks, counts, achievements) — BuJo anti-pattern.
 - Multiple task formats (emoji format vs. dataview format). Plain `- [ ]` only, no metadata sigils *(revisited in Phase 3e for due dates)*.
 
-### Phase 3e — Task due dates + reminders
+### Phase 3e — Task due dates + reminders ✅ (shipped 2026-07-10)
 
-Add optional due dates to tasks with a calendar-icon row action + a landing-page "Overdue" section. Layer OS-notification task reminders on top ("X days before due at time Y"). Design locked 2026-07-10 across two plans-out rounds — spec below is the final shape going into build.
+Optional due dates on tasks with a calendar-icon row action + a landing-page "Overdue" heading, plus OS-notification task reminders fired "X days before due, at time Y." Design locked 2026-07-10 across two plans-out rounds; shipped the same day in three parts on top of Phase 3d.
 
-**Storage (locked)**
+Prereq (satisfied): Noot notification asset upscaled from RPG assets to 170×170 and committed at `app/src-tauri/icons/noot-prompt.png`.
 
-- [ ] New sidecar `.metadata/task-due-dates.json`. Keyed by `(year, week, textHash, ordinal)` — identical shape to `TaskCompletions` + `RolloverLog`. Value: `{ dueDate: "YYYY-MM-DD" }` (local date; no time-of-day).
-- [ ] `TaskDueDates::load` / `save` following the sidecar posture already established: missing file → empty; corrupt file → empty + stderr warning; atomic write via staged `.tmp` + rename.
-- [ ] Reconciliation: on `list_tasks`, join the sidecar with parsed tasks by `(year, week, hash, ord)`. Orphan entries (no matching task) are ignored on read and swept by Rebuild on demand. Same posture as `TaskCompletions`.
+**Part A — TaskDueDates backend** (commit `617225c`)
 
-**Row action + picker (locked)**
+- New sidecar `.metadata/task-due-dates.json`. Keyed by `(year, week, textHash, ordinal)` — identical shape to `TaskCompletions` + `RolloverLog`. Value: `{ dueDate: "YYYY-MM-DD" }` (local date; no time-of-day).
+- `TaskDueDates::load` / `save` follow the established sidecar posture: missing file → empty; corrupt file → empty + stderr warning; atomic write via staged `.tmp` + rename.
+- `set_task_due_date(year, week, text_hash, ordinal, due_date: Option<String>)` Tauri command — `Some` = set/update; `None` = clear. Same read-migrate-backup-write shape as toggle/edit/delete.
+- **Cross-command re-key.** `edit_task`, `delete_task`, `toggle_task`, `check_and_apply_rollover`, and the Rebuild sweep all extend the positional key-map they already run for `TaskCompletions` + provenance so a due-date entry follows the task across renames, deletes, toggles, and weekly rollovers. Rollover carries the debt forward verbatim — an overdue-in-source-week task stays overdue in the target week.
+- Reconciliation: `list_tasks` joins the sidecar with parsed tasks by `(year, week, hash, ord)`; orphans are ignored on read and pruned by Rebuild.
 
-- [ ] Third inline icon between the pencil and the trash: a calendar. Click opens a popover with `DatePickerPopover` (already exists — Phase 2.5's Confluence-style widget) anchored to the icon.
-- [ ] Popover contents: title ("Set a due date"), the month grid, a **Clear due date** action (disabled when the task has no date), primary **Set** button (Enter commits). Tasks that already have a date open the picker seeded to that date.
-- [ ] New Tauri command `set_task_due_date(year, week, text_hash, ordinal, due_date: Option<String>)`. `Some` = set/update; `None` = clear. Same read-migrate-backup-write shape as toggle/edit/delete for consistency.
+**Part B — due-dates frontend** (commits `8ca8e46`, `00b0d79`, `bc4edf5`)
 
-**Display (locked)**
+- Third inline icon between the pencil and the trash on each incomplete task row: a calendar. Click opens a `DatePickerPopover` anchored to the icon.
+- Popover extended with an `onClear` action (disabled when the task has no date) and commit-on-Today so clicking Today both fills the field and applies. Tasks that already have a date open the picker seeded to that date.
+- Chip variants alongside the origin + timestamp chips: "Due today" (equal to local date) / "Due Fri" (this week) / "Due Jul 15" (this year) / "Due Jul 15, 2027" (different year). Chip click reopens the picker seeded to the current date. `.task-due-chip` for on-time; `.task-due-chip.overdue` flips background + text to `--brand-maroon` tones so it reads as danger. New `--brand-maroon-text` dark-mode token added to keep AA in the dark theme without leaking maroon into the whole scale.
+- **Overdue section header** on the landing page. When there are any overdue incomplete tasks the Incomplete group splits into two sub-groups: **Overdue** at the top (same visual weight as "Incomplete Tasks" / "Completed Tasks"), then **Incomplete Tasks**. Zero overdue → only "Incomplete Tasks" renders. Overdue = `due_date` strictly earlier than today's local date; a task due today shows "Due today" but sits in Incomplete (one grace day). Completed tasks never appear in Overdue regardless of date.
+- **Sort within Overdue: earliest due date first** (oldest debt on top). Incomplete + Completed remain file order.
+- **Chip hidden on completed rows** (per follow-up user feedback) — a completed dated task no longer shows its Due chip; unchecking it restores the chip because the underlying sidecar entry is preserved by the positional re-key.
 
-- [ ] Tasks with a due date render a chip alongside the origin + timestamp chips: "Due today" (equal to local date) / "Due Fri" (this week) / "Due Jul 15" (this year) / "Due Jul 15, 2027" (different year). Chip click opens the picker seeded to the current date.
-- [ ] `.task-due-chip` for on-time; `.task-due-chip.overdue` for overdue — the overdue class flips the background + text to `--brand-maroon` tones so it reads as danger. Both dark + light theme tested for AA.
-- [ ] Landing-page Incomplete section splits into two sub-groups when there are overdue tasks: **Overdue** header at the top (new group header, same visual weight as "Incomplete Tasks" / "Completed Tasks"), followed by the existing **Incomplete Tasks** header. When there are zero overdue, only "Incomplete Tasks" renders (no empty "Overdue" section).
-- [ ] Overdue definition: `due_date` strictly earlier than today's LOCAL date. A task due today shows "Due today" chip but sits in the regular Incomplete section (one grace day). Completed tasks never appear in Overdue regardless of date.
-- [ ] Sort within Overdue: earliest due date first (oldest debt on top). Sort within Incomplete: file order (unchanged from today). Sort within Completed: file order (unchanged).
-
-**Interactions with existing systems (locked)**
-
-- [ ] **Rollover** carries the due date forward VERBATIM. A task that was overdue in last week's file stays overdue in this week's — the debt is real; don't hide it. The rollover command loads `TaskDueDates`, and when it copies an open task forward it copies the due-date entry too (keyed to the new `(year, week, hash, ordinal)`).
-- [ ] **Edit-task**: due-date entry re-keyed by the positional key-map (same pass as sidecar + provenance). Renaming a task preserves its due date.
-- [ ] **Delete-task**: drops the due-date entry outright, plus applies the positional key-map to remaining entries in the same week.
-- [ ] **Toggle-task**: due-date entry preserved across check/uncheck (so unchecking a completed dated task restores the chip). Re-keyed by the same positional map the sidecar uses.
-- [ ] **Rebuild task index**: sweeps orphan due-date entries (no matching task line in any weekly file) the same way it prunes stale completions.
-- [ ] **Auto-import to Key Accomplishments**: due-date info doesn't propagate into the "Completed Tasks" bullets — completed tasks don't have deadlines to enforce, and the bullets are prose destined for a weekly email.
-
-**Task reminders (locked)**
+**Part C — task reminders** (commit `dd7c7b5`)
 
 Layered on top of due dates: OS notifications fired "X days before due, at time Y" for tasks with a due date. Reuses the journal-reminder scheduling architecture (single `tokio::spawn` loop, chunked polling against `Local::now()` for DST + system-sleep safety, mac-usernotifications in the bundled `.app` with mac-notification-sys fallback in dev). Same "must be running to fire" constraint as the journal reminder.
 
-- [ ] **Settings > Tasks tab** gains three fields (below the existing task-list toggles):
-  - `Enable task reminders` (bool, default on)
-  - `Days before due` (integer, 0..30, empty = 0 = day-of)
-  - `Time of day` (hh:mm, default 09:00)
-- [ ] **`TaskReminderSettings`** struct in `settings.rs` — same shape story as `ReminderSettings` (`enabled: bool`, `days_before: u8`, `hour: u8`, `minute: u8`), `#[serde(default)]` for legacy settings.json compatibility.
-- [ ] **New `task_reminder_task` background loop** in `reminders.rs`, parallel to `restart_reminder_task`. On each wake:
-  - Load `TaskDueDates` + `TaskCompletions` + `TaskReminderSettings`.
-  - Compute the pending queue: every incomplete task with a due date → reminder fire time = `due_date - days_before` at `hour:minute` local.
-  - Filter out fire times in the past (silently skipped — no notification).
-  - Sleep until the earliest fire time (chunked ≤5 min against wall clock, same DST/sleep-drift mitigation).
-  - On fire: dispatch a notification via `UNUserNotificationCenter` (or fallback), then loop.
-  - New `TaskReminderHandle` state in `lib.rs`, mirrors `ReminderHandle` pattern.
-- [ ] **Reschedule triggers.** `restart_task_reminder_task(app, handle, config)` is called after every relevant mutation: settings save (via `update_settings`), `set_task_due_date`, `edit_task`, `delete_task`, `toggle_task` (may cancel a reminder for a task being marked complete), `check_and_apply_rollover`, `import_completed_tasks`, `check_and_apply_auto_task_import`. All of these already emit `weekly-file-changed`; add the reschedule call to their command wrappers.
-- [ ] **Notification content**:
-  - Title: `Captain's Log — Task Reminder`
-  - Body: `"{task_text}" is due {when}`, where `{when}` follows the chip format ("today", "Fri", "Jul 15", "Jul 15 2027") based on days-till-due relative to fire time.
-  - Icon: **Noot** (`app/static/branded/noot-reminder.png`). Current asset is 99×96 — need a 256×256+ version for crisp rendering at macOS notification-icon size. Prerequisite before build: either upscale the existing PNG, or extract a fresh larger Noot from the RPG source at `Prodigy/Games/RPG/prodigy-game/`.
-- [ ] **Click action**: opens the main window to the landing page — same UN-action-button + Tauri event pattern the journal reminder uses (`open-summary` / analog).
-- [ ] **Cancellation**: implicit via the recompute-on-mutation design. A task completed / deleted / date-cleared / reminder-disabled falls out of the pending queue on the next reschedule; if its fire time hadn't arrived yet, no notification fires. No per-notification cancellation API needed.
-- [ ] **Past-time behavior**: if `due_date - days_before at time` is in the past when a task first gains a date, silently skip — the task simply has no reminder. Matches the journal reminder's same-day-setup behavior.
+- **`TaskReminderSettings`** struct in `settings.rs` — `enabled: bool`, `days_before: u8`, `hour: u8`, `minute: u8`, `#[serde(default)]` for legacy settings.json compatibility.
+- **`task_reminder_task` background loop** in `reminders.rs`, parallel to `restart_reminder_task`. Wakes → loads `TaskDueDates` + `TaskCompletions` + `TaskReminderSettings` → computes the pending queue (every incomplete task with a due date → fire time = `due_date - days_before` at `hour:minute` local) → filters past fire times → sleeps until the earliest fire time in ≤5 min chunks → dispatches a `UNUserNotificationCenter` notification (or fallback) on fire → loops. New `TaskReminderHandle` state in `lib.rs`, mirroring `ReminderHandle`.
+- **Reschedule triggers.** `restart_task_reminder_task(app, handle, config)` is called from every relevant mutation: `update_settings`, `set_task_due_date`, `edit_task`, `delete_task`, `toggle_task`, `check_and_apply_rollover`, `import_completed_tasks`, `check_and_apply_auto_task_import`. Cancellation is implicit — a completed / deleted / date-cleared / reminder-disabled task falls out of the pending queue on the next reschedule.
+- **Notification content**: title `Captain's Log — Task Reminder`; body `"{task_text}" is due {when}` where `{when}` follows the chip format; icon = Noot (`app/src-tauri/icons/noot-prompt.png`); click opens the main window to the landing page via the UN-action-button + Tauri event pattern the journal reminder uses.
+- **Settings > Tasks tab UI** — three fields below the existing task-list toggles: `Enable task reminders` (default on), `Days before due` (0..30, 0 = day-of), `Time of day` (default 09:00). One global config; no per-task overrides.
 
-**Out of scope**
+**Out of scope (intentional)**
 
 - Recurring due dates.
-- Time-of-day components on due dates (dates only, per BuJo). *Reminders* have a time of day, but that's the reminder settings, not the task itself.
+- Time-of-day components on due dates themselves (dates only, per BuJo). Reminders have a time of day, but that's the reminder settings, not the task.
 - Reminders that survive app quit (would require `UNCalendarNotificationTrigger` — a big scope expansion; ship in-process for now, matching the journal reminder's contract).
-- Per-task reminder overrides. One global "days before" + "time of day" applies to every task with a due date. Per-task customization is a follow-up if the global default proves too coarse.
-- Setting a due date at task-add time. The + Add Task modal stays text-only; users set the date via the calendar icon on the row after adding. Keeps the modal narrow.
-- Global setting to disable the due-date feature. Opt-in per task (no date = no chip); no global toggle needed for the dates themselves. *Reminders* have a global on/off toggle since they're a background side-effect.
+- Per-task reminder overrides. Follow-up if the global default proves too coarse.
+- Setting a due date at task-add time. The + Add Task modal stays text-only.
+- Global setting to disable the due-date feature. Opt-in per task (no date = no chip).
 
-**Prerequisites before build**
+**Verification.** New Rust sidecar coverage: load/save roundtrip, missing-file / corrupt-file posture, set-then-clear, rollover carries the date forward, edit-then-check preserves under the new hash, delete + re-key of same-hash siblings, toggle-preserves-date, Rebuild orphan sweep. Manual on Chris's real journal: added a task with due=yesterday → surfaced under Overdue with a red chip; set to today → chip flipped to "Due today" and row moved back to Incomplete; cleared the date → chip disappeared. Reminders: due=tomorrow / days_before=1 / time=09:00 with system clock at 08:00 today → notification fired within a minute. Due=today / days_before=3 → silently skipped (past). Completing a task before its reminder fired → reminder never fired. Settings change mid-wait → reschedule used the new offset. App restart mid-wait → the fresh spawn recomputed and picked up the same fire time.
 
-- [ ] Higher-res Noot PNG (256×256 or 512×512) at `app/static/branded/noot-reminder-icon.png` (or replace the existing one; the WeekStripe one at 99×96 is fine for its inline use). Sourced from Prodigy RPG assets or upscaled with a tolerable quality bar.
+**Lessons + follow-ups**
 
-**Verification approach**
-
-- Sidecar load/save roundtrip test + missing-file / corrupt-file posture tests.
-- Set-then-clear roundtrip.
-- Rollover carries a due date forward, and an overdue-in-source-week task is still overdue in the target week (asserted against `today_local()` seam if we add one for testability).
-- Edit-then-check preserves the due date under the new hash.
-- Delete drops the entry cleanly + applies the positional re-key to same-week same-hash siblings.
-- Toggle to `[x]` and back to `[ ]` preserves the date.
-- Rebuild orphan sweep: manually inject an orphan entry, verify Rebuild prunes it.
-- Manual: add a task, set a date for yesterday → row surfaces under "Overdue" with a red chip. Set date to today → chip says "Due today" but row moves back to regular Incomplete. Clear the date → chip disappears.
-- Reminders: set a task with due=tomorrow, days_before=1, time=09:00 with system clock at 08:00 today → notification fires within a minute. Set a task with due=today, days_before=3 → no notification (past). Complete a task before its reminder fires → reminder never fires. Change the settings while a reminder is pending → reschedule uses new offset. Reboot the app during a pending reminder's wait → the fresh spawn recomputes and picks up the same fire time.
+- **H2/H3 truncation bugs found mid-flight** (fixes `cf2856b` + `fbbe35d`). `extract_subsection` was treating any user-typed heading at the boundary depth as a section terminator, which meant a note body that happened to open with `### Something` could truncate the surrounding section on the next parse. Rewrote both extractors to only treat the known `SECTION_KEY_*` headings ("Weekly Summary", "Plans and Priorities", "Tasks", "Weekly Notes") as boundaries; arbitrary user headings inside a section body are now inert.
+- **Pre-release cleanup, tier 1** (commit `c845116`) — deleted the stale `toggle_checkbox_in_plans` + `append_task_to_plans` helpers (both superseded by the Slice 6 `### Tasks`-section variants) plus 21 tests that only exercised the deleted code paths. No behavior change; the "task lives in Plans body" era is fully gone.
+- **Pre-release cleanup, tier 2** (commit `314d27b`) — extracted `TaskRowActionButton` + `TaskMetaChip` out of the landing page (three copies each on incomplete + completed + overdue rows collapsed to one component per shape), swapped the delete confirmation modal to the shared `ConfirmDialog`, added pencil / trash / check to the `Icon` component, and collapsed `+page.svelte` by ~407 lines.
+- **Toggle re-key needs a position-move algorithm (NOT zip).** Documented in commit `617225c`. When a task is toggled the file order of the incomplete + completed sub-lists both shift, so `parse_plans_tasks(old).zip(parse_plans_tasks(new))` misaligns for same-hash duplicates: e.g. toggling the second of two identical `- [ ]` tasks maps position 1 in the old file (incomplete #1) to position 0 in the new file (incomplete #0) plus position N in the new file (end of completed). Solved by computing an explicit `(old_position → new_position)` map that walks the toggled task's move + shifts every other same-hash sibling accordingly. Same pattern reused by `edit_task`, `delete_task`, and rollover.
 
 ## Phase 4 — Link Enrichment
 

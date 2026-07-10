@@ -101,16 +101,31 @@ Heading personalizes when a name was provided ("You're all set, {name}.") and fa
 
 ## After setup
 
+### Immediate initialization
+
 Triggered by `complete_first_run`:
 
 - `~/Library/Application Support/com.prodigygame.captainslog/app-settings.json` written (theme, journal root pointer, `firstRunComplete: true`)
 - `<root>/.metadata/settings.json` written (per-journal — user details, manager, reminder, mail mode)
-- `<root>/.metadata/labels.json` initialized (empty `labels` array, version 1)
 - Storage layer hot-swaps to the chosen journal root (no app restart needed)
 - Notification permission requested via macOS UN if reminders enabled
-- Scheduler started; the first reminder fires at the next matching day/time
+- Journal-reminder scheduler started; the first reminder fires at the next matching day/time
+- Task-reminder scheduler started so due-date reminders fire even if the wizard didn't collect task-reminder settings
 - Activation policy flips to `.Regular` so the Dock icon appears
 - Menu-bar tray icon already present from launch
+
+### Deferred initialization
+
+Everything else is created lazily on first use of the feature that owns it. No file is pre-written by the wizard.
+
+- `<root>/.metadata/labels.json` — on the first label added to a note (`LabelIndex::load` returns an empty index if the file is missing, then subsequent writes materialize it)
+- `<root>/.metadata/sent-log.json` — on the first successful Send-to-Manager
+- `<root>/.metadata/capture-draft.json` — on the first keystroke into the quick-capture window (debounced auto-save)
+- `<root>/.metadata/task-completions.json` — on the first task checkbox toggle
+- `<root>/.metadata/task-due-dates.json` — on the first due date attached to a task
+- `<root>/.metadata/rollover-log.json` — on the first rollover from one weekly file to the next
+- `<root>/.metadata/auto-import-log.json` — on the first auto-import from a legacy note
+- `<root>/.metadata/pre-slice6-backups/YYYY-Www.md` — on the first migration of a pre-Slice-6 weekly file (one backup per migrated week)
 
 ## Re-running the wizard
 

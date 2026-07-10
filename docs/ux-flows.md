@@ -38,6 +38,39 @@ Goal: ~2 minutes to write a structured summary using the 4-field template.
 6. **Send weekly summary** (in the actions row) opens the [SendToManagerButton](../app/src/lib/SendToManagerButton.svelte) confirm modal — see Flow 6 below.
 7. If reminders are enabled and the summary's content hash changes, that week's reminder is suppressed.
 
+## Flow 2a — Task Management
+
+Goal: capture and close out short-lived todos alongside the weekly summary — with due dates, rollover, and OS reminders — without leaving the landing page.
+
+Surface: the landing page (`/`) displays tasks under two (sometimes three) headings, all sourced from the current week's `### Tasks` section (delimited by `<!-- captainslog:tasks:incomplete -->` / `<!-- captainslog:tasks:completed -->` anchors):
+
+- **Overdue** — only rendered when it has entries. Sorted earliest due-date first.
+- **Incomplete Tasks** — file order.
+- **Completed Tasks** — file order, muted styling.
+
+Each row's inline actions are hosted by [TaskRowActionButton](components.md#taskrowactionbutton):
+
+- **Pencil (edit)** → swaps the row text for an inline input. Enter commits, Escape cancels.
+- **Calendar (due date)** → opens [DatePickerPopover](components.md#datepickerpopover) anchored to the icon. Actions: **Set** / **Clear** / **Today** (Today commits immediately without needing a second click).
+- **Trash (delete)** → opens [ConfirmDialog](components.md#confirmdialog) before removing the task from the file.
+
+Row metadata is rendered by [TaskMetaChip](components.md#taskmetachip):
+
+- *origin* — small chip when the task was rolled over from the prior week.
+- *time* — "checked N ago" chip on completed rows (opt-in via Settings > Tasks).
+- *due* — accent chip when a due date is set.
+- *due-overdue* — maroon, bold variant when the due date is earlier than today. Hidden on completed rows.
+
+**Rollover.** On the first open of a fresh week (roughly Monday morning), any incomplete tasks from the prior week auto-import into the current week's `### Tasks` section. A [RolloverReceipt](components.md#rolloverreceipt) banner announces the count and auto-dismisses. Provenance (which task came from which prior week) is stored in `.metadata/rollover-log.json` so the *origin* chip survives across sessions.
+
+**Auto-import to Key Accomplishments.** Once per local day, completed tasks from the prior week merge into that week's `### Key accomplishments` section as prose bullets. Runs are tracked in `.metadata/auto-import-log.json` to avoid duplicate merges.
+
+**Add-task.** A **+ Add Task** button under the incomplete list opens a minimal modal (text-only). Due dates aren't collected here — set them afterwards via the row's calendar action.
+
+**Task reminders (Phase 3e).** If enabled in Settings > Tasks, an OS notification fires *"X days before due at HH:MM"* for each task with a due date. Noot icon; body reads `"<task text>" is due <when>`. Clicking the notification opens the landing page.
+
+**Settings > Tasks tab.** Task-list display toggles (show completed, open tasks first, "checked N ago" chip, auto-rollover, auto-import to Key Accomplishments) plus reminder controls (enable, days-before, time-of-day). See Flow 4 below.
+
 ## Flow 3 — Editing a past Note / week
 
 1. User opens the main window and navigates to `/journal`
@@ -49,7 +82,7 @@ Goal: ~2 minutes to write a structured summary using the 4-field template.
 
 ## Flow 4 — Settings
 
-Reachable from `/settings` (via the main window's nav). Five tabs:
+Reachable from `/settings` (via the main window's nav). Six tabs:
 
 1. **General** — three sub-sections:
    - *Your details* — name, email, Bamboo title, Jira project keys
@@ -59,6 +92,7 @@ Reachable from `/settings` (via the main window's nav). Five tabs:
 3. **Mail** — Send-to-Manager dispatch path (Gmail / Native Mac Mail / Outlook), body delivery mode (Prefilled vs. Compose + paste), body format (Clean text vs. Markdown source), per-mode tips and sub-controls (Outlook flavor, Native HTML toggle).
 4. **Theme** — Light / Dark / Custom. Custom theme editor (12 primaries → ~23 OKLCH-derived tokens, AA contrast warnings, `.captheme.json` export/import). Colorful Labels toggle.
 5. **Labels** — per-label details modal (rename / color override / delete). Bulk operations land in Phase 3a.
+6. **Tasks** — task-list display toggles (show completed, open tasks first, "checked N ago" chip, auto-rollover of incomplete tasks, auto-import completed tasks into Key Accomplishments) plus task-reminder controls (enable, days-before-due, time-of-day). See Flow 2a.
 
 Tray-menu escape hatches: "Preset Theme" submenu (Dark / Light) flips theme without going through Settings — used when a Custom palette makes the in-app picker unreadable.
 

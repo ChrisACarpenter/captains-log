@@ -1586,4 +1586,117 @@ Security lens returned zero findings (rare and reassuring — new commands go th
 
 Phase 3e — Task due dates. Third row action (calendar icon between pencil and trash) → date picker popup → tasks with dates render a chip → overdue tasks rise to the top of the landing-page list under an "Overdue" heading. Design open on storage (inline suffix vs sidecar vs anchor comment) — lock before build. Roadmap has the design brief.
 
+---
+
+## 2026-07-10 — Phase 3e shipped: task due dates + reminders (+ pre-release cleanup)
+
+Phase 3e closed the task feature. Two plans-out design rounds locked the spec before any code shipped — first due dates alone, then reminders as a follow-on round after Chris asked "what if the reminder scheduler from Phase 2 could ride along?" Both locked-design memories (`project_captains_log_slice3e_due_dates.md`) captured the shape so this session's execution was mostly mechanical. Build landed in three parts (A backend, B frontend, C reminders) followed by a two-tier pre-release cleanup pass (Tier 1 dead code, Tier 2 component extraction).
+
+### Decisions made
+
+Authoritative list lives in ROADMAP.md's Phase 3e section. The load-bearing decisions from the two plans-out rounds:
+
+- **Sidecar shape mirrors TaskCompletions + RolloverLog verbatim.** Same composite key `(year, week, textHash, ordinal)`, same `.metadata/task-due-dates.json` file placement, same lock discipline. New sidecar = zero new invariants to reason about.
+- **No time-of-day on the due date itself.** Due date is a calendar date; time-of-day is the reminder's concern (and applies globally, not per-task). Kept the two responsibilities orthogonal.
+- **Rollover carries the debt VERBATIM.** An overdue task in week N rolls into week N+1 still overdue with the ORIGINAL due date. Not "today" and not "next Monday" — the deliberate friction of an aging red chip is the whole point.
+- **Reminders reuse the tokio scheduler from the journal reminder.** Chunked-poll pattern already handled DST + system-sleep correctly; TaskReminderHandle is a clone of the journal-reminder shape with a different pending-queue computation. No new scheduling machinery to design or verify.
+- **Complete = cancel; past due dates skip.** A completed task's pending reminder is dropped. A due date in the past is skipped (never fires "you should have done this three days ago" at 9 AM). Both keep the reminder a signal, not noise.
+
+### Part A — backend (commit 617225c)
+
+`TaskDueDates` sidecar + `set_task_due_date` command + `due_date: Option<String>` on `TaskListEntry` + join in `list_tasks_impl`. Command validates the date via `chrono::NaiveDate::parse_from_str` before writing so garbage input never reaches disk.
+
+Cross-command re-key wired into every task-mutating path:
+
+- `edit_task_impl` — positional key-map (same shape as Slice 6b's completions re-key). Zip old and new task lists after re-parse; re-emit each due-date entry under its new key.
+- `delete_task_impl` — drop the deleted key's entry, shift sibling ordinals for same-hash duplicates downstream.
+- `toggle_task_impl` — the interesting one. Position-MOVE algorithm; see the Lessons section.
+- `check_and_apply_rollover_impl` — verbatim copy under the new week's key.
+
+The command chain now touches four sidecars (completions, rollover-log, auto-import-log, due-dates); each command's re-key logic reads similar. Slice 6b's positional key-map pattern absorbed the fourth sidecar without any structural changes to the calling code.
+
+### Part B — frontend (commits 8ca8e46, 00b0d79, bc4edf5)
+
+Calendar `TaskRowActionButton` between pencil + trash. Anchors a `DatePickerPopover` (existing component from the reminder settings work in Phase 2, now given an `onClear` prop for the footer's Clear button). `goToToday` gained a wrinkle: originally it just navigated the visible month, but Chris's initial round of feedback was "clicking Today should SET today, not just scroll to it." Reworked it to commit today's date on click.
+
+Chip variants added to `TaskMetaChip`:
+
+- `due` — accent-tinted pill, shown for on-time due dates.
+- `due-overdue` — maroon-tinted bold pill, shown for past-due incomplete tasks. Added a new `--brand-maroon-text` theme token because the plain `--brand-maroon` was too dim in dark mode (~2.8:1 contrast against the elevated card bg). New token lands at ~5.4:1 in dark and stays legible in light.
+
+Landing page splits Incomplete into two groups: an **Overdue** heading (only renders when populated, tasks sorted earliest-first via `dateStringCompare`) followed by **Incomplete Tasks** (file order preserved). Completed group is unchanged.
+
+Chip is hidden on completed rows entirely. Chris's exact feedback:
+
+> "hide dude date chips from completed tasks. Its just needless visual clutter"
+
+He's right — a green-checkmarked completed task doesn't need a red overdue chip on top of it. The information adds nothing once the state is resolved.
+
+### Part C — reminders (commit dd7c7b5)
+
+`TaskReminderSettings` struct in `settings.rs` mirrors the existing `ReminderSettings` pattern. Three fields on the Settings > Tasks tab: enable toggle, time-of-day picker (defaults 9:00 AM), and lead-time selector.
+
+`TaskReminderHandle` + `restart_task_reminder_task` in `reminders.rs` copy the journal-reminder scheduler infrastructure verbatim — the same chunked sleep against `Local::now()`, the same fire-time re-verification to prevent stale notifications after system sleep or DST transitions, the same one-shot cancel-on-restart handle. The only substantive difference is the pending-queue computation: instead of "next journal reminder at time T," it's "walk all incomplete tasks with due dates, filter to those firing today at the configured time given lead-time, dedupe."
+
+Every mutation reschedules the task reminder: settings save, `set_task_due_date`, `edit_task_impl`, `delete_task_impl`, `toggle_task_impl`, rollover, import, auto-import. Miss any one and a stale reminder queue lingers past its data. Noot notification icon at `app/src-tauri/icons/noot-prompt.png`.
+
+### The heading-truncation bug (twice)
+
+Mid-flight surprise. First manifestation: Chris typed an H2 (`## Some heading`) inside a Weekly Summary field, saved, and his content vanished with the "external update" banner. Turned out `extract_subsection` had a defensive `\n## ` stop-boundary that had been in the codebase since Slice 1 — meant to prevent overrunning into the next top-level section. But the OUTER `NOTES_HEADER` slice was already authoritative for the subsection's upper bound; the inner check was redundant defense that misfired on legitimate user content. Fix cf2856b removed it.
+
+Next day Chris hit it AGAIN with an H3 (`### Claude Code Workflow:`). Same shape: the inner `\n### ` boundary check caught any user H3 inside Summary body. Fix fbbe35d: only treat `\n### ` as a boundary when the heading exactly matches one of the known section keys (`SECTION_KEY_ACC` / `PLANS` / `CHALLENGES` / `OTHER` / `LABELS` / `TASKS`). User-authored H3s no longer trip it.
+
+Both were 100% reproducible; both surfaced as "my edits disappeared and the banner appeared."
+
+### The toggle re-key that wasn't like edit or delete
+
+Edit's positional key-map works because edit doesn't add or remove task lines — old and new parse to lists of the same length in the same file order. Delete's works because it deterministically removes one line and shifts siblings.
+
+Toggle isn't either. When a task at position i in the incomplete sub-list flips to `[x]`, it MOVES to the tail of the completed sub-list. `old_all[i]` and `new_all[i]` (after re-parse) refer to different tasks — the position that used to hold the toggled task now holds what used to be at position i+1.
+
+First pass used the zip-based key_map from edit. Produced an EMPTY map for same-hash duplicates because the identity checks failed for every position. Second pass: build `old_same_hash_tasks` + `new_same_hash_tasks` slot lists, use `rposition(is_completed == new_state)` to find where the moved task landed, rebuild the sidecar entry list from the slot list. Move-aware algorithm; zip pattern was the wrong shape for this operation.
+
+### Pre-release cleanup — Tier 1 (commit c845116)
+
+Chris asked "we did some major refactoring for tasks - do we have dead code anywhere we could clean up?" Audit surfaced two functions from the pre-Slice-6a era that no live call path touched:
+
+- `toggle_checkbox_in_plans` — ~213 lines, the old "flip a checkbox in the Plans body" logic. Replaced by `toggle_task_in_tasks_body` when tasks moved to the `### Tasks` section.
+- `append_task_to_plans` — ~458 lines with its test suite. Same story: the "append a new task to the Plans body" helper. Replaced by `append_task_to_tasks_body`.
+
+21 associated tests deleted. Stale module comment referring to Plans-body task handling also updated. No behavior change; the code was compiled + tested but never called.
+
+### Pre-release cleanup — Tier 2 (commit 314d27b)
+
+Extracted `TaskRowActionButton` (97 lines) + `TaskMetaChip` (63 lines) from inlined markup + CSS in the landing `+page.svelte`. Swapped the bespoke delete-confirmation modal for the shared `$lib/ConfirmDialog`. Added pencil / trash / check icons to `Icon.svelte` for the extracted components. Net -407 lines in landing `+page.svelte`; page now reads like a landing page, not like a landing page + 3 embedded components + their CSS.
+
+### Docs sweep (this session)
+
+Post-cleanup docs audit workflow flagged stale content in all 6 `docs/*.md` files. Biggest offenders:
+
+- `docs/data-format.md` — weekly-file structure still described tasks living in the Plans body; four of the sidecars (task-completions, rollover-log, auto-import-log, task-due-dates) were entirely absent.
+- `docs/file-structure.md` — `.metadata/` tree drawing was missing the same four sidecars.
+- `docs/ux-flows.md` — no task-management flow section at all.
+- `docs/first-run-setup.md` — `labels.json` listed as immediate-init when it's actually lazy (only written when the first label is set).
+
+Applied fixes in a follow-up workflow round. Also updated `tasks.rs` module docstring to reflect the anchor-partitioned `### Tasks` section, not the pre-Slice-6 Plans-body model.
+
+### Lessons worth keeping
+
+- **`extract_subsection`'s "defense in depth" boundaries were harmful.** When the OUTER slice already bounds the section, extra inner stop-tokens only fire on legitimate content. Two production bugs (H2, then H3) traced to the same layered-defense pattern. Trust the outer bound; stop adding safety nets that catch the wrong things.
+- **Toggle is not edit + delete — it's a MOVE.** Any per-task sidecar re-key needs a move-aware algorithm. Edit's zip-based key_map only works because edit preserves length + order; delete's shift-by-index only works because delete is a deterministic removal. Toggle relocates a task to the tail of a different sub-list, which neither shape handles. Recognizing move-vs-not is a coordinate for choosing the right re-key primitive.
+- **The reminder scheduler shape is now a template.** `TaskReminderHandle` / `restart_task_reminder_task` is a copy of the journal-reminder infrastructure with a different pending-queue function plugged in. Future timed-notification features (release reminders, weekly-summary nudges, whatever comes next) can follow the same shape without redesigning DST behavior, sleep behavior, or cancel-on-restart handling. One well-verified scheduler, N notification kinds.
+- **The "delete before you ship" pass matters.** Two dead functions and 21 dead tests were invisible in code review because they COMPILED and their tests PASSED. That inflates cognitive load for every future toucher — the next person looking at task mutation has to figure out which of two `toggle_checkbox_*` functions is the live one. Tier 1 was a 10-minute pass with an outsized payoff.
+- **Docs drift is silent.** A fresh contributor reading `docs/data-format.md` would have built the wrong mental model about where tasks live and which sidecars exist. Code review catches code that doesn't match the code; nothing catches docs that don't match the code. Auditing docs after every major refactor deserves its own workflow round, not a lump-sum "sometime later."
+
+### Verification
+
+- `cargo test`: 493 passed, 0 failed. Grew from 470 (Phase 3d) to ~514 mid-Part-C, then dropped back to 493 after Tier 1 removed 21 dead tests. Net +23 real tests for Phase 3e across all three parts.
+- `svelte-check`: clean.
+- `vite build`: clean.
+- Manual smoke on Chris's real journal: (1) set a due date for yesterday → row surfaces under Overdue with maroon chip, sorted earliest-first if there are peers; (2) mark it complete → chip disappears (per completed-row rule), row moves to Completed; (3) uncheck → chip returns, row back to Overdue; (4) set reminder for 1min from now with the system clock, wait → notification arrives with Noot icon.
+
+### Next
+
+Phase 4 — Link Enrichment. Detect URLs in Notes (Jira / GitHub / Slack / Confluence to start), render them as titled cards instead of raw href text. Roadmap has the design brief; nothing locked yet.
+
 
