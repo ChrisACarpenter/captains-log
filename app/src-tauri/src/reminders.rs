@@ -44,7 +44,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Weekday};
 use tauri::async_runtime::JoinHandle;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 #[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 
@@ -67,6 +67,11 @@ const LATE_FIRE_THRESHOLD_SECS: i64 = 30 * 60;
 /// behaving differently in dev vs production builds.
 const NOTIFICATION_ICON_PNG: &[u8] = include_bytes!("../icons/notification-scroll.png");
 
+/// Phase 3e — Noot PNG used as the task-reminder notification icon.
+/// Distinct from the journal-reminder scroll so the two notifications
+/// are visually distinguishable at a glance.
+const TASK_REMINDER_ICON_PNG: &[u8] = include_bytes!("../icons/noot-prompt.png");
+
 /// Write the embedded notification icon to the OS temp directory (idempotent)
 /// and return its absolute path. macOS's notification API wants a file path,
 /// not raw bytes — writing once to a stable temp location is the simplest
@@ -76,6 +81,20 @@ fn notification_icon_path() -> Option<PathBuf> {
     if !path.exists() {
         if let Err(e) = std::fs::write(&path, NOTIFICATION_ICON_PNG) {
             eprintln!("[reminders] failed to write notification icon: {e}");
+            return None;
+        }
+    }
+    Some(path)
+}
+
+/// Same posture as [`notification_icon_path`] but for the Noot task-
+/// reminder icon. Idempotent write to the OS temp dir, returned path
+/// handed to UNUserNotificationCenter / the fallback plugin.
+fn task_reminder_icon_path() -> Option<PathBuf> {
+    let path = std::env::temp_dir().join("captainslog-noot-prompt.png");
+    if !path.exists() {
+        if let Err(e) = std::fs::write(&path, TASK_REMINDER_ICON_PNG) {
+            eprintln!("[task-reminders] failed to write notification icon: {e}");
             return None;
         }
     }
@@ -370,6 +389,313 @@ pub fn restart_reminder_task(
             // Sleep a minute so the next iteration doesn't recompute "now" inside
             // the same target minute and re-fire immediately.
             tokio::time::sleep(StdDuration::from_secs(60)).await;
+        }
+    });
+
+    *slot = Some(new_handle);
+}
+
+// ---------------------------------------------------------------------------
+// Task reminders (Phase 3e)
+// ---------------------------------------------------------------------------
+
+/// Tauri-managed state holding the currently-running TASK reminder
+/// task. Parallel structure to [`ReminderHandle`] — the two schedulers
+/// run independently, so they need independent join-handle slots.
+pub struct TaskReminderHandle {
+    inner: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl TaskReminderHandle {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for TaskReminderHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Pure fn: given a due date + reminder offset + time-of-day, compute
+/// the LOCAL datetime at which the reminder should fire. Returns
+/// `None` when the input date is malformed or when the computed time
+/// falls into a DST gap (matches `resolve_local_datetime`'s posture).
+///
+/// The formula: `fire_time = due_date - days_before at hour:minute (local)`.
+/// A `days_before = 0` fires on the due date itself at the configured
+/// time-of-day (day-of).
+pub fn compute_task_reminder_fire_time(
+    due_date_iso: &str,
+    days_before: u8,
+    hour: u8,
+    minute: u8,
+) -> Option<DateTime<Local>> {
+    let due = NaiveDate::parse_from_str(due_date_iso, "%Y-%m-%d").ok()?;
+    // Duration::days(-N) is safe here — we're working in chrono
+    // NaiveDate arithmetic, which handles calendar days correctly
+    // regardless of DST.
+    let fire_date = due - Duration::days(days_before as i64);
+    resolve_local_datetime(
+        fire_date.year(),
+        fire_date.month(),
+        fire_date.day(),
+        hour,
+        minute,
+    )
+}
+
+/// A candidate task reminder resolved during a scheduler pass:
+/// enough context to fire the notification without re-reading the
+/// weekly file at fire time.
+#[derive(Debug, Clone)]
+struct TaskReminderCandidate {
+    text: String,
+    due_date_iso: String,
+    fire_time: DateTime<Local>,
+}
+
+/// Read the current week's file + sidecars and return the earliest
+/// pending task reminder that fires strictly in the future.
+///
+/// Returns `None` when: reminders are disabled in settings, the
+/// current-week file doesn't exist, no incomplete task has a due
+/// date, or every computed fire time is in the past (silently
+/// skipped per the locked spec).
+async fn find_next_task_reminder<B: crate::storage::StorageBackend + ?Sized>(
+    backend: &B,
+    config: &crate::settings::TaskReminderSettings,
+    now: DateTime<Local>,
+) -> Option<TaskReminderCandidate> {
+    if !config.enabled {
+        return None;
+    }
+    let crate::commands::YearWeek { year, week } = crate::commands::get_current_year_week();
+
+    // Read + migrate the file in memory. Read-only path — the
+    // migration doesn't persist here; the next real write from a
+    // command handler is what commits legacy files to disk.
+    let (content, _) =
+        crate::commands::read_migrated_weekly_content(backend, year, week)
+            .await
+            .ok()
+            .flatten()?;
+    let summary = crate::notes::parse_weekly_summary(&content);
+    let tasks = crate::tasks::parse_plans_tasks(&summary.tasks_body);
+    if tasks.is_empty() {
+        return None;
+    }
+    let due_dates = crate::tasks::TaskDueDates::load(backend).await.ok()?;
+
+    let mut best: Option<TaskReminderCandidate> = None;
+    for task in tasks.iter().filter(|t| !t.is_completed) {
+        let Some(dd) = due_dates.find(year, week, &task.text_hash, task.ordinal) else {
+            continue;
+        };
+        let Some(fire) = compute_task_reminder_fire_time(
+            &dd.due_date,
+            config.days_before,
+            config.hour,
+            config.minute,
+        ) else {
+            continue;
+        };
+        // Silently skip past fire times per the locked spec — set
+        // date=tomorrow with days_before=3 → the computed fire time is
+        // yesterday, and we don't want to fire immediately.
+        if fire <= now {
+            continue;
+        }
+        let candidate = TaskReminderCandidate {
+            text: task.text.clone(),
+            due_date_iso: dd.due_date.clone(),
+            fire_time: fire,
+        };
+        best = match best {
+            None => Some(candidate),
+            Some(prev) if candidate.fire_time < prev.fire_time => Some(candidate),
+            Some(prev) => Some(prev),
+        };
+    }
+    best
+}
+
+/// True if the (text, due_date) task pair still exists as an
+/// incomplete row in the current week's file with the same due date.
+/// Used as the fire-time re-verify: guarantees we don't fire a stale
+/// notification after the user completes / deletes / re-dates the
+/// task between the initial compute pass and the scheduled fire.
+///
+/// Compares by NORMALIZED text-hash (via `normalize_task_text`) so a
+/// user edit that changed only punctuation / casing still fires
+/// correctly.
+async fn verify_task_reminder_still_current<B: crate::storage::StorageBackend + ?Sized>(
+    backend: &B,
+    candidate: &TaskReminderCandidate,
+) -> bool {
+    let crate::commands::YearWeek { year, week } = crate::commands::get_current_year_week();
+    let candidate_hash = crate::tasks::hash_task_text(&crate::tasks::normalize_task_text(&candidate.text));
+    let Ok(Some((content, _))) =
+        crate::commands::read_migrated_weekly_content(backend, year, week).await
+    else {
+        return false;
+    };
+    let summary = crate::notes::parse_weekly_summary(&content);
+    let task_still_exists = crate::tasks::parse_plans_tasks(&summary.tasks_body)
+        .iter()
+        .any(|t| t.text_hash == candidate_hash && !t.is_completed);
+    if !task_still_exists {
+        return false;
+    }
+    let Ok(due_dates) = crate::tasks::TaskDueDates::load(backend).await else {
+        return false;
+    };
+    due_dates
+        .due_dates
+        .iter()
+        .any(|d| d.year == year && d.week == week && d.text_hash == candidate_hash && d.due_date == candidate.due_date_iso)
+}
+
+/// Build the notification body for a task reminder. Keeps the copy
+/// short — macOS notifications truncate hard at ~200 chars — while
+/// pointing at the task text + due date.
+fn build_task_reminder_body(task_text: &str, due_date_iso: &str) -> String {
+    // Truncate task text at 80 chars to leave room for the "is due
+    // {date}" suffix. Add ellipsis to indicate truncation.
+    const TASK_TEXT_CAP: usize = 80;
+    let mut display_text = task_text.to_string();
+    if display_text.chars().count() > TASK_TEXT_CAP {
+        // Truncate on a char boundary.
+        let truncated: String = display_text.chars().take(TASK_TEXT_CAP).collect();
+        display_text = format!("{truncated}…");
+    }
+    format!("\"{display_text}\" is due {due_date_iso}.")
+}
+
+/// Cancel any running task-reminder scheduler and start a fresh one
+/// with the new config. Same posture as [`restart_reminder_task`]:
+/// aborts the existing task, honors `config.enabled = false` by
+/// leaving the slot empty, spawns a new tokio task otherwise.
+///
+/// Called from:
+/// - `lib::run::setup()` on app launch (initial spawn from disk settings)
+/// - `commands::update_settings` after a Settings-panel save
+pub fn restart_task_reminder_task(app: AppHandle, handle: &TaskReminderHandle) {
+    let mut slot = handle
+        .inner
+        .lock()
+        .expect("task reminder handle mutex was poisoned");
+
+    if let Some(old) = slot.take() {
+        old.abort();
+        println!("[task-reminders] previous task aborted");
+    }
+
+    let new_handle = tauri::async_runtime::spawn(async move {
+        // The loop re-loads config on every wake so a mid-flight
+        // settings change (via the outer restart abort+respawn) picks
+        // up immediately. But between waks we ALSO re-load from disk
+        // so an external write to settings.json is detected within
+        // one chunk boundary — same posture as the file/sidecar reads
+        // in find_next_task_reminder.
+        loop {
+            let now = Local::now();
+            let storage_state = app.state::<crate::SharedStorage>();
+
+            let (config, next) = {
+                let storage = storage_state.read().await;
+                let settings = crate::settings::JournalSettings::load(&*storage)
+                    .await
+                    .unwrap_or_default();
+                let config = settings.task_reminder.clone();
+                let next = if config.enabled {
+                    find_next_task_reminder(&*storage, &config, now).await
+                } else {
+                    None
+                };
+                (config, next)
+            };
+
+            let Some(candidate) = next else {
+                // No pending reminder — sleep MAX_SLEEP_CHUNK, then
+                // re-check. Task additions / date changes get picked
+                // up on the next wake (at most MAX_SLEEP_CHUNK away).
+                if !config.enabled {
+                    println!("[task-reminders] disabled; sleeping {}s before re-check",
+                        MAX_SLEEP_CHUNK.as_secs());
+                } else {
+                    println!(
+                        "[task-reminders] no pending reminders; sleeping {}s before re-check",
+                        MAX_SLEEP_CHUNK.as_secs()
+                    );
+                }
+                tokio::time::sleep(MAX_SLEEP_CHUNK).await;
+                continue;
+            };
+
+            println!(
+                "[task-reminders] next fire at {} for task {:?} due {} (chunked-sleep, max {}s per chunk)",
+                candidate.fire_time.format("%Y-%m-%d %H:%M:%S %z"),
+                candidate.text,
+                candidate.due_date_iso,
+                MAX_SLEEP_CHUNK.as_secs()
+            );
+
+            // Chunked sleep until candidate.fire_time. Between chunks
+            // we re-read the wall clock, matching the journal-reminder
+            // pattern's DST + system-sleep safety.
+            loop {
+                let now = Local::now();
+                if now >= candidate.fire_time {
+                    break;
+                }
+                let remaining = (candidate.fire_time - now)
+                    .to_std()
+                    .unwrap_or(StdDuration::ZERO);
+                let chunk = remaining.min(MAX_SLEEP_CHUNK);
+                tokio::time::sleep(chunk).await;
+            }
+
+            // Fire — but re-verify the candidate is still current by
+            // reloading. Between the compute pass and now, the user
+            // may have completed / deleted / re-dated the task. We
+            // can't reuse find_next_task_reminder here because its
+            // "strictly in the future" filter would exclude our
+            // candidate the moment we reach its fire time; instead,
+            // check the task's IDENTITY directly (still open + still
+            // has THIS due date).
+            let should_fire = {
+                let storage = storage_state.read().await;
+                let settings = crate::settings::JournalSettings::load(&*storage)
+                    .await
+                    .unwrap_or_default();
+                if !settings.task_reminder.enabled {
+                    false
+                } else {
+                    verify_task_reminder_still_current(&*storage, &candidate).await
+                }
+            };
+
+            if should_fire {
+                let fired_at = Local::now();
+                let body = build_task_reminder_body(&candidate.text, &candidate.due_date_iso);
+                let icon_path = task_reminder_icon_path();
+                fire_notification(&app, &body, icon_path.as_deref()).await;
+                println!(
+                    "[task-reminders] fired at {} for task {:?} (target was {}, lag {}s)",
+                    fired_at.format("%H:%M:%S"),
+                    candidate.text,
+                    candidate.fire_time.format("%H:%M:%S"),
+                    (fired_at - candidate.fire_time).num_seconds()
+                );
+                // Sleep a minute so we don't immediately re-fire the
+                // same minute-boundary. Matches the journal-reminder
+                // cooldown pattern.
+                tokio::time::sleep(StdDuration::from_secs(60)).await;
+            }
         }
     });
 
@@ -984,5 +1310,100 @@ mod tests {
         let target = result.unwrap();
         assert_eq!(target.hour(), 1);
         assert_eq!(target.minute(), 30);
+    }
+
+    // ---- Phase 3e task-reminder pure fns ----
+
+    #[test]
+    fn compute_task_reminder_fire_time_day_of_maps_to_configured_time() {
+        // days_before=0, hour=9, minute=0, due=2026-07-15 →
+        // fire = 2026-07-15 09:00 local.
+        let fire = compute_task_reminder_fire_time("2026-07-15", 0, 9, 0)
+            .expect("day-of at 9am should resolve");
+        assert_eq!(fire.year(), 2026);
+        assert_eq!(fire.month(), 7);
+        assert_eq!(fire.day(), 15);
+        assert_eq!(fire.hour(), 9);
+        assert_eq!(fire.minute(), 0);
+    }
+
+    #[test]
+    fn compute_task_reminder_fire_time_days_before_subtracts_calendar_days() {
+        // days_before=3, hour=17, minute=30, due=2026-07-15 →
+        // fire = 2026-07-12 17:30 local (three calendar days earlier).
+        let fire = compute_task_reminder_fire_time("2026-07-15", 3, 17, 30)
+            .expect("3-days-before at 5:30pm should resolve");
+        assert_eq!(fire.year(), 2026);
+        assert_eq!(fire.month(), 7);
+        assert_eq!(fire.day(), 12);
+        assert_eq!(fire.hour(), 17);
+        assert_eq!(fire.minute(), 30);
+    }
+
+    #[test]
+    fn compute_task_reminder_fire_time_crosses_month_boundary_correctly() {
+        // days_before=5, due=2026-08-02 → fire = 2026-07-28.
+        let fire = compute_task_reminder_fire_time("2026-08-02", 5, 9, 0).unwrap();
+        assert_eq!(fire.month(), 7);
+        assert_eq!(fire.day(), 28);
+    }
+
+    #[test]
+    fn compute_task_reminder_fire_time_crosses_year_boundary_correctly() {
+        // days_before=10, due=2027-01-05 → fire = 2026-12-26.
+        let fire = compute_task_reminder_fire_time("2027-01-05", 10, 9, 0).unwrap();
+        assert_eq!(fire.year(), 2026);
+        assert_eq!(fire.month(), 12);
+        assert_eq!(fire.day(), 26);
+    }
+
+    #[test]
+    fn compute_task_reminder_fire_time_rejects_malformed_date() {
+        assert!(compute_task_reminder_fire_time("not-a-date", 0, 9, 0).is_none());
+        assert!(compute_task_reminder_fire_time("", 0, 9, 0).is_none());
+        assert!(compute_task_reminder_fire_time("2026-13-01", 0, 9, 0).is_none()); // no month 13
+    }
+
+    #[test]
+    fn compute_task_reminder_fire_time_rejects_invalid_time() {
+        // Hour 25 / minute 60 are invalid.
+        assert!(compute_task_reminder_fire_time("2026-07-15", 0, 25, 0).is_none());
+        assert!(compute_task_reminder_fire_time("2026-07-15", 0, 9, 60).is_none());
+    }
+
+    #[test]
+    fn build_task_reminder_body_wraps_task_text_in_quotes_and_appends_date() {
+        let body = build_task_reminder_body("Ship the widget", "2026-07-15");
+        assert_eq!(body, "\"Ship the widget\" is due 2026-07-15.");
+    }
+
+    #[test]
+    fn build_task_reminder_body_truncates_long_task_text() {
+        // 200-char task text should be truncated at ~80 chars + ellipsis.
+        let long = "x".repeat(200);
+        let body = build_task_reminder_body(&long, "2026-07-15");
+        // Should contain the truncation marker.
+        assert!(body.contains('…'), "expected ellipsis in truncated body: {body}");
+        // Should still end with the due-date suffix.
+        assert!(body.ends_with(" is due 2026-07-15."), "body: {body}");
+        // Should be way shorter than the raw 200 chars.
+        assert!(body.chars().count() < 120, "body too long: {} chars", body.chars().count());
+    }
+
+    #[test]
+    fn build_task_reminder_body_preserves_short_task_text() {
+        let body = build_task_reminder_body("Short", "2026-07-15");
+        assert!(!body.contains('…'), "short text must not be truncated: {body}");
+        assert!(body.contains("\"Short\""));
+    }
+
+    #[test]
+    fn build_task_reminder_body_handles_multibyte_chars_at_truncation_boundary() {
+        // Emojis + accented chars are multi-byte in UTF-8; the truncation
+        // must slice on char boundaries or the format! panics.
+        let text = "🚀 ".repeat(100); // 100 rocket emojis with spaces
+        let body = build_task_reminder_body(&text, "2026-07-15");
+        // Just verify it doesn't panic + produces something reasonable.
+        assert!(body.ends_with(" is due 2026-07-15."));
     }
 }

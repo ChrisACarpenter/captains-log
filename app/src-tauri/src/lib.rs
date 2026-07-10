@@ -495,6 +495,10 @@ pub fn run() {
             // Manage the reminder task handle so commands can restart the
             // scheduler in-process when settings change.
             app.manage(reminders::ReminderHandle::new());
+            // Phase 3e — separate handle for the task-reminder scheduler,
+            // so the two loops abort + respawn independently on settings
+            // changes.
+            app.manage(reminders::TaskReminderHandle::new());
 
             // Spawn the weekly reminder task if enabled.
             {
@@ -510,6 +514,16 @@ pub fn run() {
                     &reminder_handle,
                     journal_settings.reminder,
                     journal_settings.user_name,
+                );
+                // Spawn the task-reminder scheduler too. It reads
+                // settings + sidecars on each wake, so we don't need
+                // to pass config through — but the initial spawn call
+                // keeps parity with restart_reminder_task's contract
+                // (called at startup + on settings save).
+                let task_reminder_handle = app.state::<reminders::TaskReminderHandle>();
+                reminders::restart_task_reminder_task(
+                    app.handle().clone(),
+                    &task_reminder_handle,
                 );
             }
 

@@ -26,7 +26,8 @@ use crate::notes::{
     replace_weekly_summary_in_file, weekly_file_scaffold, CaptureDraft, Note, WeeklySummary,
 };
 use crate::reminders::{
-    request_notification_authorization, restart_reminder_task, ReminderHandle,
+    request_notification_authorization, restart_reminder_task, restart_task_reminder_task,
+    ReminderHandle, TaskReminderHandle,
 };
 use crate::sent_log::{
     get_sent_record as load_sent_record, hash_weekly_summary, upsert_sent_record, SentRecord,
@@ -1235,7 +1236,7 @@ const PRE_SLICE6_BACKUP_DIR: &str = "pre-slice6-backups";
 ///
 /// Returns `Ok(None)` when the file doesn't exist — same posture as
 /// `backend.read_week`.
-async fn read_migrated_weekly_content<B: StorageBackend + ?Sized>(
+pub(crate) async fn read_migrated_weekly_content<B: StorageBackend + ?Sized>(
     backend: &B,
     year: u32,
     week: u32,
@@ -4028,6 +4029,10 @@ pub struct SettingsBundle {
     /// task list. See `settings::TaskListSettings` for the field-level
     /// docs + defaults.
     pub task_list: TaskListSettings,
+    /// Phase 3e — controls the OS notification that fires "X days
+    /// before due, at time Y" for tasks with a due date. See
+    /// `settings::TaskReminderSettings`.
+    pub task_reminder: crate::settings::TaskReminderSettings,
 }
 
 #[tauri::command]
@@ -4074,6 +4079,7 @@ pub async fn get_settings(
         mail_body_delivery: journal_settings.mail_body_delivery,
         colorful_labels: journal_settings.colorful_labels,
         task_list: journal_settings.task_list,
+        task_reminder: journal_settings.task_reminder,
     })
 }
 
@@ -4184,6 +4190,10 @@ pub struct UpdateSettingsInput {
     /// the new tab yet still round-trips other settings.
     #[serde(default)]
     pub task_list: TaskListSettings,
+    /// Tasks tab (Phase 3e) — task-reminder settings. `serde(default)`
+    /// so an older frontend that omits the field still round-trips.
+    #[serde(default)]
+    pub task_reminder: crate::settings::TaskReminderSettings,
 }
 
 /// Writes both settings files. If the user picked a journal root different
@@ -4195,6 +4205,7 @@ pub async fn complete_first_run(
     app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     reminder_handle: State<'_, ReminderHandle>,
+    task_reminder_handle: State<'_, TaskReminderHandle>,
     input: CompleteFirstRunInput,
 ) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -4270,6 +4281,12 @@ pub async fn complete_first_run(
         input.reminder,
         input.user_name,
     );
+    // 5b. Spawn the task-reminder scheduler too. First-run doesn't
+    //     collect task-reminder settings (they get the defaults from
+    //     JournalSettings::default). Kicks the loop off so a user who
+    //     adds a task with a due date right after onboarding gets
+    //     their reminder.
+    restart_task_reminder_task(app.clone(), &task_reminder_handle);
 
     // 6. Broadcast so any open window (main, capture) can re-fetch and apply
     //    the new settings immediately — theme, reminder position, etc.
@@ -4290,6 +4307,7 @@ pub async fn update_settings(
     app: AppHandle,
     storage_state: State<'_, SharedStorage>,
     reminder_handle: State<'_, ReminderHandle>,
+    task_reminder_handle: State<'_, TaskReminderHandle>,
     input: UpdateSettingsInput,
 ) -> Result<(), String> {
     let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -4356,6 +4374,7 @@ pub async fn update_settings(
         mail_body_delivery: input.mail_body_delivery,
         colorful_labels: input.colorful_labels,
         task_list: input.task_list.clone(),
+        task_reminder: input.task_reminder.clone(),
     };
     journal_settings
         .save(&chosen_storage)
@@ -4384,6 +4403,11 @@ pub async fn update_settings(
         input.reminder,
         input.user_name,
     );
+    // 5b. Phase 3e — restart the task-reminder scheduler too. The
+    //     loop re-reads config on each wake, but an explicit restart
+    //     picks up "days_before"/"time" changes immediately instead
+    //     of waiting up to MAX_SLEEP_CHUNK.
+    restart_task_reminder_task(app.clone(), &task_reminder_handle);
 
     // 6. Broadcast so all windows refresh (theme on capture popup, Noot
     //    appears/disappears on the week stripe, etc.) without waiting for

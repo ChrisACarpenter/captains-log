@@ -104,6 +104,16 @@
     autoImportCompleted: boolean;
   };
 
+  // Phase 3e — controls the OS notification that fires "X days
+  // before due, at time Y" for tasks with a due date. Mirrors the
+  // Rust TaskReminderSettings struct in settings.rs.
+  type TaskReminderSettings = {
+    enabled: boolean;
+    daysBefore: number;
+    hour: number;
+    minute: number;
+  };
+
   type Settings = {
     firstRun: boolean;
     journalRoot: string;
@@ -129,6 +139,8 @@
     colorfulLabels: boolean;
     // Slice 4 — display prefs for the landing-page task list.
     taskList: TaskListSettings;
+    // Phase 3e — controls the task-due-date reminder notifications.
+    taskReminder: TaskReminderSettings;
   };
 
   type TabKey = 'general' | 'reminders' | 'mail' | 'theme' | 'labels' | 'tasks';
@@ -220,6 +232,12 @@
   let taskHideTaskList = $state(false);
   let taskAutoRolloverEnabled = $state(true);
   let taskAutoImportCompleted = $state(true);
+  // Phase 3e — task reminder settings. `taskReminderDaysBeforeInput`
+  // is a STRING (bound to a `<input type="number">`) so empty maps
+  // to 0 (spec: empty = day-of); the save flow parses to u8.
+  let taskReminderEnabled = $state(true);
+  let taskReminderDaysBeforeInput = $state('0');
+  let taskReminderTimeInput = $state('09:00');
 
   // Rebuild-task-index state — mirrors isRebuildingIndex from the
   // Labels tab. `taskRebuildReceipt` renders inline in the tab body
@@ -1367,6 +1385,13 @@
       taskHideTaskList = s.taskList?.hideTaskList ?? false;
       taskAutoRolloverEnabled = s.taskList?.autoRolloverEnabled ?? true;
       taskAutoImportCompleted = s.taskList?.autoImportCompleted ?? true;
+      // Phase 3e — Task reminder settings.
+      taskReminderEnabled = s.taskReminder?.enabled ?? true;
+      const dbRaw = s.taskReminder?.daysBefore ?? 0;
+      taskReminderDaysBeforeInput = dbRaw === 0 ? '0' : String(dbRaw);
+      const hh = s.taskReminder?.hour ?? 9;
+      const mm = s.taskReminder?.minute ?? 0;
+      taskReminderTimeInput = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
       // Phase 2.8 — load the persisted custom palette (if any) so toggling
       // into Custom restores the user's last-saved theme verbatim.
       persistedCustomTheme = s.customTheme ?? null;
@@ -1521,6 +1546,20 @@
             hideTaskList: taskHideTaskList,
             autoRolloverEnabled: taskAutoRolloverEnabled,
             autoImportCompleted: taskAutoImportCompleted
+          },
+          taskReminder: {
+            enabled: taskReminderEnabled,
+            // Empty input → 0 (day-of), matching the spec. Parse as
+            // base-10 and clamp non-numeric junk to 0. Range 0..=30
+            // — anything higher is nonsense for a task-reminder and
+            // the number input's max attribute pins it too.
+            daysBefore: (() => {
+              const parsed = Number.parseInt(taskReminderDaysBeforeInput.trim() || '0', 10);
+              if (!Number.isFinite(parsed) || parsed < 0) return 0;
+              return Math.min(parsed, 30);
+            })(),
+            hour: Number.parseInt(taskReminderTimeInput.split(':')[0] ?? '9', 10) || 9,
+            minute: Number.parseInt(taskReminderTimeInput.split(':')[1] ?? '0', 10) || 0
           }
         }
       });
@@ -2596,6 +2635,61 @@
             </div>
           </div>
 
+          <!--
+            Phase 3e — Task Reminders. Layered on top of the due-date
+            feature: when a task has a due date, this fires an OS
+            notification "X days before due, at time Y". Reuses the
+            journal-reminder scheduling architecture. Same "must be
+            running to fire" constraint as the journal reminder.
+          -->
+          <div class="section">
+            <h2 class="section-title">Task Reminders</h2>
+            <TipBubble>
+              When a task has a due date, Captain's Log can fire an
+              OS notification ahead of the deadline. Reminders fire
+              only while the app is running (same as the weekly
+              journal reminder). Completing a task cancels its
+              pending reminder automatically.
+            </TipBubble>
+            <div class="checkbox-stack">
+              <Checkbox
+                bind:checked={taskReminderEnabled}
+                label="Enable Task Reminders"
+                description="When off, no task-reminder notifications fire regardless of the days-before + time settings below. Due-date chips on the task list still work."
+              />
+            </div>
+            {#if taskReminderEnabled}
+              <div class="field">
+                <label for="task-reminder-days-before" class="field-heading">Days before due</label>
+                <input
+                  id="task-reminder-days-before"
+                  class="text-input days-before-input"
+                  type="number"
+                  min="0"
+                  max="30"
+                  step="1"
+                  bind:value={taskReminderDaysBeforeInput}
+                />
+                <p class="field-hint">
+                  How many days before the due date the reminder fires.
+                  <strong>0</strong> (or empty) means the day the task is due.
+                </p>
+              </div>
+              <div class="field">
+                <label for="task-reminder-time" class="field-heading">Time of day</label>
+                <input
+                  id="task-reminder-time"
+                  class="text-input time-input"
+                  type="time"
+                  bind:value={taskReminderTimeInput}
+                />
+                <p class="field-hint">
+                  Local time at which reminders fire on their computed date.
+                </p>
+              </div>
+            {/if}
+          </div>
+
           <div class="section">
             <h2 class="section-title">Rebuild Task Index</h2>
             <TipBubble>
@@ -2918,6 +3012,14 @@
     /* Native time inputs are wider than they need to be by default — clamp
        so it doesn't dominate the form rhythm. */
     max-width: 160px;
+  }
+
+  /* Phase 3e — days-before number input. Same clamp reasoning as the
+     time input above — number spinners default to a wide affordance
+     that dominates the form rhythm at the value ranges we care about
+     (0..30). */
+  .days-before-input {
+    max-width: 120px;
   }
 
   .hint {

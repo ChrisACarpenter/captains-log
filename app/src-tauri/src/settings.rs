@@ -534,6 +534,47 @@ impl Default for TaskListSettings {
     }
 }
 
+/// Phase 3e — controls the "X days before due, at time Y"
+/// notification that fires for any incomplete task with a due date.
+///
+/// Reuses the journal-reminder scheduling architecture: a
+/// `tokio::spawn` background loop, chunked polling against
+/// `Local::now()` for DST + system-sleep safety. Fires only while
+/// the app is running (same contract as the journal reminder — see
+/// `reminders.rs` module doc).
+///
+/// One global config applies to every dated task; per-task overrides
+/// are a follow-up if the global default proves too coarse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskReminderSettings {
+    pub enabled: bool,
+    /// Days BEFORE the task's due date at which the reminder fires.
+    /// `0` means "on the due date itself" (day-of). Frontend surfaces
+    /// this as a number input where empty = 0.
+    pub days_before: u8,
+    /// Hour of day (0..=23) at which the reminder fires on the
+    /// computed fire date.
+    pub hour: u8,
+    /// Minute of hour (0..=59). Combined with `hour` to make the
+    /// LOCAL time-of-day for the notification.
+    pub minute: u8,
+}
+
+impl Default for TaskReminderSettings {
+    /// Default posture: reminders on, fire on the due date itself at
+    /// 09:00 local. Matches the "sensible default" bar without
+    /// nagging the user before they've set anything up.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            days_before: 0,
+            hour: 9,
+            minute: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JournalSettings {
@@ -611,6 +652,12 @@ pub struct JournalSettings {
     /// [`TaskListSettings`].
     #[serde(default)]
     pub task_list: TaskListSettings,
+    /// Phase 3e — controls the OS notification that fires "X days
+    /// before due, at time Y" for any incomplete task with a due
+    /// date. `#[serde(default)]` so pre-Phase-3e settings.json
+    /// upgrades cleanly; see [`TaskReminderSettings`] for defaults.
+    #[serde(default)]
+    pub task_reminder: TaskReminderSettings,
 }
 
 impl Default for JournalSettings {
@@ -631,6 +678,7 @@ impl Default for JournalSettings {
             mail_body_delivery: MailBodyDelivery::default(),
             colorful_labels: false,
             task_list: TaskListSettings::default(),
+            task_reminder: TaskReminderSettings::default(),
         }
     }
 }
@@ -1309,6 +1357,68 @@ mod tests {
         assert!(!s.hide_task_list);
         assert!(s.auto_rollover_enabled);
         assert!(s.auto_import_completed);
+    }
+
+    #[test]
+    fn task_reminder_settings_defaults_match_documented_shape() {
+        // Phase 3e defaults: reminders on, fire on the due date
+        // itself at 09:00 local.
+        let s = TaskReminderSettings::default();
+        assert!(s.enabled);
+        assert_eq!(s.days_before, 0);
+        assert_eq!(s.hour, 9);
+        assert_eq!(s.minute, 0);
+    }
+
+    #[tokio::test]
+    async fn journal_settings_legacy_without_task_reminder_loads_with_defaults() {
+        // A pre-Phase-3e settings.json has no `taskReminder` field.
+        // `#[serde(default)]` on JournalSettings.task_reminder is
+        // responsible for filling in TaskReminderSettings::default()
+        // when the field is absent.
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let legacy_json = r#"{
+          "version": 1,
+          "userName": "Chris",
+          "reminder": { "enabled": false, "daysOfWeek": [4], "hour": 16, "minute": 0 }
+        }"#;
+        backend
+            .write_metadata(JOURNAL_SETTINGS_FILENAME, legacy_json)
+            .await
+            .unwrap();
+
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert!(loaded.task_reminder.enabled);
+        assert_eq!(loaded.task_reminder.days_before, 0);
+        assert_eq!(loaded.task_reminder.hour, 9);
+        assert_eq!(loaded.task_reminder.minute, 0);
+    }
+
+    #[tokio::test]
+    async fn journal_settings_task_reminder_round_trips() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let original = JournalSettings {
+            task_reminder: TaskReminderSettings {
+                enabled: false,
+                days_before: 3,
+                hour: 17,
+                minute: 30,
+            },
+            ..JournalSettings::default()
+        };
+        original.save(&backend).await.unwrap();
+
+        let loaded = JournalSettings::load(&backend).await.unwrap();
+        assert!(!loaded.task_reminder.enabled);
+        assert_eq!(loaded.task_reminder.days_before, 3);
+        assert_eq!(loaded.task_reminder.hour, 17);
+        assert_eq!(loaded.task_reminder.minute, 30);
     }
 
     #[tokio::test]
