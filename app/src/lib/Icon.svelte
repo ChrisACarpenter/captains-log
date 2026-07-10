@@ -26,7 +26,10 @@
     | 'calendar'
     | 'help'
     | 'info'
-    | 'search';
+    | 'search'
+    | 'pencil'
+    | 'trash'
+    | 'check';
 
   let {
     name,
@@ -112,5 +115,19 @@
   {:else if name === 'search'}
     <circle cx="11" cy="11" r="8" />
     <path d="m21 21-4.35-4.35" />
+  {:else if name === 'pencil'}
+    <!-- Lucide "pencil" — inline task edit affordance -->
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+  {:else if name === 'trash'}
+    <!-- Lucide "trash-2" — inline task delete affordance -->
+    <polyline points="3 6 5 6 21 6" />
+    <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
+    <path d="M10 11v6" />
+    <path d="M14 11v6" />
+    <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
+  {:else if name === 'check'}
+    <!-- Simple checkmark used inside the task-list checkbox toggle -->
+    <polyline points="5 12 10 17 19 7" />
   {/if}
 </svg>

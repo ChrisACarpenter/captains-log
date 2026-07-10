@@ -11,6 +11,9 @@
   import InputField from '$lib/InputField.svelte';
   import RolloverReceipt from '$lib/RolloverReceipt.svelte';
   import DatePickerPopover from '$lib/DatePickerPopover.svelte';
+  import ConfirmDialog from '$lib/ConfirmDialog.svelte';
+  import TaskMetaChip from '$lib/TaskMetaChip.svelte';
+  import TaskRowActionButton from '$lib/TaskRowActionButton.svelte';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -136,18 +139,6 @@
   let dueDatePickerTask = $state<TaskListEntry | null>(null);
   let dueDatePickerAnchor = $state<HTMLElement | null>(null);
   let dueDatePickerBusy = $state(false);
-  // DOM handle for the Delete button so we can focus it when the
-  // confirmation modal opens. Modal itself focuses the dialog card
-  // (tabindex=-1) — for a two-button destructive prompt, moving
-  // focus to the primary action (Delete) is the standard pattern.
-  // Users can Escape or Tab-to-Cancel just as easily.
-  let deleteBtnEl = $state<HTMLButtonElement | null>(null);
-  $effect(() => {
-    if (deleteConfirmTask !== null && deleteBtnEl) {
-      // Microtask hop so we run AFTER Modal's own focus() on the card.
-      queueMicrotask(() => deleteBtnEl?.focus());
-    }
-  });
 
   // Slice 6b inline-edit state. Exactly one row can be in edit mode at
   // a time (identified by `editingKey`); its input field is bound to
@@ -1069,135 +1060,73 @@
                     <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                     <span class="task-text">{@html t.textHtml}</span>
                     {#if t.originalWeek}
-                      {@const originLabel = formatOriginLabel(t)}
-                      <!--
-                        Slice 5 provenance chip. Present only when
-                        the task was rolled over from a prior week
-                        (originalWeek populated + different from
-                        current). Sits next to task text so the paper
-                        trail is glanceable without dominating the
-                        row.
-                      -->
-                      <span
-                        class="task-origin"
+                      <TaskMetaChip
+                        variant="origin"
+                        label={formatOriginLabel(t)}
                         title={`Originally created in Week ${t.originalWeek.week}, ${t.originalWeek.year}`}
-                      >
-                        {originLabel}
-                      </span>
+                      />
                     {/if}
                     {#if taskListPrefs.showCompletedTimestamp && t.isCompleted}
                       {@const label = formatRelativeCompleted(t.completedAt)}
                       {#if label}
-                        <span class="task-time" title={t.completedAt ?? ''}>
+                        <TaskMetaChip
+                          variant="time"
                           {label}
-                        </span>
+                          title={t.completedAt ?? ''}
+                        />
                       {/if}
                     {/if}
                     {#if t.dueDate && !t.isCompleted}
-                      {@const overdue = t.dueDate < todayIso()}
                       <!--
                         Phase 3e due-date chip. Rendered only on
-                        INCOMPLETE rows — a completed task's due
-                        date is history, and the chip becomes needless
-                        visual clutter once the task is done. The
-                        sidecar entry sticks around across check /
-                        uncheck (toggle re-key preserves it) so the
-                        chip returns intact if the user unchecks.
-                        The `.overdue` variant flips the chip to
-                        maroon tones; the same signal is reinforced
-                        by the row landing under the "Overdue"
-                        section header.
+                        INCOMPLETE rows — a completed task's due date
+                        is history, and the chip becomes needless
+                        clutter once the task is done. Sidecar entry
+                        survives check/uncheck (toggle re-key
+                        preserves it), so unchecking restores the
+                        chip. The overdue variant is reinforced by
+                        the row landing under the "Overdue" section
+                        header on the parent list.
                       -->
-                      <span
-                        class="task-due-chip"
-                        class:overdue
+                      <TaskMetaChip
+                        variant={t.dueDate < todayIso() ? 'due-overdue' : 'due'}
+                        label={formatDueDateLabel(t.dueDate)}
                         title={`Due ${t.dueDate}`}
-                      >
-                        {formatDueDateLabel(t.dueDate)}
-                      </span>
+                      />
                     {/if}
                     <!--
                       Slice 6b/6c/3e row actions. Order (text → right):
-                      pencil (edit), calendar (due date), trash (delete).
-                      Destructive action stays farthest from primary
-                      tap targets. All three disabled while a different
-                      row is being edited or a delete confirmation is
-                      open so keyboard focus can't wander.
+                      pencil (edit), calendar (due date), trash
+                      (delete). Destructive action stays farthest from
+                      primary tap targets. All three disabled while a
+                      different row is being edited or a delete
+                      confirmation is open so keyboard focus can't
+                      wander.
                     -->
-                    <button
-                      type="button"
-                      class="task-edit-btn"
-                      aria-label={`Edit task: ${t.text}`}
+                    <TaskRowActionButton
+                      icon="pencil"
+                      variant="neutral"
+                      ariaLabel={`Edit task: ${t.text}`}
                       title="Edit task"
                       disabled={togglingKeys[key] === true || editingKey !== null}
                       onclick={() => openEdit(t)}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="14"
-                        height="14"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <path d="M12 20h9" />
-                        <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      class="task-due-btn"
-                      aria-label={t.dueDate ? `Change due date for: ${t.text}` : `Set a due date for: ${t.text}`}
+                    />
+                    <TaskRowActionButton
+                      icon="calendar"
+                      variant="accent"
+                      ariaLabel={t.dueDate ? `Change due date for: ${t.text}` : `Set a due date for: ${t.text}`}
                       title={t.dueDate ? 'Change due date' : 'Set a due date'}
                       disabled={togglingKeys[key] === true || editingKey !== null || deleteConfirmTask !== null || dueDatePickerTask !== null}
                       onclick={(e) => openDueDatePicker(t, e.currentTarget as HTMLElement)}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="14"
-                        height="14"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                        <line x1="16" y1="2" x2="16" y2="6" />
-                        <line x1="8" y1="2" x2="8" y2="6" />
-                        <line x1="3" y1="10" x2="21" y2="10" />
-                      </svg>
-                    </button>
-                    <button
-                      type="button"
-                      class="task-delete-btn"
-                      aria-label={`Delete task: ${t.text}`}
+                    />
+                    <TaskRowActionButton
+                      icon="trash"
+                      variant="destructive"
+                      ariaLabel={`Delete task: ${t.text}`}
                       title="Delete task"
                       disabled={togglingKeys[key] === true || editingKey !== null || deleteConfirmTask !== null}
                       onclick={() => openDeleteConfirm(t)}
-                    >
-                      <svg
-                        viewBox="0 0 24 24"
-                        width="14"
-                        height="14"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                        aria-hidden="true"
-                      >
-                        <polyline points="3 6 5 6 21 6" />
-                        <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6" />
-                        <path d="M10 11v6" />
-                        <path d="M14 11v6" />
-                        <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
+                    />
                   {/if}
                 </li>
                 {#if isEditing && editError}
@@ -1300,55 +1229,43 @@
       </form>
     </Modal>
 
-    <!--
-      Slice 6c delete confirmation. Same Modal shell as Add Task,
-      but the primary action is destructive: btn-ruby carries the
-      "you're about to delete this" weight; Cancel is btn-marble
-      (neutral) so the color mapping stays predictable — red is
-      always danger, never escape.
-    -->
-    <Modal
-      open={deleteConfirmTask !== null}
-      onClose={closeDeleteConfirm}
-      title="Delete Task"
-      blockDismissal={deletingTask}
-    >
-      {#if deleteConfirmTask}
-        <div class="delete-confirm">
-          <p class="delete-confirm-lead">
+    {#if deleteConfirmTask}
+      <!--
+        Slice 6c delete confirmation. Standard ConfirmDialog shell —
+        matches how LabelDetailsModal handles rename / delete confirms
+        elsewhere in the app. Body snippet renders the task text in a
+        blockquote so the user sees exactly what they're about to
+        delete; error TipBubble stacks above the buttons on failure.
+      -->
+      <ConfirmDialog
+        title="Delete Task"
+        confirmLabel={deletingTask ? 'Deleting…' : 'Delete'}
+        confirmVariant="ruby"
+        cancelLabel="Cancel"
+        cancelVariant="marble"
+        onConfirm={() => void submitDelete()}
+        onCancel={closeDeleteConfirm}
+      >
+        {#snippet body()}
+          <p>
             Delete this task? Its completion timestamp and rollover
             history will be dropped with it.
           </p>
           <blockquote class="delete-confirm-quote">
-            {deleteConfirmTask.text}
+            <!-- Non-null assertion: the snippet only renders inside the
+                 outer {#if deleteConfirmTask}, so this is defined here.
+                 Svelte's snippet closures don't carry the outer TS
+                 narrowing through, hence the explicit `!`. -->
+            {deleteConfirmTask!.text}
           </blockquote>
           {#if deleteError}
             <TipBubble heading="Couldn't delete that task">
               {deleteError}
             </TipBubble>
           {/if}
-          <div class="delete-confirm-actions">
-            <button
-              type="button"
-              class="btn btn-ruby"
-              bind:this={deleteBtnEl}
-              onclick={() => void submitDelete()}
-              disabled={deletingTask}
-            >
-              {deletingTask ? 'Deleting…' : 'Delete'}
-            </button>
-            <button
-              type="button"
-              class="btn btn-marble"
-              onclick={closeDeleteConfirm}
-              disabled={deletingTask}
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
-      {/if}
-    </Modal>
+        {/snippet}
+      </ConfirmDialog>
+    {/if}
 
     {#if dueDatePickerTask && dueDatePickerAnchor}
       <!--
@@ -1578,66 +1495,6 @@
     word-break: break-word;
   }
 
-  /* Small "checked Xh ago" chip on completed rows when the timestamp
-     toggle is on. Muted color + smaller size so it complements
-     rather than competes with the task text. `title` on the span
-     carries the raw ISO timestamp for anyone who wants precision. */
-  .task-time {
-    flex-shrink: 0;
-    font-size: var(--text-caption);
-    color: var(--text-muted);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  /* Slice 5 origin chip — subtle pill that shows a rolled-over
-     task's provenance (e.g. "from W26"). Same visual weight as
-     .task-time so multiple chips on one row read as a coherent
-     metadata group. Accent-primary-text tint separates provenance
-     from time (which uses text-muted) so the two are visually
-     distinguishable at a glance. */
-  .task-origin {
-    flex-shrink: 0;
-    font-size: var(--text-caption);
-    color: var(--accent-primary-text);
-    white-space: nowrap;
-    /* Border-less pill; the color alone carries the "chip" cue. */
-    font-style: italic;
-  }
-
-  /* Slice 6b pencil edit button. Sits at the row's trailing edge,
-     kept small + low-contrast so it doesn't compete with the task
-     text or the origin/time chips. Focus + hover bump the opacity
-     so keyboard-only users get clear feedback without a permanent
-     visual weight. */
-  .task-edit-btn {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0.55;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease;
-  }
-  .task-edit-btn:hover,
-  .task-edit-btn:focus-visible {
-    opacity: 1;
-    background: color-mix(in srgb, var(--text-muted) 10%, transparent);
-    border-color: var(--border-structural);
-    outline: none;
-  }
-  .task-edit-btn:disabled {
-    opacity: 0.25;
-    cursor: default;
-  }
-
   /* Inline edit input. Matches .task-text's flex:1 so the input
      occupies the same slot as the text span it replaces. Border +
      background make it clearly "in edit mode" without needing a
@@ -1676,97 +1533,6 @@
     color: var(--accent-danger, #b32d2d);
   }
 
-  /* Slice 6c trash button. Same shape + sizing as .task-edit-btn so
-     the two row actions form a coherent trailing-edge pair, but the
-     hover tint leans red to signal destructiveness. */
-  .task-delete-btn {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0.55;
-    transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease, color 120ms ease;
-  }
-  .task-delete-btn:hover,
-  .task-delete-btn:focus-visible {
-    opacity: 1;
-    background: color-mix(in srgb, var(--brand-maroon) 12%, transparent);
-    border-color: color-mix(in srgb, var(--brand-maroon) 40%, transparent);
-    color: var(--brand-maroon);
-    outline: none;
-  }
-  .task-delete-btn:disabled {
-    opacity: 0.25;
-    cursor: default;
-  }
-
-  /* Phase 3e — calendar button. Same shape/size as edit + trash so
-     the three row-actions form a coherent trailing-edge group. Hover
-     leans accent-primary (task-list feature color) instead of maroon
-     (which is destructive) or muted (neutral). */
-  .task-due-btn {
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0.55;
-    transition: opacity 120ms ease, background 120ms ease,
-      border-color 120ms ease, color 120ms ease;
-  }
-  .task-due-btn:hover,
-  .task-due-btn:focus-visible {
-    opacity: 1;
-    background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
-    border-color: color-mix(in srgb, var(--accent-primary) 40%, transparent);
-    color: var(--accent-primary-text);
-    outline: none;
-  }
-  .task-due-btn:disabled {
-    opacity: 0.25;
-    cursor: default;
-  }
-
-  /* Phase 3e — due-date chip. Same rhythm as .task-origin +
-     .task-time so multi-chip rows stay coherent. Accent-primary-text
-     for on-time (echoes the calendar icon color); the .overdue
-     variant flips to maroon tones + a stronger background so an
-     overdue row is impossible to miss even without the Overdue
-     header. `title` carries the raw ISO date for anyone who wants
-     precision. */
-  .task-due-chip {
-    flex-shrink: 0;
-    font-size: var(--text-caption);
-    color: var(--accent-primary-text);
-    white-space: nowrap;
-    padding: 1px 6px;
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
-  }
-  .task-due-chip.overdue {
-    /* --brand-maroon-text is theme-adjusted for readability: lifted
-       to a bright red in dark theme, kept as the darker base maroon
-       in light theme. See app.css. */
-    color: var(--brand-maroon-text);
-    background: color-mix(in srgb, var(--brand-maroon-text) 18%, transparent);
-    font-weight: 600;
-  }
-
   /* Phase 3e — Overdue section header. Same visual as the other
      group headers (small caps + hairline underline) but the label
      itself + underline tint maroon so the section reads as
@@ -1776,36 +1542,19 @@
     border-bottom-color: color-mix(in srgb, var(--brand-maroon-text) 45%, transparent);
   }
 
-  /* Slice 6c delete-confirm modal body. Vertical stack of lead
-     copy → quoted task text → optional error tip → action row.
-     Matches the add-task-form's rhythm so the two modals feel like
-     siblings. */
-  .delete-confirm {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-  .delete-confirm-lead {
-    margin: 0;
-  }
-  /* Quoted task text — a subtle inset left border echoes the "this
-     is what you're about to delete" framing without stealing focus
-     from the action buttons below. `--bg-elevated` (rather than a
-     low-alpha color-mix on brand-maroon) keeps the panel legible in
-     dark theme; the maroon accent stripe carries the destructive
-     signaling. */
+  /* Quoted task text inside the delete-confirm ConfirmDialog body.
+     A subtle inset left border echoes the "this is what you're
+     about to delete" framing without stealing focus from the
+     action buttons below. `--bg-elevated` (rather than a low-alpha
+     color-mix on brand-maroon) keeps the panel legible in dark
+     theme; the maroon accent stripe carries the destructive cue. */
   .delete-confirm-quote {
-    margin: 0;
+    margin: 0 0 var(--space-3);
     padding: var(--space-2) var(--space-3);
     border-left: 3px solid var(--brand-maroon);
     background: var(--bg-elevated);
     border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
     font-style: italic;
     word-break: break-word;
-  }
-  .delete-confirm-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: var(--space-2);
   }
 </style>
