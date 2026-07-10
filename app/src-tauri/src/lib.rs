@@ -430,6 +430,7 @@ pub fn run() {
             commands::toggle_task,
             commands::edit_task,
             commands::delete_task,
+            commands::set_task_due_date,
             commands::import_completed_tasks,
             commands::check_and_apply_auto_task_import,
             commands::append_task_to_current_week,

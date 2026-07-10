@@ -1333,6 +1333,12 @@ pub struct TaskListEntry {
     /// uses this to render a "from W26" chip so users see which
     /// entries carried forward.
     pub original_week: Option<YearWeek>,
+    /// Phase 3e — optional due date (LOCAL YYYY-MM-DD). Joined from
+    /// the `TaskDueDates` sidecar at read time. `None` for tasks
+    /// without a date set. The frontend renders a "Due …" chip when
+    /// present, and uses it plus `today_local()` to decide whether
+    /// the task lands in the "Overdue" or "Incomplete Tasks" group.
+    pub due_date: Option<String>,
 }
 
 /// List every task in the current week's `### Plans and priorities
@@ -1385,6 +1391,12 @@ pub(crate) async fn list_tasks_impl<B: StorageBackend + ?Sized>(
     let rollover_log = RolloverLog::load(backend)
         .await
         .map_err(|e| e.to_string())?;
+    // Phase 3e — join due-date entries too. Empty file / no entries
+    // for this week → every task returns `due_date: None`, which the
+    // frontend renders as "no chip".
+    let due_dates = crate::tasks::TaskDueDates::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let entries = parsed
         .into_iter()
@@ -1408,6 +1420,9 @@ pub(crate) async fn list_tasks_impl<B: StorageBackend + ?Sized>(
                     year: p.original_year,
                     week: p.original_week,
                 });
+            let due_date = due_dates
+                .find(year, week, &t.text_hash, t.ordinal)
+                .map(|d| d.due_date.clone());
             let text_html = render_task_text_inline(&t.text);
             TaskListEntry {
                 year,
@@ -1419,6 +1434,7 @@ pub(crate) async fn list_tasks_impl<B: StorageBackend + ?Sized>(
                 is_completed: t.is_completed,
                 completed_at,
                 original_week,
+                due_date,
             }
         })
         .collect();
@@ -1638,6 +1654,94 @@ pub(crate) async fn toggle_task_impl<B: StorageBackend + ?Sized>(
         .save(backend)
         .await
         .map_err(|e| e.to_string())?;
+
+    // Due-date re-key for the toggled task's hash group. Toggle
+    // moves ONE task line between anchor sub-lists; the moved task's
+    // NEW file position is at the END of its target state's same-
+    // hash section (see toggle_task_in_tasks_body). This means the
+    // simple "zip old_all with new_all" pattern that works for edit
+    // is WRONG for toggle: when a same-hash duplicate moves, other
+    // same-hash siblings shift into the vacated slot, so old_all[i]
+    // and new_all[i] can be different tasks.
+    //
+    // Correct algorithm: build a positional slot list over OLD
+    // same-hash tasks (with each slot carrying its due date via
+    // sidecar lookup), then apply the toggle as a move-from-
+    // old_position-to-new_position on the slot list. The result is
+    // aligned with NEW same-hash task positions, so we can re-emit
+    // sidecar entries against the fresh ordinals.
+    let old_same_hash_tasks: Vec<&crate::tasks::ParsedTask> = old_all
+        .iter()
+        .filter(|t| t.text_hash == hash_str)
+        .collect();
+    let new_same_hash_tasks: Vec<&crate::tasks::ParsedTask> = new_tasks
+        .iter()
+        .filter(|t| t.text_hash == hash_str)
+        .collect();
+    debug_assert_eq!(
+        old_same_hash_tasks.len(),
+        new_same_hash_tasks.len(),
+        "toggle must not add or remove task lines"
+    );
+    if !old_same_hash_tasks.is_empty() {
+        match crate::tasks::TaskDueDates::load(backend).await {
+            Ok(mut dd) => {
+                let mut old_dates: Vec<Option<String>> = old_same_hash_tasks
+                    .iter()
+                    .map(|t| {
+                        dd.find(year, week, &hash_str, t.ordinal)
+                            .map(|d| d.due_date.clone())
+                    })
+                    .collect();
+                let old_idx = old_same_hash_tasks
+                    .iter()
+                    .position(|t| t.ordinal == ordinal);
+                // The moved task's NEW position within the same-hash
+                // group is at the END of the NEW state's run — its
+                // rposition among tasks whose is_completed == new_state.
+                let new_idx = new_same_hash_tasks
+                    .iter()
+                    .rposition(|t| t.is_completed == new_state);
+                if let (Some(oi), Some(ni)) = (old_idx, new_idx) {
+                    let moved = old_dates.remove(oi);
+                    old_dates.insert(ni.min(old_dates.len()), moved);
+                    // Rebuild the (year, week, hash) group in the
+                    // sidecar. Orphan entries under this hash that
+                    // didn't correspond to any task in old_same_hash
+                    // are naturally pruned.
+                    dd.due_dates.retain(|d| {
+                        !(d.year == year && d.week == week && d.text_hash == hash_str)
+                    });
+                    for (i, task) in new_same_hash_tasks.iter().enumerate() {
+                        if let Some(Some(date)) = old_dates.get(i) {
+                            dd.due_dates.push(crate::tasks::TaskDueDate {
+                                year,
+                                week,
+                                text_hash: hash_str.clone(),
+                                ordinal: task.ordinal,
+                                due_date: date.clone(),
+                            });
+                        }
+                    }
+                    if let Err(e) = dd.save(backend).await {
+                        eprintln!(
+                            "[toggle_task] task-due-dates save failed: {e} (rebuild will sweep orphans)"
+                        );
+                    }
+                }
+                // If either old_idx or new_idx is None, something is
+                // deeply wrong upstream — the toggle_task_in_tasks_body
+                // call succeeded but our re-parse can't locate the
+                // task's OLD or NEW position. Leave the sidecar
+                // untouched; Rebuild will reconcile.
+            }
+            Err(e) => {
+                eprintln!(
+                    "[toggle_task] task-due-dates load failed: {e} (skipping due-date re-key)"
+                );
+            }
+        }
+    }
 
     let completed_at = if new_state { Some(now_rfc) } else { None };
     Ok(TaskToggleResult {
@@ -1916,6 +2020,36 @@ pub(crate) async fn edit_task_impl<B: StorageBackend + ?Sized>(
                 );
             }
         }
+
+        // Due-date re-key uses the SAME positional map. Same
+        // failure posture — sidecar loss is a diagnostic issue, not
+        // a data issue (Rebuild can prune orphans; user can re-pick
+        // the date on the row).
+        match crate::tasks::TaskDueDates::load(backend).await {
+            Ok(mut dd) => {
+                for entry in dd.due_dates.iter_mut() {
+                    if entry.year != year || entry.week != week {
+                        continue;
+                    }
+                    if let Some((new_hash, new_ord)) =
+                        key_map.get(&(entry.text_hash.clone(), entry.ordinal))
+                    {
+                        entry.text_hash = new_hash.clone();
+                        entry.ordinal = *new_ord;
+                    }
+                }
+                if let Err(e) = dd.save(backend).await {
+                    eprintln!(
+                        "[edit_task] task-due-dates save failed: {e} (rebuild will sweep orphans)"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "[edit_task] task-due-dates load failed: {e} (skipping due-date re-key)"
+                );
+            }
+        }
     }
 
     Ok(TaskEditResult {
@@ -2084,6 +2218,128 @@ pub(crate) async fn delete_task_impl<B: StorageBackend + ?Sized>(
         }
     }
 
+    // Due-date: same shape as sidecar + provenance. Drop the
+    // deleted task's own entry, then re-key remaining entries via
+    // the positional map so sibling ordinal shifts follow.
+    match crate::tasks::TaskDueDates::load(backend).await {
+        Ok(mut dd) => {
+            dd.remove(year, week, &deleted_hash, ordinal);
+            if !key_map.is_empty() {
+                for entry in dd.due_dates.iter_mut() {
+                    if entry.year != year || entry.week != week {
+                        continue;
+                    }
+                    if let Some((nh, no)) =
+                        key_map.get(&(entry.text_hash.clone(), entry.ordinal))
+                    {
+                        entry.text_hash = nh.clone();
+                        entry.ordinal = *no;
+                    }
+                }
+            }
+            if let Err(e) = dd.save(backend).await {
+                eprintln!(
+                    "[delete_task] task-due-dates save failed: {e} (rebuild will sweep orphans)"
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "[delete_task] task-due-dates load failed: {e} (skipping due-date cleanup)"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// set_task_due_date (Phase 3e)
+// ---------------------------------------------------------------------------
+
+/// Set or clear a task's due date. `due_date = Some("YYYY-MM-DD")`
+/// upserts the entry; `due_date = None` removes it. Validates the
+/// input string via `validate_due_date_input` — malformed dates
+/// return `Err` without touching the sidecar. Requires the task to
+/// exist in the current file so we don't seed orphan entries.
+///
+/// This command does NOT modify the weekly file — the due date lives
+/// entirely in the `TaskDueDates` sidecar. Frontend refetches
+/// `list_tasks` after the invoke to see the change (or the joined
+/// `dueDate` field on the returned entry).
+#[tauri::command]
+pub async fn set_task_due_date(
+    storage_state: State<'_, SharedStorage>,
+    year: u32,
+    week: u32,
+    text_hash: String,
+    ordinal: u32,
+    due_date: Option<String>,
+) -> Result<(), String> {
+    // Write lock — sidecar is a read-modify-write (load → mutate →
+    // save), same reasoning as toggle_task's write lock.
+    let storage = storage_state.write().await;
+    set_task_due_date_impl(
+        &*storage,
+        year,
+        week,
+        &text_hash,
+        ordinal,
+        due_date.as_deref(),
+    )
+    .await
+}
+
+pub(crate) async fn set_task_due_date_impl<B: StorageBackend + ?Sized>(
+    backend: &B,
+    year: u32,
+    week: u32,
+    text_hash: &str,
+    ordinal: u32,
+    due_date: Option<&str>,
+) -> Result<(), String> {
+    // Confirm the task exists in the current file BEFORE writing the
+    // sidecar. Otherwise a stale UI click after the user deleted a
+    // task in another window would seed an immediate orphan entry.
+    // (Rebuild would sweep it, but "make the invalid state
+    // unrepresentable" is nicer.) Read-only path here — no migration
+    // persist, no backup; the sidecar write is orthogonal to any
+    // legacy-file rewrite.
+    let Some((content, _)) = read_migrated_weekly_content(backend, year, week).await? else {
+        return Err(format!("no weekly file for {year}-W{week:02}"));
+    };
+    let summary = parse_weekly_summary(&content);
+    let task_exists = parse_plans_tasks(&summary.tasks_body)
+        .iter()
+        .any(|t| t.text_hash == text_hash && t.ordinal == ordinal);
+    if !task_exists {
+        return Err(
+            "That task couldn't be found in your weekly file — it may have been edited or removed since this list loaded.".to_string(),
+        );
+    }
+
+    let mut due_dates = crate::tasks::TaskDueDates::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+    match due_date {
+        Some(raw) => {
+            // Validation lives on the tasks module so the frontend
+            // can (later) share exactly the same normalization rules
+            // via a mirror function.
+            let canonical = crate::tasks::validate_due_date_input(raw)?;
+            due_dates.upsert(crate::tasks::TaskDueDate {
+                year,
+                week,
+                text_hash: text_hash.to_string(),
+                ordinal,
+                due_date: canonical,
+            });
+        }
+        None => {
+            due_dates.remove(year, week, text_hash, ordinal);
+        }
+    }
+    due_dates.save(backend).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -2857,6 +3113,13 @@ pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
             .map(|t| t.text_hash)
             .collect();
 
+    // Phase 3e — load the due-date sidecar so we can carry entries
+    // forward alongside the tasks themselves. Overdue-in-source =
+    // overdue-in-target: preserve the date verbatim.
+    let mut due_dates = crate::tasks::TaskDueDates::load(backend)
+        .await
+        .map_err(|e| e.to_string())?;
+
     // For each source open-task not already present in the target,
     // append `- [ ] {text}` to the Incomplete anchor and carry
     // provenance forward.
@@ -2880,6 +3143,7 @@ pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
             }
         };
         tasks_copied = tasks_copied.saturating_add(1);
+        let target_ordinal = existing_ordinal_for_tasks_body(&new_tasks_body, &src.text);
 
         // Provenance: if the source task has a provenance entry we
         // inherit `original_*` from it; otherwise the source week
@@ -2894,7 +3158,7 @@ pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
                 year,
                 week,
                 text_hash: src.text_hash.clone(),
-                ordinal: existing_ordinal_for_tasks_body(&new_tasks_body, &src.text),
+                ordinal: target_ordinal,
                 original_year: p.original_year,
                 original_week: p.original_week,
                 original_created_at: p.original_created_at.clone(),
@@ -2903,13 +3167,28 @@ pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
                 year,
                 week,
                 text_hash: src.text_hash.clone(),
-                ordinal: existing_ordinal_for_tasks_body(&new_tasks_body, &src.text),
+                ordinal: target_ordinal,
                 original_year: source_year,
                 original_week: source_week,
                 original_created_at: now.to_rfc3339(),
             },
         };
         log.upsert(provenance);
+
+        // Due date: if the source task had one, copy it to the
+        // target-week key verbatim. Overdue-in-last-week → still
+        // overdue in this week per the locked design.
+        if let Some(src_dd) = due_dates.find(source_year, source_week, &src.text_hash, src.ordinal)
+        {
+            let carried_date = src_dd.due_date.clone();
+            due_dates.upsert(crate::tasks::TaskDueDate {
+                year,
+                week,
+                text_hash: src.text_hash.clone(),
+                ordinal: target_ordinal,
+                due_date: carried_date,
+            });
+        }
     }
 
     // If nothing actually changed, still record the run so we don't
@@ -2942,6 +3221,15 @@ pub(crate) async fn check_and_apply_rollover_impl<B: StorageBackend + ?Sized>(
     log.last_run_to_week = Some(YearWeekKey { year, week });
     log.last_run_at = Some(now.to_rfc3339());
     log.save(backend).await.map_err(|e| e.to_string())?;
+    // Save due-dates last — the file + provenance writes are the
+    // load-bearing ones. Due-date carry is a nice-to-have; if it
+    // fails, the user just has to re-pick a date on the target-week
+    // row and Rebuild will sweep the orphan.
+    if let Err(e) = due_dates.save(backend).await {
+        eprintln!(
+            "[rollover] task-due-dates save failed: {e} (rebuild will sweep orphans; user can re-set dates)"
+        );
+    }
 
     Ok(RolloverApplied {
         applied: true,
@@ -7802,6 +8090,498 @@ mod tests {
         assert!(
             completions.completions.iter().all(|c| !(c.text_hash == foo && c.ordinal == 1)),
             "stale Foo ord=1 entry must be gone"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // set_task_due_date integration tests
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn set_task_due_date_upserts_entry_for_existing_task() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the widget").await;
+
+        let hash = hash_of_task("Ship the widget");
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        let entry = dd.find(year, week, &hash, 0).expect("due-date entry must exist");
+        assert_eq!(entry.due_date, "2026-07-15");
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_none_clears_entry() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the widget").await;
+
+        let hash = hash_of_task("Ship the widget");
+        // Set → clear.
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+        set_task_due_date_impl(&backend, year, week, &hash, 0, None).await.unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert!(
+            dd.find(year, week, &hash, 0).is_none(),
+            "clearing (None) must remove the sidecar entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_second_set_replaces_first() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the widget").await;
+
+        let hash = hash_of_task("Ship the widget");
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-07-22"))
+            .await
+            .unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(dd.due_dates.len(), 1, "second set must overwrite, not append");
+        assert_eq!(
+            dd.find(year, week, &hash, 0).unwrap().due_date,
+            "2026-07-22"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_errors_on_missing_task_hash() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Real task").await;
+
+        let err = set_task_due_date_impl(
+            &backend,
+            year,
+            week,
+            "not-a-real-hash",
+            0,
+            Some("2026-07-15"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("couldn't be found"), "err: {err}");
+
+        // Sidecar must be untouched.
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(dd.due_dates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_errors_on_missing_weekly_file() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let err = set_task_due_date_impl(
+            &backend,
+            year,
+            week,
+            "any-hash",
+            0,
+            Some("2026-07-15"),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("no weekly file"), "err: {err}");
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_errors_on_invalid_date_format() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship the widget").await;
+
+        let hash = hash_of_task("Ship the widget");
+        let err = set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026/07/15"))
+            .await
+            .unwrap_err();
+        assert!(err.to_lowercase().contains("yyyy-mm-dd"), "err: {err}");
+        // Sidecar untouched on validation failure.
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(dd.due_dates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_tasks_joins_due_date_from_sidecar() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(
+            &backend,
+            year,
+            week,
+            "- [ ] Ship the widget\n- [ ] Fix the bug",
+        )
+        .await;
+        let ship_hash = hash_of_task("Ship the widget");
+        let fix_hash = hash_of_task("Fix the bug");
+
+        // Only "Ship" has a date. "Fix" stays date-less.
+        set_task_due_date_impl(&backend, year, week, &ship_hash, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+
+        let tasks = list_tasks_impl(&backend).await.unwrap();
+        let ship = tasks.iter().find(|t| t.text_hash == ship_hash).expect("Ship row");
+        let fix = tasks.iter().find(|t| t.text_hash == fix_hash).expect("Fix row");
+        assert_eq!(ship.due_date.as_deref(), Some("2026-07-15"));
+        assert!(fix.due_date.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_task_due_date_canonicalizes_non_padded_month() {
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Task").await;
+
+        let hash = hash_of_task("Task");
+        // Send "2026-7-5" — validator accepts + canonicalizes to
+        // "2026-07-05". Sidecar should hold the canonical form.
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-7-5"))
+            .await
+            .unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(
+            dd.find(year, week, &hash, 0).unwrap().due_date,
+            "2026-07-05"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Due-date cross-command re-key integration tests (Phase 3e)
+    // ---------------------------------------------------------------
+
+    #[tokio::test]
+    async fn edit_task_preserves_due_date_across_hash_change() {
+        // Rename "Foo" → "Bar". The task's due-date sidecar entry
+        // must follow to the new (hash, ord). Same shape as the
+        // sidecar completed_at + provenance re-key that already ships.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Foo").await;
+
+        let foo = hash_of_task("Foo");
+        set_task_due_date_impl(&backend, year, week, &foo, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+
+        edit_task_impl(&backend, year, week, &foo, 0, "Bar").await.unwrap();
+
+        let bar = hash_of_task("Bar");
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert!(
+            dd.find(year, week, &foo, 0).is_none(),
+            "old-hash due-date entry must be dropped"
+        );
+        let renamed = dd
+            .find(year, week, &bar, 0)
+            .expect("renamed task must have its due date under the new hash");
+        assert_eq!(renamed.due_date, "2026-07-15");
+    }
+
+    #[tokio::test]
+    async fn edit_task_rekeys_sibling_due_dates_that_shift_ordinals() {
+        // Three identical Foo tasks with distinct due dates. Edit
+        // the MIDDLE Foo → Bar. The third Foo shifts from ord=2 to
+        // ord=1 in the new file; its due-date entry must follow.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{TaskDueDate, TaskDueDates};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Foo\n- [ ] Foo\n- [ ] Foo").await;
+
+        let foo = hash_of_task("Foo");
+        let mut dd = TaskDueDates::default();
+        for (ord, date) in [(0, "2026-07-10"), (1, "2026-07-15"), (2, "2026-07-20")] {
+            dd.upsert(TaskDueDate {
+                year,
+                week,
+                text_hash: foo.clone(),
+                ordinal: ord,
+                due_date: date.to_string(),
+            });
+        }
+        dd.save(&backend).await.unwrap();
+
+        edit_task_impl(&backend, year, week, &foo, 1, "Bar").await.unwrap();
+
+        let bar = hash_of_task("Bar");
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        // Foo ord=0 unchanged.
+        assert_eq!(
+            dd.find(year, week, &foo, 0).unwrap().due_date,
+            "2026-07-10"
+        );
+        // Foo ord=1 in the NEW file was Foo ord=2 in the OLD file →
+        // due date follows: "2026-07-20".
+        assert_eq!(
+            dd.find(year, week, &foo, 1).unwrap().due_date,
+            "2026-07-20",
+            "shifted sibling must carry ITS OWN date"
+        );
+        assert!(
+            dd.find(year, week, &foo, 2).is_none(),
+            "old Foo ord=2 entry must be re-keyed away"
+        );
+        // Bar ord=0 gets what was Foo ord=1's date.
+        assert_eq!(
+            dd.find(year, week, &bar, 0).unwrap().due_date,
+            "2026-07-15"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_task_drops_due_date_and_rekeys_shifted_siblings() {
+        // Three Foo tasks with dates 10/15/20. Delete middle → Foo
+        // ord=2 shifts to ord=1 in the new file; its date follows.
+        // Middle Foo's own date is dropped outright.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{TaskDueDate, TaskDueDates};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Foo\n- [ ] Foo\n- [ ] Foo").await;
+
+        let foo = hash_of_task("Foo");
+        let mut dd = TaskDueDates::default();
+        for (ord, date) in [(0, "2026-07-10"), (1, "2026-07-15"), (2, "2026-07-20")] {
+            dd.upsert(TaskDueDate {
+                year,
+                week,
+                text_hash: foo.clone(),
+                ordinal: ord,
+                due_date: date.to_string(),
+            });
+        }
+        dd.save(&backend).await.unwrap();
+
+        delete_task_impl(&backend, year, week, &foo, 1).await.unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        // Middle date (15) is gone.
+        assert!(
+            !dd.due_dates.iter().any(|d| d.due_date == "2026-07-15"),
+            "middle Foo's date must be dropped: {:?}",
+            dd.due_dates
+        );
+        // Foo ord=0 keeps 10.
+        assert_eq!(dd.find(year, week, &foo, 0).unwrap().due_date, "2026-07-10");
+        // Foo ord=1 in NEW file = old ord=2 = date 20.
+        assert_eq!(dd.find(year, week, &foo, 1).unwrap().due_date, "2026-07-20");
+        assert!(dd.find(year, week, &foo, 2).is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_task_preserves_due_date_across_check_uncheck() {
+        // Toggle preserves the task's identity (same hash, same
+        // position within its state). Due-date entry survives both
+        // directions of a round-trip.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Ship").await;
+
+        let hash = hash_of_task("Ship");
+        set_task_due_date_impl(&backend, year, week, &hash, 0, Some("2026-07-15"))
+            .await
+            .unwrap();
+
+        // Check → uncheck.
+        toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+        // After check, task is the only completed same-hash task → still ord=0.
+        // Uncheck via new ord (still 0).
+        toggle_task_impl(&backend, year, week, &hash, 0).await.unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(
+            dd.find(year, week, &hash, 0).unwrap().due_date,
+            "2026-07-15",
+            "due date must survive check/uncheck round-trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn toggle_task_rekeys_sibling_due_dates_when_duplicate_moves() {
+        // Two identical Foo tasks with different dates. Toggle the
+        // first one → it moves to the Completed sub-list; ordinals
+        // may shift. Due-date sidecar entries must follow.
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::{TaskDueDate, TaskDueDates};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        seed_weekly_file_with_tasks(&backend, year, week, "- [ ] Foo\n- [ ] Foo").await;
+
+        let foo = hash_of_task("Foo");
+        // Foo ord=0 = date A, Foo ord=1 = date B.
+        let a = "2026-07-10".to_string();
+        let b = "2026-07-20".to_string();
+        let mut dd = TaskDueDates::default();
+        dd.upsert(TaskDueDate {
+            year, week, text_hash: foo.clone(), ordinal: 0, due_date: a.clone()
+        });
+        dd.upsert(TaskDueDate {
+            year, week, text_hash: foo.clone(), ordinal: 1, due_date: b.clone()
+        });
+        dd.save(&backend).await.unwrap();
+
+        // Toggle Foo ord=0 → it moves to Completed sub-list. In new
+        // file order, Foo ord=0 is the remaining incomplete one
+        // (originally ord=1) and Foo ord=1 is the completed one
+        // (originally ord=0).
+        toggle_task_impl(&backend, year, week, &foo, 0).await.unwrap();
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        // Old ord=0 (date A) → new ord=1 (completed). Old ord=1
+        // (date B) → new ord=0 (still incomplete, still first in
+        // Incomplete sub-list).
+        assert_eq!(
+            dd.find(year, week, &foo, 0).unwrap().due_date,
+            b,
+            "new-ord-0 must carry the former-ord-1's date"
+        );
+        assert_eq!(
+            dd.find(year, week, &foo, 1).unwrap().due_date,
+            a,
+            "new-ord-1 must carry the toggled task's original date"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollover_carries_due_date_forward_from_source_to_target() {
+        // Task with a due date rolls over. The date must land on the
+        // target-week entry verbatim (overdue-in-source = overdue-in-
+        // target per the locked design).
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        seed_specific_week(&backend, source_year, source_week, "- [ ] Ship the widget").await;
+
+        let hash = hash_of_task("Ship the widget");
+        set_task_due_date_impl(
+            &backend,
+            source_year,
+            source_week,
+            &hash,
+            0,
+            Some("2026-07-05"),
+        )
+        .await
+        .unwrap();
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(result.applied);
+        assert_eq!(result.tasks_copied, 1);
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        // Original source-week entry still exists (rollover copies,
+        // doesn't move — the source file is a historical read).
+        assert_eq!(
+            dd.find(source_year, source_week, &hash, 0).unwrap().due_date,
+            "2026-07-05"
+        );
+        // Target-week entry has the same date.
+        assert_eq!(
+            dd.find(year, week, &hash, 0).unwrap().due_date,
+            "2026-07-05",
+            "rollover must carry the due date to the target week"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollover_leaves_dateless_tasks_dateless_in_target() {
+        // A source-week task without a due date must roll over
+        // WITHOUT a due date — no spurious entry seeded.
+        use crate::notes::iso_previous_year_week;
+        use crate::storage::LocalFilesystem;
+        use crate::tasks::TaskDueDates;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let YearWeek { year, week } = get_current_year_week();
+        let (source_year, source_week) = iso_previous_year_week(year, week);
+        seed_specific_week(&backend, source_year, source_week, "- [ ] Untimed task").await;
+
+        let result = check_and_apply_rollover_impl(&backend).await.unwrap();
+        assert!(result.applied);
+        assert_eq!(result.tasks_copied, 1);
+
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(
+            dd.due_dates.len(),
+            0,
+            "no due-date entries should be created for a task that never had one"
         );
     }
 

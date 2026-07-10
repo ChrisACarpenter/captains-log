@@ -41,6 +41,15 @@ const ROLLOVER_LOG_FILE: &str = "rollover-log.json";
 const AUTO_IMPORT_LOG_FILE: &str = "auto-import-log.json";
 const CURRENT_ROLLOVER_LOG_VERSION: u32 = 1;
 
+/// Phase 3e — sidecar mapping tasks to their optional due date.
+/// Keyed by `(year, week, textHash, ordinal)` — identical shape to
+/// `TaskCompletions` + `RolloverLog`. Value is a LOCAL YYYY-MM-DD
+/// string (no time-of-day; reminders' time-of-day lives on the
+/// reminder settings, not per task). Missing file → empty; corrupt
+/// file → empty + stderr warning.
+const TASK_DUE_DATES_FILE: &str = "task-due-dates.json";
+const CURRENT_TASK_DUE_DATES_VERSION: u32 = 1;
+
 // ---------------------------------------------------------------------------
 // Parsing
 // ---------------------------------------------------------------------------
@@ -1264,6 +1273,127 @@ impl AutoImportLog {
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| StorageError::Serde(e.to_string()))?;
         backend.write_metadata(AUTO_IMPORT_LOG_FILE, &content).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task due dates (Phase 3e)
+// ---------------------------------------------------------------------------
+
+/// One task's optional due date. Composite identity
+/// `(year, week, text_hash, ordinal)` matches every other task-
+/// scoped sidecar in the app. `due_date` is a LOCAL YYYY-MM-DD
+/// string — no time-of-day, no timezone, no ISO-8601 flavor. Users
+/// pick calendar days; time-of-day for reminders lives on
+/// `TaskReminderSettings`, not per task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDueDate {
+    pub year: u32,
+    pub week: u32,
+    pub text_hash: String,
+    pub ordinal: u32,
+    /// Local calendar date, formatted `YYYY-MM-DD`.
+    pub due_date: String,
+}
+
+/// Sidecar mapping tasks → due dates. Same load/save posture as
+/// `TaskCompletions` + `RolloverLog`: missing file → empty, corrupt
+/// file → empty + stderr warning, atomic write via `write_metadata`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDueDates {
+    #[serde(default = "TaskDueDates::current_version")]
+    pub version: u32,
+    #[serde(default)]
+    pub due_dates: Vec<TaskDueDate>,
+}
+
+impl TaskDueDates {
+    fn current_version() -> u32 {
+        CURRENT_TASK_DUE_DATES_VERSION
+    }
+
+    pub async fn load<B: StorageBackend + ?Sized>(backend: &B) -> StorageResult<Self> {
+        match backend.read_metadata(TASK_DUE_DATES_FILE).await? {
+            Some(content) => match serde_json::from_str::<TaskDueDates>(&content) {
+                Ok(dd) => Ok(dd),
+                Err(e) => {
+                    eprintln!(
+                        "task-due-dates.json failed to parse ({}). Starting with an empty log.",
+                        e
+                    );
+                    Ok(Self::default())
+                }
+            },
+            None => Ok(Self::default()),
+        }
+    }
+
+    pub async fn save<B: StorageBackend + ?Sized>(&self, backend: &B) -> StorageResult<()> {
+        let content = serde_json::to_string_pretty(self)
+            .map_err(|e| StorageError::Serde(e.to_string()))?;
+        backend.write_metadata(TASK_DUE_DATES_FILE, &content).await
+    }
+
+    /// O(n) lookup for a task's due-date entry.
+    pub fn find(
+        &self,
+        year: u32,
+        week: u32,
+        text_hash: &str,
+        ordinal: u32,
+    ) -> Option<&TaskDueDate> {
+        self.due_dates.iter().find(|d| {
+            d.year == year && d.week == week && d.text_hash == text_hash && d.ordinal == ordinal
+        })
+    }
+
+    /// Insert or overwrite the entry keyed by
+    /// `(year, week, text_hash, ordinal)`. Overwrite semantics let
+    /// callers seed a fresh date without a preceding remove.
+    pub fn upsert(&mut self, entry: TaskDueDate) {
+        if let Some(existing) = self.due_dates.iter_mut().find(|d| {
+            d.year == entry.year
+                && d.week == entry.week
+                && d.text_hash == entry.text_hash
+                && d.ordinal == entry.ordinal
+        }) {
+            *existing = entry;
+        } else {
+            self.due_dates.push(entry);
+        }
+    }
+
+    /// Remove the entry keyed by `(year, week, text_hash, ordinal)`.
+    /// No-op when no matching entry exists.
+    pub fn remove(&mut self, year: u32, week: u32, text_hash: &str, ordinal: u32) {
+        self.due_dates.retain(|d| {
+            !(d.year == year
+                && d.week == week
+                && d.text_hash == text_hash
+                && d.ordinal == ordinal)
+        });
+    }
+}
+
+/// Validate a due-date string sent from the frontend. Accepts the
+/// exact `YYYY-MM-DD` local-calendar shape and rejects anything else
+/// (empty, whitespace, ISO-8601-with-time, wrong separator, out-of-
+/// range month/day). Returns Ok(canonical) on success — the parsed
+/// value re-serialized so callers write a normalized form.
+pub fn validate_due_date_input(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Due date can't be empty.".to_string());
+    }
+    // NaiveDate::parse_from_str with `%Y-%m-%d` accepts leading
+    // zeros AND rejects malformed month/day values (e.g. 2026-13-01).
+    match chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        Ok(nd) => Ok(nd.format("%Y-%m-%d").to_string()),
+        Err(_) => Err(format!(
+            "Due date must look like YYYY-MM-DD (got {trimmed:?})."
+        )),
     }
 }
 
@@ -2738,6 +2868,231 @@ mod tests {
         );
         assert!(idx.find(2026, 27, "aaa", 2).is_none());
         assert!(idx.find(2025, 27, "aaa", 0).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // TaskDueDates (Phase 3e) — sidecar + validator tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn validate_due_date_accepts_canonical_shape() {
+        assert_eq!(validate_due_date_input("2026-07-15").unwrap(), "2026-07-15");
+        // Whitespace tolerated at edges, output is canonical.
+        assert_eq!(validate_due_date_input("  2026-07-15  ").unwrap(), "2026-07-15");
+    }
+
+    #[test]
+    fn validate_due_date_rejects_empty() {
+        assert!(validate_due_date_input("").is_err());
+        assert!(validate_due_date_input("   ").is_err());
+    }
+
+    #[test]
+    fn validate_due_date_accepts_non_padded_month_and_canonicalizes() {
+        // chrono's %Y-%m-%d accepts single-digit months/days and
+        // parses them correctly. We canonicalize on output so the
+        // sidecar always stores the zero-padded form.
+        assert_eq!(validate_due_date_input("2026-7-15").unwrap(), "2026-07-15");
+        assert_eq!(validate_due_date_input("2026-7-5").unwrap(), "2026-07-05");
+    }
+
+    #[test]
+    fn validate_due_date_rejects_bad_shape() {
+        // Wrong separator, embedded time, wrong order, non-date input.
+        assert!(validate_due_date_input("2026/07/15").is_err());
+        assert!(validate_due_date_input("2026-07-15T09:00:00").is_err());
+        assert!(validate_due_date_input("07-15-2026").is_err());
+        assert!(validate_due_date_input("today").is_err());
+    }
+
+    #[test]
+    fn validate_due_date_rejects_out_of_range() {
+        // Chrono's NaiveDate::parse_from_str rejects invalid month/day.
+        assert!(validate_due_date_input("2026-13-01").is_err()); // no month 13
+        assert!(validate_due_date_input("2026-02-30").is_err()); // no Feb 30
+        assert!(validate_due_date_input("2026-04-31").is_err()); // April has 30 days
+    }
+
+    #[test]
+    fn task_due_dates_default_is_empty_current_version() {
+        let dd = TaskDueDates::default();
+        assert_eq!(dd.due_dates.len(), 0);
+        // Default derives version=0 (Rust default for u32); the load
+        // path uses serde(default) fallback to current_version() only
+        // when the field is absent from JSON. Verify current_version
+        // returns the constant so the fallback stays in lockstep with
+        // the type version.
+        assert_eq!(TaskDueDates::current_version(), CURRENT_TASK_DUE_DATES_VERSION);
+    }
+
+    #[test]
+    fn task_due_dates_find_by_composite_key() {
+        let dd = TaskDueDates {
+            version: 1,
+            due_dates: vec![
+                TaskDueDate {
+                    year: 2026,
+                    week: 28,
+                    text_hash: "aaa".to_string(),
+                    ordinal: 0,
+                    due_date: "2026-07-15".to_string(),
+                },
+                TaskDueDate {
+                    year: 2026,
+                    week: 28,
+                    text_hash: "aaa".to_string(),
+                    ordinal: 1,
+                    due_date: "2026-07-20".to_string(),
+                },
+            ],
+        };
+        assert_eq!(
+            dd.find(2026, 28, "aaa", 0).unwrap().due_date,
+            "2026-07-15"
+        );
+        assert_eq!(
+            dd.find(2026, 28, "aaa", 1).unwrap().due_date,
+            "2026-07-20"
+        );
+        // Wrong ordinal / hash / week / year → miss.
+        assert!(dd.find(2026, 28, "aaa", 2).is_none());
+        assert!(dd.find(2026, 28, "bbb", 0).is_none());
+        assert!(dd.find(2026, 27, "aaa", 0).is_none());
+        assert!(dd.find(2025, 28, "aaa", 0).is_none());
+    }
+
+    #[test]
+    fn task_due_dates_upsert_replaces_existing_entry() {
+        let mut dd = TaskDueDates::default();
+        dd.upsert(TaskDueDate {
+            year: 2026,
+            week: 28,
+            text_hash: "aaa".to_string(),
+            ordinal: 0,
+            due_date: "2026-07-15".to_string(),
+        });
+        assert_eq!(dd.due_dates.len(), 1);
+        // Same identity, different date → replace, not append.
+        dd.upsert(TaskDueDate {
+            year: 2026,
+            week: 28,
+            text_hash: "aaa".to_string(),
+            ordinal: 0,
+            due_date: "2026-07-20".to_string(),
+        });
+        assert_eq!(dd.due_dates.len(), 1, "upsert must overwrite same-key entry");
+        assert_eq!(dd.due_dates[0].due_date, "2026-07-20");
+        // Different identity → append.
+        dd.upsert(TaskDueDate {
+            year: 2026,
+            week: 28,
+            text_hash: "bbb".to_string(),
+            ordinal: 0,
+            due_date: "2026-07-15".to_string(),
+        });
+        assert_eq!(dd.due_dates.len(), 2);
+    }
+
+    #[test]
+    fn task_due_dates_remove_drops_matching_entry_only() {
+        let mut dd = TaskDueDates::default();
+        for hash in ["aaa", "bbb", "aaa"] {
+            let ordinal: u32 = if hash == "aaa" { dd.due_dates.iter().filter(|d| d.text_hash == hash).count() as u32 } else { 0 };
+            dd.upsert(TaskDueDate {
+                year: 2026,
+                week: 28,
+                text_hash: hash.to_string(),
+                ordinal,
+                due_date: "2026-07-15".to_string(),
+            });
+        }
+        assert_eq!(dd.due_dates.len(), 3);
+        // Drop aaa/1 only. aaa/0 + bbb/0 stay.
+        dd.remove(2026, 28, "aaa", 1);
+        assert_eq!(dd.due_dates.len(), 2);
+        assert!(dd.find(2026, 28, "aaa", 0).is_some());
+        assert!(dd.find(2026, 28, "aaa", 1).is_none());
+        assert!(dd.find(2026, 28, "bbb", 0).is_some());
+        // Removing something not in the set is a no-op.
+        dd.remove(2026, 28, "zzz", 0);
+        assert_eq!(dd.due_dates.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn task_due_dates_load_missing_returns_default() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(dd.due_dates.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_due_dates_load_corrupt_returns_default_with_warning() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        backend
+            .write_metadata(TASK_DUE_DATES_FILE, "{ not: valid json")
+            .await
+            .unwrap();
+        let dd = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(
+            dd.due_dates.len(),
+            0,
+            "corrupt sidecar should recover to empty, not error out"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_due_dates_save_load_round_trips() {
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        let mut dd = TaskDueDates::default();
+        dd.upsert(TaskDueDate {
+            year: 2026,
+            week: 28,
+            text_hash: "aaa".to_string(),
+            ordinal: 0,
+            due_date: "2026-07-15".to_string(),
+        });
+        dd.upsert(TaskDueDate {
+            year: 2026,
+            week: 29,
+            text_hash: "bbb".to_string(),
+            ordinal: 2,
+            due_date: "2026-07-22".to_string(),
+        });
+        dd.save(&backend).await.unwrap();
+
+        let loaded = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(loaded.due_dates.len(), 2);
+        assert_eq!(loaded.find(2026, 28, "aaa", 0).unwrap().due_date, "2026-07-15");
+        assert_eq!(loaded.find(2026, 29, "bbb", 2).unwrap().due_date, "2026-07-22");
+    }
+
+    #[tokio::test]
+    async fn task_due_dates_load_partial_json_backfills_version() {
+        // A pre-versioning save (or hand-edited file) with just
+        // { "dueDates": [...] } must load cleanly via serde(default).
+        use crate::storage::LocalFilesystem;
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let backend = LocalFilesystem::new(dir.path());
+        backend
+            .write_metadata(
+                TASK_DUE_DATES_FILE,
+                r#"{"dueDates":[{"year":2026,"week":28,"textHash":"aaa","ordinal":0,"dueDate":"2026-07-15"}]}"#,
+            )
+            .await
+            .unwrap();
+        let loaded = TaskDueDates::load(&backend).await.unwrap();
+        assert_eq!(loaded.version, CURRENT_TASK_DUE_DATES_VERSION);
+        assert_eq!(loaded.due_dates.len(), 1);
     }
 }
 
