@@ -335,20 +335,20 @@ fn extract_subsection(section: &str, header: &str) -> String {
         Some(n) => start + n + 1,
         None => return String::new(),
     };
-    // Find the next "### " heading after body_start (must be at start of a line).
-    let mut body_end = section
+    // Body runs until the next `### ` subsection header. We used to
+    // also stop at any `\n## ` here as a defensive backstop for
+    // `## Weekly Notes`, but the caller (parse_weekly_summary) already
+    // slices `section` at NOTES_HEADER — so that check was redundant
+    // AND actively harmful: it truncated user-authored H2 headings
+    // ("## Sub-header" inside Key accomplishments) as if they were
+    // section boundaries, causing content below them to disappear on
+    // read-back. Users should be free to structure their field content
+    // with any markdown they like.
+    let body_end = section
         .get(body_start..)
         .and_then(|s| s.find("\n### "))
         .map(|i| body_start + i)
         .unwrap_or(section.len());
-    // Defensive: also stop at any "## " heading (covers ## Weekly Notes if the
-    // section boundary check missed it).
-    if let Some(idx) = section[body_start..].find("\n## ") {
-        let candidate = body_start + idx;
-        if candidate < body_end {
-            body_end = candidate;
-        }
-    }
     section[body_start..body_end].trim().to_string()
 }
 
@@ -856,6 +856,57 @@ mod tests {
         assert_eq!(s.key_accomplishments, "- shipped foo\n- fixed bar");
         assert_eq!(s.plans_and_priorities, "- ship baz");
         assert_eq!(s.challenges_or_roadblocks, "none today");
+        assert_eq!(s.anything_else, "feeling good");
+    }
+
+    #[test]
+    fn parse_summary_preserves_user_authored_h2_inside_a_field() {
+        // Regression: a user-typed `## Sub-header` inside Key
+        // accomplishments (or any prose field) used to be treated as
+        // a section boundary by extract_subsection's defensive
+        // `\n## ` stop — content below the H2 got dropped on read.
+        // Users should be free to structure their field content with
+        // any markdown they like; the outer NOTES_HEADER slice is
+        // already the authoritative section boundary.
+        let file = "## Weekly Summary\n*Last updated: 2026-07-10 09:11*\n\
+                    \n### Key accomplishments\n\
+                    # THIS WAS A GOOD WEEK!!!!\n\
+                    \n## My Claude Code Workflow:\n\
+                    - Pick the batch\n\
+                    - Set up worktrees\n\
+                    - Phase 1: parallel conversion\n\
+                    \n### Plans and priorities for next week\n- ship baz\n\
+                    \n### Challenges or roadblocks\nnone\n\
+                    \n### Anything else on your mind\nfeeling good\n\
+                    \n## Weekly Notes\n";
+
+        let s = parse_weekly_summary(file);
+        // Everything in Key accomplishments survives — including the
+        // user's H2 and every bullet below it.
+        assert!(
+            s.key_accomplishments.contains("# THIS WAS A GOOD WEEK!!!!"),
+            "top H1 must survive: {}",
+            s.key_accomplishments
+        );
+        assert!(
+            s.key_accomplishments.contains("## My Claude Code Workflow:"),
+            "user's H2 must survive: {}",
+            s.key_accomplishments
+        );
+        assert!(
+            s.key_accomplishments.contains("- Pick the batch"),
+            "bullets below the H2 must survive: {}",
+            s.key_accomplishments
+        );
+        assert!(
+            s.key_accomplishments.contains("- Phase 1: parallel conversion"),
+            "last bullet below the H2 must survive: {}",
+            s.key_accomplishments
+        );
+        // Later fields still parse correctly — the ### Plans header
+        // is still the authoritative boundary.
+        assert_eq!(s.plans_and_priorities, "- ship baz");
+        assert_eq!(s.challenges_or_roadblocks, "none");
         assert_eq!(s.anything_else, "feeling good");
     }
 
