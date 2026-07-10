@@ -1549,12 +1549,15 @@
           },
           taskReminder: {
             enabled: taskReminderEnabled,
-            // Empty input → 0 (day-of), matching the spec. Parse as
-            // base-10 and clamp non-numeric junk to 0. Range 0..=30
-            // — anything higher is nonsense for a task-reminder and
-            // the number input's max attribute pins it too.
+            // Empty input → 0 (day-of), matching the spec. Range 0..=30
+            // — anything higher is nonsense for a task-reminder and the
+            // number input's max attribute pins it too. `bind:value` on
+            // `type="number"` coerces the state to a number after the
+            // user interacts, so String() first to keep .trim() safe
+            // whether the current value is a string or a number.
             daysBefore: (() => {
-              const parsed = Number.parseInt(taskReminderDaysBeforeInput.trim() || '0', 10);
+              const raw = String(taskReminderDaysBeforeInput ?? '').trim();
+              const parsed = Number.parseInt(raw || '0', 10);
               if (!Number.isFinite(parsed) || parsed < 0) return 0;
               return Math.min(parsed, 30);
             })(),
