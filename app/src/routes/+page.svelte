@@ -1093,21 +1093,20 @@
                         </span>
                       {/if}
                     {/if}
-                    {#if t.dueDate}
-                      {@const overdue = !t.isCompleted && t.dueDate < todayIso()}
+                    {#if t.dueDate && !t.isCompleted}
+                      {@const overdue = t.dueDate < todayIso()}
                       <!--
-                        Phase 3e due-date chip. Rendered on both
-                        OPEN and COMPLETED tasks — the historical
-                        date stays visible after a task is checked
-                        off (useful when reviewing past completions).
-                        The `.overdue` class is applied ONLY for
-                        INCOMPLETE tasks with a past date; completed
-                        tasks render in the neutral style regardless
-                        of when they were due, since the debt was
-                        paid. Overdue signal is reinforced by the
-                        row landing under the "Overdue" section
-                        header — completed tasks never route through
-                        that group.
+                        Phase 3e due-date chip. Rendered only on
+                        INCOMPLETE rows — a completed task's due
+                        date is history, and the chip becomes needless
+                        visual clutter once the task is done. The
+                        sidecar entry sticks around across check /
+                        uncheck (toggle re-key preserves it) so the
+                        chip returns intact if the user unchecks.
+                        The `.overdue` variant flips the chip to
+                        maroon tones; the same signal is reinforced
+                        by the row landing under the "Overdue"
+                        section header.
                       -->
                       <span
                         class="task-due-chip"
