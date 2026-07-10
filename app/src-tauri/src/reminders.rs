@@ -1197,11 +1197,9 @@ mod tests {
     fn dst_gap_target_time_does_not_panic() {
         // 2026-03-08 is the US spring-forward Sunday — at 02:00 local
         // (on US-DST systems) the clock jumps to 03:00, so 02:30 is a
-        // non-existent local time on that date. The old code path would
-        // have panicked at the `.expect("hour/minute should be in
-        // range")` because chrono's with_hour/with_minute returns None
-        // for non-existent local datetimes. The new shape resolves to
-        // the next valid local instant.
+        // non-existent local time on that date. `resolve_local_datetime`
+        // + the 7-day-bump loop resolves that to the following week's
+        // 02:30, staying on the user's chosen weekday.
         let now = local(2026, 3, 7, 12, 0); // Saturday noon, pre-transition
         let result = next_reminder_time_after(now, &[6], 2, 30);
         assert!(

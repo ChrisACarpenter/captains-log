@@ -190,85 +190,7 @@ pub fn hash_task_text(normalized_text: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Bidirectional toggle
-// ---------------------------------------------------------------------------
-
-/// Flip the checkbox character in a task line inside a Plans-section
-/// body. Locates the task by `(text_hash, ordinal)` — the same
-/// composite key `list_tasks` returns to the frontend — then swaps
-/// the single ASCII byte between the brackets: `' '` → `'x'` or
-/// `'x' / 'X'` → `' '`.
-///
-/// Returns `(new_plans_body, new_is_completed)`. The new body is
-/// otherwise byte-identical to the input, so `render_weekly_summary`
-/// won't churn the surrounding markdown.
-///
-/// Errors on:
-/// - No task matching `(text_hash, ordinal)` in the current body
-///   (typical cause: the user edited the summary in another window
-///   between the frontend's read and the toggle click; the caller
-///   should surface this so the UI can refresh).
-/// - A malformed marker byte (never expected — `parse_plans_tasks`
-///   already validated it; but we don't panic on drift).
-pub fn toggle_checkbox_in_plans(
-    plans_content: &str,
-    text_hash: &str,
-    ordinal: u32,
-) -> Result<(String, bool), String> {
-    let tasks = parse_plans_tasks(plans_content);
-    let task = tasks
-        .iter()
-        .find(|t| t.text_hash == text_hash && t.ordinal == ordinal)
-        .ok_or_else(|| {
-            // Log the identity context for support debugging; the
-            // returned string is intentionally free of implementation
-            // detail because it surfaces directly in the toggle-error
-            // TipBubble on the landing page.
-            eprintln!(
-                "[toggle] task not found in Plans (hash={text_hash}, ordinal={ordinal})"
-            );
-            "That task couldn't be found in your weekly file — it may have been edited or removed since this list loaded."
-                .to_string()
-        })?;
-
-    let line_start = task.byte_offset_in_plans;
-    let line_end = line_start + task.line_length;
-    let line_slice = &plans_content[line_start..line_end];
-
-    // Find `- [` within the line (may be preceded by indentation) and
-    // point at the marker byte immediately after the `[`.
-    let bracket_offset_in_line = line_slice
-        .find("- [")
-        .ok_or_else(|| "task line missing `- [` checkbox marker".to_string())?;
-    let marker_pos = line_start + bracket_offset_in_line + 3;
-
-    let marker_byte = *plans_content
-        .as_bytes()
-        .get(marker_pos)
-        .ok_or_else(|| "task marker position past end of Plans body".to_string())?;
-
-    let (new_marker, new_state) = match marker_byte {
-        b' ' => ('x', true),
-        b'x' | b'X' => (' ', false),
-        other => {
-            return Err(format!(
-                "unexpected checkbox marker byte {other:#04x} in task line"
-            ))
-        }
-    };
-
-    // Splice byte-for-byte. `marker_pos` sits at an ASCII boundary
-    // (the byte was ' ' / 'x' / 'X') so slicing at marker_pos and
-    // marker_pos + 1 is UTF-8 safe.
-    let mut new_content = String::with_capacity(plans_content.len());
-    new_content.push_str(&plans_content[..marker_pos]);
-    new_content.push(new_marker);
-    new_content.push_str(&plans_content[marker_pos + 1..]);
-    Ok((new_content, new_state))
-}
-
-// ---------------------------------------------------------------------------
-// Append
+// Constants shared across task helpers
 // ---------------------------------------------------------------------------
 
 /// Maximum bytes we allow in a single task's text. Well above what a
@@ -434,62 +356,6 @@ fn is_markdown_heading_line(trimmed: &str) -> bool {
     rest.is_empty() || rest.starts_with(' ')
 }
 
-/// Append a new open task to the end of a Plans-section body.
-///
-/// Returns a fresh Plans-body string with `- [ ] {trimmed text}`
-/// appended. Task lines emit at column 0 — nested indentation is
-/// preserved on read (see `parse_plans_tasks`) but never introduced
-/// by this function.
-///
-/// Validation errors are user-facing (the frontend surfaces them
-/// verbatim in the Add-task modal). We reject:
-///
-/// - empty / whitespace-only input
-/// - embedded newlines (multi-line tasks aren't supported — a Plans
-///   list item is one line by our contract)
-/// - text that already carries a `- [ ]` / `- [x]` prefix (user typed
-///   the marker themselves — reject rather than double-mark)
-/// - text longer than `MAX_TASK_TEXT_LEN` bytes
-///
-/// Empty Plans body yields `- [ ] {text}` with no leading newline.
-/// Non-empty body appends `\n- [ ] {text}`; we don't trim the
-/// existing content, so the caller's newline discipline is preserved
-/// exactly.
-pub fn append_task_to_plans(plans_content: &str, text: &str) -> Result<String, String> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err("Task text can't be empty.".to_string());
-    }
-    if trimmed.contains('\n') || trimmed.contains('\r') {
-        return Err("Task text can't span multiple lines.".to_string());
-    }
-    if trimmed.len() > MAX_TASK_TEXT_LEN {
-        // Byte length, not character length — matches the check on the
-        // `String::len()` call above. Users typing lots of multi-byte
-        // characters (emoji, accented text) will hit the cap on far
-        // fewer than 1024 keystrokes; the copy is deliberately clear
-        // about the unit so support debugging isn't confused.
-        return Err(format!(
-            "Task text is too long (max {MAX_TASK_TEXT_LEN} bytes)."
-        ));
-    }
-    // Reject a bare "- [" marker at the start so users don't
-    // accidentally double-mark ("- [ ] - [ ] Ship the thing" isn't
-    // a task we want to create).
-    if trimmed.starts_with("- [") {
-        return Err(
-            "Don't include the `- [ ]` prefix — we add it for you.".to_string(),
-        );
-    }
-
-    if plans_content.is_empty() {
-        return Ok(format!("- [ ] {trimmed}"));
-    }
-    // parse_weekly_summary trims the Plans body, so `plans_content`
-    // never ends with a newline. Insert one before appending.
-    Ok(format!("{plans_content}\n- [ ] {trimmed}"))
-}
-
 // ---------------------------------------------------------------------------
 // Tasks-body manipulation (Slice 6a — ### Tasks section)
 // ---------------------------------------------------------------------------
@@ -561,9 +427,9 @@ fn render_tasks_body(bd: &TasksBodyBreakdown) -> String {
 }
 
 /// Append a new open task to the end of the Incomplete subsection.
-/// Successor to [`append_task_to_plans`]; same validation rules
-/// (empty text, embedded newlines, pre-existing prefix, length cap)
-/// so error messages are identical from the user's perspective.
+/// Validation: empty text / embedded newlines / pre-existing `- [`
+/// prefix / text longer than [`MAX_TASK_TEXT_LEN`] all bounce with
+/// user-facing error strings.
 ///
 /// The Incomplete subsection is deterministically the "top" bucket
 /// in the rendered body — no ordering ambiguity between callers.
@@ -596,10 +462,9 @@ pub fn append_task_to_tasks_body(
 
 /// Move a task between the Incomplete and Completed subsections of
 /// a `tasks_body`, flipping its checkbox character in the process.
-/// Successor to [`toggle_checkbox_in_plans`] — same identity model
-/// (composite `(text_hash, ordinal)` key) but with move semantics
-/// instead of in-place flip. Slice 6a: a checked task belongs in
-/// Completed; unchecking moves it back to Incomplete.
+/// Identity model: composite `(text_hash, ordinal)` key. Slice 6a's
+/// move-on-check semantics — a checked task belongs in Completed;
+/// unchecking moves it back to Incomplete.
 ///
 /// The moved task lands at the END of its target list (newest-at-
 /// bottom convention matches how `append_task_to_tasks_body` inserts).
@@ -1604,10 +1469,6 @@ mod tests {
         assert!(!json.contains("\"text_hash\""));
     }
 
-    // ---------------------------------------------------------------
-    // toggle_checkbox_in_plans
-    // ---------------------------------------------------------------
-
     fn hash_of(text: &str) -> String {
         hash_task_text(&normalize_task_text(text))
     }
@@ -1714,9 +1575,9 @@ mod tests {
     }
 
     #[test]
-    fn append_task_to_tasks_body_shares_validation_with_plans_append() {
-        // Same error surface as append_task_to_plans — the same user
-        // input that was rejected before still is.
+    fn append_task_to_tasks_body_validation_shape() {
+        // Rejects the same inputs users are surfaced errors for:
+        // empty / all-whitespace / embedded newline / pre-prefixed.
         assert!(append_task_to_tasks_body("", "").is_err());
         assert!(append_task_to_tasks_body("", "  \n  ").is_err());
         assert!(append_task_to_tasks_body("", "line one\nline two").is_err());
@@ -2255,223 +2116,6 @@ mod tests {
         assert_eq!(flip_checkbox_in_line("Some prose"), None);
         assert_eq!(flip_checkbox_in_line("- Regular bullet"), None);
         assert_eq!(flip_checkbox_in_line("- [y] Wrong marker"), None);
-    }
-
-    #[test]
-    fn toggle_flips_open_to_completed() {
-        let input = "- [ ] First\n- [ ] Second\n";
-        let hash = hash_of("First");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(new_state);
-        assert_eq!(out, "- [x] First\n- [ ] Second\n");
-    }
-
-    #[test]
-    fn toggle_flips_completed_to_open() {
-        let input = "- [x] First\n";
-        let hash = hash_of("First");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(!new_state);
-        assert_eq!(out, "- [ ] First\n");
-    }
-
-    #[test]
-    fn toggle_flips_uppercase_x_to_open() {
-        // Parser accepts [X] as completed; toggling must emit [ ], not [X].
-        let input = "- [X] First\n";
-        let hash = hash_of("First");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(!new_state);
-        assert_eq!(out, "- [ ] First\n");
-    }
-
-    #[test]
-    fn toggle_preserves_surrounding_tasks_exactly() {
-        // Only the targeted marker byte changes; everything else,
-        // including whitespace and markdown formatting in adjacent
-        // lines, is byte-identical.
-        let input = "  - [ ] Alpha with **bold**\n- [x] Beta\n- [ ] Gamma\n";
-        let hash = hash_of("Beta");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(!new_state);
-        assert_eq!(
-            out,
-            "  - [ ] Alpha with **bold**\n- [ ] Beta\n- [ ] Gamma\n"
-        );
-    }
-
-    #[test]
-    fn toggle_respects_ordinal_for_duplicates() {
-        // Three identical tasks, all `[ ]`. Toggle ordinal=1 (the
-        // middle one) — only the second `[ ]` should flip.
-        let input = "- [ ] Standup\n- [ ] Standup\n- [ ] Standup\n";
-        let hash = hash_of("Standup");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 1).unwrap();
-        assert!(new_state);
-        assert_eq!(out, "- [ ] Standup\n- [x] Standup\n- [ ] Standup\n");
-    }
-
-    #[test]
-    fn toggle_works_on_indented_task() {
-        // Nested-list tasks share the same toggle path; the leading
-        // whitespace mustn't confuse marker location.
-        let input = "  - [ ] Indented\n";
-        let hash = hash_of("Indented");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(new_state);
-        assert_eq!(out, "  - [x] Indented\n");
-    }
-
-    #[test]
-    fn toggle_errors_on_missing_hash() {
-        let input = "- [ ] First\n";
-        let err = toggle_checkbox_in_plans(input, "deadbeef", 0).unwrap_err();
-        assert!(err.contains("couldn't be found"), "err: {err}");
-        // Must NOT leak implementation detail into the user-facing
-        // message. Hash + ordinal go to eprintln for support debugging.
-        assert!(!err.contains("hash="), "hash leaked to user copy: {err}");
-        assert!(!err.contains("ordinal="), "ordinal leaked: {err}");
-    }
-
-    #[test]
-    fn toggle_errors_on_wrong_ordinal() {
-        // Only one instance of "First" exists — ordinal 0 works,
-        // ordinal 1 must fail.
-        let input = "- [ ] First\n";
-        let hash = hash_of("First");
-        assert!(toggle_checkbox_in_plans(input, &hash, 0).is_ok());
-        let err = toggle_checkbox_in_plans(input, &hash, 1).unwrap_err();
-        assert!(err.contains("couldn't be found"), "err: {err}");
-    }
-
-    #[test]
-    fn toggle_preserves_utf8_multibyte_text() {
-        // Task text with emoji + accented chars; the flip is a
-        // single-byte swap inside the leading ASCII "- [ ]" marker,
-        // so downstream UTF-8 must be untouched.
-        let input = "- [ ] Ship 🚀 the café\n";
-        let hash = hash_of("Ship 🚀 the café");
-        let (out, new_state) = toggle_checkbox_in_plans(input, &hash, 0).unwrap();
-        assert!(new_state);
-        assert_eq!(out, "- [x] Ship 🚀 the café\n");
-    }
-
-    #[test]
-    fn toggle_roundtrip_returns_to_original() {
-        // Check that flipping twice returns to the exact starting
-        // bytes. This is the property that lets a user un-check a
-        // task without leaving any drift in the file.
-        let input = "- [ ] A\n- [x] B\n";
-        let hash_a = hash_of("A");
-        let hash_b = hash_of("B");
-
-        let (once, _) = toggle_checkbox_in_plans(input, &hash_a, 0).unwrap();
-        let (twice, _) = toggle_checkbox_in_plans(&once, &hash_a, 0).unwrap();
-        assert_eq!(twice, input);
-
-        let (once_b, _) = toggle_checkbox_in_plans(input, &hash_b, 0).unwrap();
-        let (twice_b, _) = toggle_checkbox_in_plans(&once_b, &hash_b, 0).unwrap();
-        assert_eq!(twice_b, input);
-    }
-
-    // ---------------------------------------------------------------
-    // append_task_to_plans
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn append_to_empty_plans_omits_leading_newline() {
-        let out = append_task_to_plans("", "Ship the thing").unwrap();
-        assert_eq!(out, "- [ ] Ship the thing");
-    }
-
-    #[test]
-    fn append_to_non_empty_plans_uses_newline_separator() {
-        let out = append_task_to_plans("- [ ] Existing", "Ship the thing").unwrap();
-        assert_eq!(out, "- [ ] Existing\n- [ ] Ship the thing");
-    }
-
-    #[test]
-    fn append_trims_input_whitespace() {
-        let out = append_task_to_plans("- [ ] one", "   Ship  the  thing   ").unwrap();
-        // Internal whitespace is preserved as-typed; only leading/trailing
-        // trimmed. Normalization for hashing happens separately.
-        assert_eq!(out, "- [ ] one\n- [ ] Ship  the  thing");
-    }
-
-    #[test]
-    fn append_preserves_markdown_formatting_in_text() {
-        let out = append_task_to_plans("", "Ship **the** ~~old~~ thing").unwrap();
-        assert_eq!(out, "- [ ] Ship **the** ~~old~~ thing");
-    }
-
-    #[test]
-    fn append_preserves_utf8_multibyte_text() {
-        let out = append_task_to_plans("", "Ship 🚀 the café").unwrap();
-        assert_eq!(out, "- [ ] Ship 🚀 the café");
-    }
-
-    #[test]
-    fn append_rejects_empty_input() {
-        let err = append_task_to_plans("- [ ] existing", "").unwrap_err();
-        assert!(err.contains("can't be empty"), "err: {err}");
-    }
-
-    #[test]
-    fn append_rejects_whitespace_only_input() {
-        let err = append_task_to_plans("", "   \t   ").unwrap_err();
-        assert!(err.contains("can't be empty"), "err: {err}");
-    }
-
-    #[test]
-    fn append_rejects_newline_in_input() {
-        let err = append_task_to_plans("", "one\ntwo").unwrap_err();
-        assert!(err.contains("multiple lines"), "err: {err}");
-        // Carriage return too, for defence against copy-paste from
-        // Windows editors.
-        let err2 = append_task_to_plans("", "one\rtwo").unwrap_err();
-        assert!(err2.contains("multiple lines"), "err2: {err2}");
-    }
-
-    #[test]
-    fn append_rejects_pre_prefixed_input() {
-        // Guard against users typing "- [ ] my task" thinking they
-        // need to include the marker.
-        for input in [
-            "- [ ] my task",
-            "- [x] my task",
-            "- [X] my task",
-            "- [ ]",
-        ] {
-            let err = append_task_to_plans("", input).unwrap_err();
-            assert!(
-                err.contains("prefix"),
-                "expected prefix error for {input:?}, got {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn append_rejects_input_over_length_cap() {
-        let long = "x".repeat(MAX_TASK_TEXT_LEN + 1);
-        let err = append_task_to_plans("", &long).unwrap_err();
-        assert!(err.contains("too long"), "err: {err}");
-        // Boundary: exactly MAX bytes is allowed.
-        let at_cap = "x".repeat(MAX_TASK_TEXT_LEN);
-        assert!(append_task_to_plans("", &at_cap).is_ok());
-    }
-
-    #[test]
-    fn append_roundtrip_via_parse_plans_tasks_sees_new_task_as_open() {
-        // The whole point of append is that list_tasks picks up the
-        // new task on its next read. Verify by round-tripping through
-        // parse_plans_tasks.
-        let out = append_task_to_plans("- [x] Done", "Fresh").unwrap();
-        let tasks = parse_plans_tasks(&out);
-        assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks[0].text, "Done");
-        assert!(tasks[0].is_completed);
-        assert_eq!(tasks[1].text, "Fresh");
-        assert!(!tasks[1].is_completed);
     }
 
     // ---------------------------------------------------------------

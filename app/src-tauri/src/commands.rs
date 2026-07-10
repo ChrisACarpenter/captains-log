@@ -1469,11 +1469,12 @@ pub struct TaskToggleResult {
 /// 2. Parses the Weekly Summary and locates the task by
 ///    `(text_hash, ordinal)` — the composite key `list_tasks`
 ///    returns to the frontend.
-/// 3. Flips the checkbox marker byte in place (see
-///    [`toggle_checkbox_in_plans`] for the identity math), stamps a
-///    fresh `Last updated: …` line on the summary (matching
-///    `update_weekly_summary`'s format), and writes the file back
-///    via the storage backend's atomic-write path.
+/// 3. Moves the task line between the Incomplete/Completed sub-lists
+///    (see [`crate::tasks::toggle_task_in_tasks_body`] for the
+///    identity math), stamps a fresh `Last updated: …` line on the
+///    summary (matching `update_weekly_summary`'s format), and
+///    writes the file back via the storage backend's atomic-write
+///    path.
 /// 4. Updates `.metadata/task-completions.json`: inserts an entry
 ///    with `completed_at = local RFC 3339 now` on check, drops any
 ///    matching entry on uncheck.
@@ -1765,9 +1766,9 @@ pub(crate) async fn toggle_task_impl<B: StorageBackend + ?Sized>(
 /// Emits `weekly-file-changed` so any open editor window reloads.
 ///
 /// Validation errors bubble up as-is — the frontend renders them
-/// inline inside the modal. See [`append_task_to_plans`] for the
-/// exact rules (empty text, embedded newlines, pre-existing prefix,
-/// length cap).
+/// inline inside the modal. See [`crate::tasks::append_task_to_tasks_body`]
+/// for the exact rules (empty text, embedded newlines, pre-existing
+/// prefix, length cap).
 #[tauri::command]
 pub async fn append_task_to_current_week(
     app: AppHandle,
@@ -9516,8 +9517,9 @@ mod tests {
 
     #[tokio::test]
     async fn append_task_surfaces_validation_errors_verbatim() {
-        // Errors from append_task_to_plans reach the command boundary
-        // unchanged so the frontend can render them in the modal.
+        // Errors from append_task_to_tasks_body reach the command
+        // boundary unchanged so the frontend can render them in the
+        // Add-task modal.
         use crate::storage::LocalFilesystem;
         use tempfile::TempDir;
 
