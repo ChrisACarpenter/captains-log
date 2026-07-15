@@ -254,6 +254,38 @@ Rust type lives in `tasks.rs` as `AutoImportLog`.
 
 Lifecycle: created lazily on the first successful auto-import. Missing file is treated as "never run" (import will fire on the next trigger). `lastImportAt` is diagnostic only — today-vs-yesterday gating uses `lastImportDate`.
 
+### `link-cache.json`
+
+Per-URL cache of the enrichment fields the Phase 4 inline link-chip widget renders — title, siteName, faviconDataUrl, fetchedAt. Composite key is just the URL string; there's no year/week scoping because a link's metadata is a property of the URL, not the file it was pasted into.
+
+Rust types live in `link_enrich.rs` as `LinkCache` (top-level wrapper) and `EnrichmentResult` (one entry). Populated by the `enrich_link(url, force_refresh?)` Tauri command, which parses the target page's HTML head for `og:title` / `<title>` / `og:site_name` / `<link rel="icon">` and inlines the favicon as a base64 `data:image/...` URI so the frontend can drop it into `background-image` without a second IPC round-trip.
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "url": "https://example.com/post",
+      "title": "An Example Post",
+      "siteName": "Example",
+      "faviconDataUrl": "data:image/png;base64,iVBORw0KGgo…",
+      "fetchedAt": "2026-07-15T09:15:00-04:00"
+    },
+    {
+      "url": "https://prodigygame.atlassian.net/browse/MAGE-1234",
+      "title": null,
+      "siteName": null,
+      "faviconDataUrl": null,
+      "fetchedAt": "2026-07-15T09:16:22-04:00"
+    }
+  ]
+}
+```
+
+Lifecycle: created lazily on the first `enrich_link` call. Entries accumulate forever in v1 — nothing prunes them; if a user wants a reset they can delete the file. Writes go through the storage backend's atomic `write_metadata` path.
+
+Failure posture: an enrichment fetch that fails (401 redirect on auth-gated hosts like Jira / Slack / Confluence, DNS miss, timeout, non-HTML content type) writes an entry where every field except `url` and `fetchedAt` is null. That "empty" result *is* the cache entry — subsequent renders read it back and render the auth-gated fallback chip (globe icon + hostname) without re-hitting the network. The second entry in the example above shows this shape.
+
 ### `capture-draft.json`
 
 In-flight quick-capture note. When the user opens the quick-capture popup and starts typing, the frontend auto-saves the current title/body/labels here on a ~1.5s debounce so the draft survives a quit, crash, or accidental hide. On a successful Submit the file is deleted (the draft is now a real Note in the weekly file); on load, an empty draft (no title, no body, no labels) is treated as "nothing to restore" so blank fields don't repopulate.

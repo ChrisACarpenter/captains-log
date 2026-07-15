@@ -110,6 +110,7 @@ import { tags } from '@lezer/highlight';
 import type { Extension } from '@codemirror/state';
 import type { SyntaxNode } from '@lezer/common';
 import { dateChip } from './date-chip';
+import { linkChip } from './link-chip';
 
 /**
  * Live-preview-only highlight overrides:
@@ -1322,5 +1323,11 @@ export function livePreview(): Extension {
     // a date picker. Listens for the picker's commit event on `window`
     // to dispatch the actual doc edit.
     dateChip(),
+    // Phase 4 — inline link chips. Renders `[text](url)` markdown links
+    // as favicon+label pills. Enrichment (favicon + og:title) fetched
+    // async in the background via the `enrich_link` Tauri command;
+    // cache under `.metadata/link-cache.json`. Plain click opens the
+    // URL; Alt-click enters an edit mode (LinkChipEditWidget).
+    linkChip(),
   ];
 }

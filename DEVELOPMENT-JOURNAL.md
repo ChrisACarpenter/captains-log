@@ -1699,4 +1699,122 @@ Applied fixes in a follow-up workflow round. Also updated `tasks.rs` module docs
 
 Phase 4 — Link Enrichment. Detect URLs in Notes (Jira / GitHub / Slack / Confluence to start), render them as titled cards instead of raw href text. Roadmap has the design brief; nothing locked yet.
 
+---
+
+## 2026-07-15 — Phase 4 shipped: link chips (backend enrichment + paste-upgrade + Alt-click edit)
+
+Phase 4 closed in one big session, but the shape of the phase moved a lot before any code shipped. The roadmap brief called for a curated per-service enricher — Jira / GitHub / Slack / Confluence card renderers with hand-rolled metadata pipelines. What actually shipped is generic: HTML `<head>` scraping across every publicly-fetchable site, and a graceful-degrade path for anything auth-gated. The final polish round was four attempts at a WebKit-only wrap-boundary vanish bug that ended up being a widget-architecture problem, not a CSS problem.
+
+### Decisions made
+
+Design plans-out from earlier in the week; big pivots from the original roadmap brief:
+
+- **No MCP, no curated hostname list.** Just `<head>` scraping — `og:site_name` / `og:title` / `<title>` / `<link rel="icon">` — generic across every publicly-fetchable site. The curated approach was going to need one enricher per service, an auth token per service, and a maintenance surface for every service's API drift. Generic scraping trades pixel-perfect Jira cards for a single pipeline that works everywhere including the long tail (Loom, Notion public pages, personal blogs, GitHub issue links, MDN pages, etc.).
+- **Auth-gated URLs degrade to hostname chip.** Jira, Slack, internal Confluence, Notion private pages — all return a login-redirect HTML on unauthenticated fetch. The enricher returns an empty `EnrichmentResult`; the frontend renders `jira.prodigygame.org` in a globe-favicon pill. User Alt-clicks the chip to edit the label to something meaningful. Failure isn't a special case — it's the same "empty result" path that also handles offline / 404 / timeout / malformed URL. Failure-is-a-value scales cleanly.
+- **Storage stays markdown `[text](url)`.** Chip is render-layer only. The markdown source is what disk sees, what git sees, what other Markdown viewers see. Widget is a `Decoration.replace` on top of standard CommonMark link syntax; delete the extension and the doc reads normally.
+- **Chip label ALWAYS wins from the markdown source, never from enrichment.** If the user typed `[Foo](url)`, the chip says "Foo" even after enrichment resolves to "Bar - Site Name." Alt-click-to-edit is coherent because the user is editing the markdown, not "editing a chip." Enrichment only fills in the label for paste-no-selection URLs where there's no user intent yet.
+
+### Slice A — backend enrichment (link_enrich.rs)
+
+`LinkCache` sidecar at `.metadata/link-cache.json` — same posture as `TaskDueDates`: missing → empty, corrupt → stderr + empty, atomic write via tempfile + rename. New Tauri command `enrich_link(url, force_refresh?)`. Rust deps added: `reqwest` (rustls-tls + json — avoid OpenSSL) and `scraper` (HTML parsing).
+
+Shape:
+
+- `parse_head_metadata(html: &str) -> EnrichmentResult` — pure function, extracts og:site_name / og:title / `<title>` / favicon href. Fully deterministic; every parser test hits a canned HTML string.
+- `fetch_and_parse(url) -> EnrichmentResult` — async orchestration: HTTP GET with 3s timeout + 2MB body cap, parse head, optional second GET for the favicon with 2s timeout + 128KB cap, resolve favicon href to absolute URL, base64 the bytes for inline embedding.
+- `enrich_link` command — cache lookup first, `force_refresh` bypass, TTL 7 days, cache write-through.
+
+**Failure is a value.** Timeout / non-2xx / DNS miss / login redirect / malformed URL all return an empty `EnrichmentResult` — never a `Result::Err`. The frontend never has to distinguish "failed to fetch" from "site returned empty metadata"; both surface as the hostname/globe fallback chip. This single-path model dropped a ton of branching from the widget code.
+
+3s HTML timeout / 2s favicon timeout / 2MB HTML cap / 128KB favicon cap. Caps are enforced during streaming so a pathological 10GB response gets cut off at 2MB without buffering the whole thing. 27 tests, all hermetic: parse tests hit canned HTML strings; enrich/cache tests use `LocalFilesystem` + `TempDir` with no network.
+
+### Slice B/C/D — editor extensions (link-chip.ts, link-paste.ts)
+
+`ViewPlugin` walks the Lezer syntax tree for `Link` nodes across `view.visibleRanges`. Per-view enrichment cache (Map keyed by URL). When the plugin sees a new URL, it fires the `enrich_link` IPC async and — critically — dispatches a `StateEffect` when the promise resolves so the plugin re-runs and rebuilds decorations with the fresh label + favicon.
+
+`Decoration.replace` with `atomicRanges` registration so the cursor treats the chip as one unit (arrow keys skip past instead of getting stuck inside the widget's DOM). Widget renders as an `inline-block` pill: a `background-image` span for the favicon (NOT `<img>` — see the vanish saga), then the label text from the markdown `[text]`.
+
+Two click behaviors:
+
+- **Plain click** — open the URL via Tauri opener plugin. Behaves like a normal link.
+- **Alt-click** — swap the current selection into the `[text]` range so the user can type-to-replace edit the label. Position lookup uses `view.posAtDOM(btn)` + syntax tree walk to find the enclosing Link node, then `view.dispatch({ selection: EditorSelection.range(labelStart, labelEnd) })`. Live position lookup means the click behavior stays correct even if the doc changed since the widget was built.
+
+**Paste handlers** live in a separate `link-paste.ts` extension registered as `EditorView.domEventHandlers({ paste })`:
+
+- **Paste-with-selection** — if the pasted content is a URL and there's a selection, wrap it as `[selected](url)`. Slack pattern; muscle memory for anyone who pastes links a lot.
+- **Paste-no-selection** — insert the bare URL immediately (no waiting on the network), then async-upgrade the doc to `[title](url)` when `enrich_link` resolves. The upgrade uses a stored `from` position and re-verifies the URL text at that position before rewriting, so a fast-typing user who edited past the paste point doesn't get their content stomped.
+
+Chip CSS lives alongside `.cm-date-chip` styles in `MarkdownEditor.svelte`. Same visual family: rounded pill, accent-tinted border, subtle hover state.
+
+### The vanish-bug saga
+
+Four rounds of iteration on a WebKit-specific layout bug. Chris's real journal has enough long-labelled links to make wrapped-line chip rendering the normal case, not an edge case, and the bug surfaced there consistently.
+
+**Symptom.** The chip renders correctly on first paint. As soon as a doc edit lands ANYWHERE else in the document (typing in a different paragraph, adding a new note heading, whatever) — the chip vanishes if it happens to be positioned at a line-wrap boundary. Refresh the view (scroll it out and back in, or trigger a viewport rebuild) and it comes back. Chrome and Firefox: fine. WebKit only.
+
+**Round 1 (CSS `max-width` + `overflow: hidden`).** Assumed the chip was overflowing its wrapping line box and getting clipped. Tightened max-width to `min(32ch, 100%)`, added `overflow: hidden`, `min-width: 0` on flex child. Didn't fix. Chip still vanished on remote edits; nothing about the width was the issue.
+
+**Round 2 (strip max-width entirely).** If date-chip works and it has no width caps, maybe the width caps themselves were the problem. Removed max-width / ellipsis / overflow entirely to match date-chip's natural-width rendering. Didn't fix.
+
+**Round 3 (structural DOM changes).** Switched the favicon from `<img>` to a `background-image` span (eliminates async image decoding as a variable). Switched the widget wrapper from `inline-flex` to `inline-block`. Rationale: reduce every subsystem WebKit might be tripping over. Didn't fix.
+
+**Round 4 — the ACTUAL fix.** Chris said "take a step back and reassess the chip code as a whole." That reframe from CSS-tweak to widget-architecture-audit was the whole thing.
+
+The widget's `eq()` method was comparing `from`/`to` positions along with the content:
+
+```
+eq(other) { return this.from === other.from && this.to === other.to && this.url === other.url && this.label === other.label && this.favicon === other.favicon }
+```
+
+Any doc edit ANYWHERE ahead of the link shifted `from` and `to`. `eq()` returned false. CodeMirror tore down the old widget DOM and rebuilt a new one — inside the already-laid-out wrapping line box. WebKit's layout engine sometimes lost track of the newly-inserted widget during that mid-line reflow. Chrome and Firefox re-laid-out the whole line and were fine.
+
+Fix: content-only `eq()`.
+
+```
+eq(other) { return this.url === other.url && this.label === other.label && this.favicon === other.favicon }
+```
+
+Same URL + same label + same favicon means the widget's rendered output is identical — no rebuild needed, regardless of what `from`/`to` say. CM6 keeps the existing widget DOM in place and just repositions the decoration bounds internally.
+
+Removing positions from `eq()` meant the click handlers could no longer read them from the widget instance. Instead: `view.posAtDOM(btn)` at click time to locate the widget's DOM node, then syntax-tree walk from that position to find the enclosing Link node and its `[text]` range. Live positions always, computed on demand.
+
+**Date-chip has the same eq() pattern.** But its labels are always short (a formatted date like "Jul 15" or "Overdue") — they don't hit wrap boundaries. So the "widget rebuilt mid-line-reflow" failure mode never surfaced there. The bug wasn't in the chip class; it was in a pattern that both chips share, hidden until label length made it visible. Date-chip is now on the same content-only `eq()` for consistency, even though it was never symptomatic.
+
+### The import-dedup bug (same session)
+
+Second bug caught during smoke testing. Scenario:
+
+1. Chris pastes a URL in prose. Paste handler upgrades it to `[title](url)`.
+2. Chris ALSO adds the same URL as a task via the "+ Add Task" modal. That modal is a plain HTML `<input>`, not a CodeMirror instance — the paste handler doesn't fire. Task stores the bare URL.
+3. Chris completes the task later. Auto-import runs. Import scans candidates against Key Accomplishments existing lines via `normalize_task_text` (case / trailing-punct tolerant).
+4. `normalize_task_text` doesn't know about markdown link syntax. `[title](url)` and `url` normalize to different strings. Dedup misses. Import inserts a DUPLICATE bullet — the prose `[title](url)` is already there, and now the task's bare `url` gets appended.
+
+Fix in `tasks.rs`: new `strip_markdown_links_for_dedup` helper collapses `[text](url)` → `url` (regex over the markdown link shape). Applied ONLY in the dedup comparison path inside `merge_completed_tasks_into_key_accomplishments`, NOT inside `normalize_task_text` itself. `normalize_task_text` is the identity hash for the completions sidecar — changing it would invalidate every existing sidecar entry Chris has written since Phase 3d. Dedup-scoped normalization is a separate pass over the identity-scoped normalization. 7 new tests cover: bare url vs markdown, markdown vs markdown, case variation, punctuation variation, multi-link lines, no-link lines, all-duplicates.
+
+### Deferred as follow-ups
+
+- **Paste handler in task-add modal + inline task-edit input.** Both are plain HTML `<input>` elements, not CodeMirror. The dedup fix papers over the immediate correctness bug, but the underlying UX gap remains: pasting a URL into the task-add modal gives you a bare URL where pasting into prose gives you `[title](url)`. Fixing means either CodeMirror-izing those inputs (heavy) or writing a lightweight paste-upgrade for `<input>` elements (medium). Not urgent now that dedup is correct.
+- **Generic oEmbed client for Loom / Figma / Twitter / etc.** Some sites don't put useful metadata in `<head>` but do expose an oEmbed endpoint. Deferred pending real-world need — Chris hasn't hit a link that "looks empty but isn't" often enough to prioritize this.
+- **Refresh existing chip when enrichment updates on a doc that already had the URL cached before.** Currently the enrichment fetch only fires on first sight of a URL in a new plugin instance. If Chris opens a note, sees a fallback chip, then closes and re-opens the app with new metadata cached, the chip will still show the old fallback until the plugin re-instantiates. Real edge case; low frequency.
+
+### Lessons worth keeping
+
+- **"Read the CSS one more time" isn't always the fix.** Four rounds of CSS iteration didn't move the symptom on the vanish bug. The load-bearing change was structural — `eq()` semantics in the widget class, not any pixel or property in the stylesheet. When N rounds of "surely THIS max-width is the one" fail to shift a bug, that's the signal to audit the layer above the one you've been tweaking.
+- **Date-chip is the reference pattern for CodeMirror widgets in this app.** If a new widget is failing in ways date-chip doesn't, the difference between them is worth staring at. For link-chip, the difference was labels-long-enough-to-hit-wrap-boundaries combined with `eq()`-that-compares-positions. Either alone would've been fine; the combination was the bug. Any future chip type wraps into that same pattern — read date-chip first, then diverge only where you need to.
+- **`view.dispatch({})` is a no-op for a ViewPlugin gated on docChanged/viewportChanged/selectionSet.** First naive attempt at "re-render the plugin when async enrichment lands" was an empty dispatch; nothing rebuilt. Use a real `StateEffect` — the cost is one extension registration, the semantics are clear, and gated ViewPlugins pick it up correctly.
+- **Auth-gated services aren't a special case in the enrichment pipeline — they're the general "empty result" path.** Same code that handles Jira's login-redirect page also handles offline / 404 / timeout / malformed URL / a Confluence page that returns 200 OK but with no useful metadata. Collapsing all of these into "returns an empty `EnrichmentResult`" removed a lot of branching from the widget code and made the fallback UX one path instead of five.
+- **Content-normalizers deserve a dedup-scoped variant.** `normalize_task_text` is the identity hash for the completions sidecar — changing it invalidates every existing entry. `strip_markdown_links_for_dedup` is a separate pass, applied only where dedup semantics matter. Same idea as the "one hash for identity, another for dedup" split in indexing systems: identity is stable across the lifetime of a record, dedup is a scoped comparison for a specific operation. Don't conflate the two.
+- **A widget's `eq()` should compare its RENDERED OUTPUT, not its source coordinates.** From/to positions are metadata about where the widget lives, not what it looks like. CodeMirror manages positions internally regardless of what `eq()` returns; making `eq()` false on a position shift only tells CM6 "rebuild the DOM even though the pixels would be identical" — which is exactly the mid-reflow window where WebKit lost the widget. Content-only `eq()` is the correct primitive for any widget whose rendered output is a pure function of its own state.
+
+### Verification
+
+- `cargo test`: 522 passed, 0 failed. Grew from 493 (Phase 3e) to 522: 27 new in `link_enrich` (parse + fetch + cache + command), 5 new for `strip_markdown_links_for_dedup`, 7 new merge-completed dedup tests exercising the markdown-link vs bare-URL scenarios end-to-end. Two other tests reshuffled but netted zero.
+- `svelte-check`: 429 files, 0 errors, 0 warnings.
+- `vite build`: clean.
+- Manual smoke on Chris's real journal: (1) paste URL with selection → wraps as `[selected](url)` immediately, no round-trip; (2) paste URL with no selection → bare URL appears immediately, async upgrades to `[title](url)` a second later; (3) Alt-click a chip → selection lands on the `[text]` and type-to-replace works; (4) auth-gated Jira URL → globe-favicon hostname chip, no error surfaced; (5) wrap-boundary chip stability confirmed by typing in a different paragraph and watching the chip stay put through multiple edits; (6) the specific import-dedup scenario Chris hit → completed task with bare URL now dedupes against a prose `[title](url)` bullet correctly.
+
+### Next
+
+Phase 5 — Performance Review Module. Design brief in the roadmap; nothing locked yet. Or a polish pass on the deferred items (paste-handler in task inputs is the most user-facing gap).
+
 

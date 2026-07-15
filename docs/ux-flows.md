@@ -35,7 +35,7 @@ Goal: ~2 minutes to write a structured summary using the 4-field template.
 3. The four-field form is always editable — there's no separate "edit mode." Each field is a live-preview MarkdownEditor.
 4. User fills in any or all of the four fields plus the Labels chip input
 5. Edits autosave (1.5s debounce). The [SaveStatus](../app/src/lib/SaveStatus.svelte) indicator next to the Save button reports current state.
-6. **Send weekly summary** (in the actions row) opens the [SendToManagerButton](../app/src/lib/SendToManagerButton.svelte) confirm modal — see Flow 6 below.
+6. **Send weekly summary** (in the actions row) opens the [SendToManagerButton](../app/src/lib/SendToManagerButton.svelte) confirm modal — see Flow 7 below.
 7. If reminders are enabled and the summary's content hash changes, that week's reminder is suppressed.
 
 ## Flow 2a — Task Management
@@ -96,7 +96,30 @@ Reachable from `/settings` (via the main window's nav). Six tabs:
 
 Tray-menu escape hatches: "Preset Theme" submenu (Dark / Light) flips theme without going through Settings — used when a Custom palette makes the in-app picker unreadable.
 
-## Flow 5 — Weekly reminder notification
+## Flow 5 — Link chips (Phase 4)
+
+Goal: paste a URL into any live-preview MarkdownEditor and get an inline pill (favicon + label) instead of a raw hyperlink, without disrupting normal markdown editing.
+
+Surface: every live-preview MarkdownEditor — quick capture, Weekly Summary fields, `/journal` week body, task-row inline editors. Implemented as CodeMirror extensions ([app/src/lib/link-chip.ts](../app/src/lib/link-chip.ts) + [app/src/lib/link-paste.ts](../app/src/lib/link-paste.ts)); there's no matching Svelte component in [components.md](components.md) because the chip is a `Decoration.replace` widget, not a mountable component.
+
+**Paste.**
+
+- URL-only paste **with a selection** → wraps as `[selected](url)` (Slack pattern). No async work; commits immediately.
+- URL-only paste **with no selection** → inserts the bare URL, then kicks off `enrich_link(url)` asynchronously. When enrichment resolves with a usable title, the bare URL is rewritten to `[title](url)` and a `StateEffect` triggers the widget refresh. If enrichment returns empty (auth-gated host, timeout, non-HTML), the bare URL stays put — no fake title is invented.
+
+**Chip rendering.** Any `[text](url)` markdown in live-preview mode renders as a pill: favicon on the left, label on the right, hover tooltip carrying the resolved page title / site name. The label is always the markdown `[text]` — enrichment only contributes the favicon and the tooltip, never the visible text. This means users can rename a link freely (`[MAGE-1234](url)`) and the chip respects that.
+
+**Interactions.**
+
+- **Plain click** on the chip → opens the URL in the system browser via Tauri's opener plugin. No in-app webview.
+- **Alt-click** on the chip → the widget computes its live position with `view.posAtDOM(btn)` and walks the Lezer syntax tree to find the enclosing Link node, then selects the `[text]` range so the user can type-to-replace the label. Escape or moving the cursor out re-renders the chip.
+- **Cursor-inside-hides** rule (matches the inline date-chip behavior in `MarkdownEditor.svelte`): moving the cursor into the link range unwraps the chip and shows the raw `[text](url)` markdown, so it's directly editable without a modal or side panel. Cursor-out re-renders.
+
+**Auth-gated fallback.** Jira, Slack, Confluence, private GitHub, and any other host that returns an auth redirect (or refuses the HEAD/GET) produce an empty `EnrichmentResult` — the fields except `url` and `fetchedAt` are null. The chip still renders, but with a generic globe icon and the URL's hostname as the label if no `[text]` was authored. Users who want the ticket key visible can Alt-click and retype (e.g. `[MAGE-1234](https://prodigygame.atlassian.net/browse/MAGE-1234)`); that edited label survives across sessions because it's stored in the markdown, not in the cache.
+
+**Cache posture.** Both the successful and the empty enrichments are persisted to `.metadata/link-cache.json` — no retries on subsequent renders. See data-format.md for the schema. To force a refresh (e.g. a Jira ticket that later becomes public), the `enrich_link` command accepts `force_refresh: true`; there's no UI hook for this in v1.
+
+## Flow 6 — Weekly reminder notification
 
 1. At the configured day(s)/time, macOS posts a native notification (via `UNUserNotificationCenter`)
 2. Message: *"Time to log this week's Summary, Chris."* with optional **Write** action button (visible when system Alert Style is Persistent)
@@ -104,7 +127,7 @@ Tray-menu escape hatches: "Preset Theme" submenu (Dark / Light) flips theme with
 4. The scheduler re-derives the next fire instant from `chrono::Local::now()` each loop iteration, so sleep / hibernation doesn't leave the next fire stuck in the past (Phase 2.9b fix)
 5. Summary edits that change the content hash suppress further reminders for that week
 
-## Flow 6 — Send weekly summary to manager
+## Flow 7 — Send weekly summary to manager
 
 Surface: a **Send weekly summary** button on `/summary` and `/journal` (when a week is selected). Implementation: [SendToManagerButton](../app/src/lib/SendToManagerButton.svelte).
 
@@ -118,10 +141,10 @@ Surface: a **Send weekly summary** button on `/summary` and `/journal` (when a w
 5. On confirmed dispatch, the sent-log (`<root>/.metadata/sent-log.json`) is stamped with `sentAt`, `contentHash`, `sentTo`.
 6. Resends re-derive the hash; the button surface shows `Sent {time}` when locked or `Send updated version` (stale) when the content has shifted.
 
-## Flow 7 — Search & Navigation (Phase 3b — planned)
+## Flow 8 — Search & Navigation (Phase 3b — planned)
 
 Full-text search across all weekly files with label / date / file filters and click-to-jump. Not yet shipped; design parked until Phase 3a (Label Library viewer + bulk management) lands first.
 
-## Flow 8 — Performance Review export (Phase 5 — planned)
+## Flow 9 — Performance Review export (Phase 5 — planned)
 
 The reason this whole app exists. Date-range picker, review-question templates, bundled markdown export with link-enriched metadata, one-click "draft my review" handoff to an LLM. Not yet shipped; design lives in [ROADMAP.md](../ROADMAP.md#phase-5--performance-review-module).

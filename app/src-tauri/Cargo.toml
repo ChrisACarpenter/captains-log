@@ -79,6 +79,20 @@ percent-encoding = "=2.3"
 # drift-control convention.
 tauri-plugin-clipboard-manager = "=2.3"
 tauri-plugin-fs = "2.5.1"
+# HTTP client for Phase 4 link-chip enrichment. Fetches the pasted URL's
+# HTML head + favicon + oEmbed JSON. `rustls-tls` avoids the OpenSSL
+# dependency (bundle stays lean; macOS notarization doesn't hit an
+# OpenSSL codesigning quirk). `json` unlocks .json() on Response for
+# oEmbed parsing. All defaults dropped so the tokio runtime feature-set
+# doesn't get pulled in a second time.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# HTML5-compliant parser for Phase 4 link-chip enrichment. We only need
+# `<head>` inspection (og:site_name, og:title, <title>, <link rel="icon">,
+# <link rel="alternate" type="application/json+oembed">) — hand-rolled
+# regexes on real-world HTML are a foot-gun (unclosed tags, character
+# entities, mixed case, inline scripts). scraper wraps html5ever + gives
+# us a CSS-selector API on the parsed tree.
+scraper = "0.27.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Modern macOS notification API — wraps UNUserNotificationCenter and gives us

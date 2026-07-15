@@ -4525,6 +4525,33 @@ pub async fn clear_capture_draft(
 }
 
 // ---------------------------------------------------------------------------
+// Link chip enrichment (Phase 4)
+// ---------------------------------------------------------------------------
+//
+// The editor's paste handler / widget calls `enrich_link(url)` when it
+// wants to render a link chip. Backend fetches the URL, extracts og-tags
+// + favicon, caches the result under `.metadata/link-cache.json`, and
+// returns whatever it found. See `link_enrich.rs` for the pipeline
+// details. Cache hits round-trip in ~1ms; cold fetches are typically
+// 100-500ms (3s hard cap).
+
+/// Enrich a pasted URL for the link-chip widget. Returns whatever
+/// metadata we could scrape from the target page's HTML head — every
+/// field is optional. Fetch failures return an empty result (never an
+/// error); the frontend renders a hostname chip in that case.
+#[tauri::command]
+pub async fn enrich_link(
+    storage_state: State<'_, SharedStorage>,
+    url: String,
+    force_refresh: Option<bool>,
+) -> Result<crate::link_enrich::EnrichmentResult, String> {
+    let storage = storage_state.read().await;
+    crate::link_enrich::enrich(&*storage, &url, force_refresh.unwrap_or(false))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Send weekly summary to manager (Phase 2.6)
 // ---------------------------------------------------------------------------
 //

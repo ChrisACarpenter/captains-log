@@ -67,6 +67,7 @@
   } from '@codemirror/language';
   import { tags } from '@lezer/highlight';
   import { markdownLinks } from './markdown-links';
+  import { linkPaste } from './link-paste';
   import { markdownFormattingKeymap } from './markdown-formatting';
   import { livePreview as livePreviewExt } from './live-preview';
   import { isValidIsoDateRange } from './date-chip';
@@ -335,6 +336,12 @@
         // Cmd-click on Markdown links opens via Tauri's opener. Sees Link
         // (`[text](url)`), Autolink (`<url>`), and GFM bare URLs.
         markdownLinks(),
+        // Phase 4 — URL paste handling. Selection + URL paste wraps the
+        // selection as `[sel](url)` (Slack pattern); no-selection URL
+        // paste inserts the bare URL and asynchronously upgrades it to
+        // `[title](url)` markdown once enrich_link resolves. Active in
+        // both live-preview and source modes.
+        linkPaste(),
         // Slack/Typora-style live preview — hide markdown markers via
         // atomic Decoration.replace ranges so the user sees rendered rich
         // text. Opt-in per surface (default false); when off the editor
@@ -715,6 +722,80 @@
     opacity: 0.85;
   }
   .md-editor :global(.cm-date-chip-text) {
+    line-height: 1.4;
+  }
+
+  /* Link chips (Phase 4). Same pill shape as .cm-date-chip so the
+   * editor's chip vocabulary stays consistent. The favicon lives in
+   * place of the calendar glyph. Chips can be clicked (open URL) or
+   * Alt-clicked (edit label) — the pointer cursor + the box-shadow
+   * focus ring both signal "actionable." */
+  /* Link chips are `display: inline-block` (NOT inline-flex) with
+   * inline children — icon + text lay out through the browser's
+   * regular inline flow. inline-flex in CodeMirror's wrapping line
+   * boxes had a WebKit-specific failure mode where the chip vanished
+   * mid-layout on any doc change that re-measured the viewport;
+   * inline-block sidesteps it entirely (matches how a native
+   * link/word wraps to a new line when it hits the edge).
+   *
+   * The favicon is a background-image span (not an <img>) for the
+   * same reason: <img> is a replaced element whose intrinsic size
+   * comes from the (async-decoded) image bytes, which CM6's layout
+   * pipeline treats differently from an inline block with fixed CSS
+   * dimensions. */
+  .md-editor :global(.cm-link-chip) {
+    display: inline-block;
+    padding: 1px 8px 1px 6px;
+    margin: 0 1px;
+    background: var(--bg-elevated);
+    color: var(--accent-primary-text);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-pill);
+    font: inherit;
+    font-size: 0.92em;
+    font-weight: 500;
+    line-height: 1.4;
+    cursor: pointer;
+    vertical-align: baseline;
+    white-space: nowrap;
+    transition: background var(--transition-fast),
+      border-color var(--transition-fast);
+    outline: none;
+  }
+  .md-editor :global(.cm-link-chip:hover) {
+    background: var(--bg-surface);
+    border-color: var(--accent-primary);
+  }
+  .md-editor :global(.cm-link-chip:focus-visible) {
+    box-shadow: 0 0 0 2px var(--focus-glow);
+    border-color: var(--accent-primary);
+  }
+  .md-editor :global(.cm-link-chip-icon) {
+    /* Favicon rendered via `background-image` — dimensions are entirely
+     * CSS-driven, no async <img> decoding to trip up CM6's layout pass. */
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: center;
+    vertical-align: text-bottom;
+    margin-right: 4px;
+    opacity: 0.9;
+  }
+  .md-editor :global(.cm-link-chip svg) {
+    /* Fallback globe icon when no favicon was fetched. Inline-block
+     * so it participates in the same flow as .cm-link-chip-icon. */
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    vertical-align: text-bottom;
+    margin-right: 4px;
+    opacity: 0.9;
+  }
+  .md-editor :global(.cm-link-chip-text) {
+    /* Baseline-aligned inline span — no flex quirks. */
+    vertical-align: baseline;
     line-height: 1.4;
   }
 

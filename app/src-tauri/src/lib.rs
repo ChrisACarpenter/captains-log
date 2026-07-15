@@ -12,6 +12,7 @@ pub mod commands;
 pub mod email;
 pub mod email_html;
 pub mod labels;
+pub mod link_enrich;
 pub mod notes;
 pub mod reminders;
 pub mod sent_log;
@@ -448,6 +449,7 @@ pub fn run() {
             commands::load_capture_draft,
             commands::save_capture_draft,
             commands::clear_capture_draft,
+            commands::enrich_link,
             commands::get_sent_record,
             commands::compose_weekly_email,
             commands::mark_weekly_summary_sent,

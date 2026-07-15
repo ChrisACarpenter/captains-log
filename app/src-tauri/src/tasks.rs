@@ -180,6 +180,69 @@ pub fn normalize_task_text(text: &str) -> String {
     lowered
 }
 
+/// Strip `[text](url)` Markdown link syntax down to the bare `url` for
+/// dedup comparisons. Load-bearing for the import-completed-tasks
+/// flow: a task line typed with a bare URL vs. one where the paste
+/// handler upgraded the URL into a chip-shaped `[title](url)` should
+/// still dedupe against each other. Both forms canonicalize to the
+/// bare URL — the label is presentation, the URL is identity.
+///
+/// Non-link brackets pass through untouched. A malformed link (e.g.
+/// unclosed `(`) is emitted verbatim so we don't lose text.
+///
+/// Only used by [`merge_completed_tasks_into_key_accomplishments`].
+/// [`normalize_task_text`] deliberately stays link-aware-blind so
+/// existing sidecar hashes keyed on the full markdown source don't
+/// invalidate.
+pub fn strip_markdown_links_for_dedup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'[' {
+            // Search forward for the closing `]`, then a following `(`,
+            // then the closing `)`. All must be on the same segment we
+            // scanned — we don't walk past a newline because a link
+            // that spans lines isn't a valid inline link.
+            if let Some(close_bracket) = find_matching(bytes, i + 1, b']') {
+                if close_bracket + 1 < bytes.len() && bytes[close_bracket + 1] == b'(' {
+                    if let Some(close_paren) =
+                        find_matching(bytes, close_bracket + 2, b')')
+                    {
+                        // Emit just the URL portion.
+                        out.push_str(&text[close_bracket + 2..close_paren]);
+                        i = close_paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        // Emit one byte and advance. UTF-8 continuation bytes ride
+        // along naturally — we only ever match ASCII sentinels
+        // (`[`, `]`, `(`, `)`, `\n`), all single-byte in UTF-8.
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Find the first byte matching `target` in `bytes[from..]`, returning
+/// `None` if a newline (or end-of-string) comes first. Used by
+/// [`strip_markdown_links_for_dedup`] to bound the search within one
+/// line — a Markdown inline link that straddles a line break isn't a
+/// link.
+fn find_matching(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
+    for i in from..bytes.len() {
+        if bytes[i] == b'\n' {
+            return None;
+        }
+        if bytes[i] == target {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// SHA-256 hex of the normalized task text. Length-prefixed input
 /// following the pattern from `sent_log::hash_weekly_summary` — the
 /// prefix is cheap insurance against future callers concatenating
@@ -246,11 +309,15 @@ pub fn merge_completed_tasks_into_key_accomplishments(
     completed_task_texts: &[String],
 ) -> MergeCompletedResult {
     // Build the dedupe set: every existing line's normalized form.
+    // We strip `[text](url)` link syntax down to the bare URL before
+    // normalizing so a "bare URL" task and a "chip-upgraded" task
+    // (same URL, different label) still collide. See
+    // `strip_markdown_links_for_dedup` for rationale.
     let existing_norms: std::collections::HashSet<String> = key_accomplishments
         .split('\n')
         .map(|line| {
             let stripped = line.trim_start().trim_start_matches("- ").trim();
-            normalize_task_text(stripped)
+            normalize_task_text(&strip_markdown_links_for_dedup(stripped))
         })
         .filter(|n| !n.is_empty())
         .collect();
@@ -261,7 +328,7 @@ pub fn merge_completed_tasks_into_key_accomplishments(
     let mut fresh: Vec<&str> = Vec::new();
     let mut skipped: u32 = 0;
     for text in completed_task_texts {
-        let norm = normalize_task_text(text);
+        let norm = normalize_task_text(&strip_markdown_links_for_dedup(text));
         if norm.is_empty() {
             continue;
         }
@@ -1793,6 +1860,81 @@ mod tests {
             out.new_key_accomplishments,
             "#### Completed Tasks\n- ship it\n- Fix the bug"
         );
+    }
+
+    #[test]
+    fn strip_markdown_links_replaces_link_with_bare_url() {
+        // The Phase 4 canonical case: a Markdown link collapses to
+        // just its href for dedup comparison.
+        let out = strip_markdown_links_for_dedup(
+            "Read [the docs](https://example.com/docs) before shipping",
+        );
+        assert_eq!(out, "Read https://example.com/docs before shipping");
+    }
+
+    #[test]
+    fn strip_markdown_links_handles_multiple_links_per_line() {
+        let out = strip_markdown_links_for_dedup(
+            "See [one](https://a.example) and [two](https://b.example)",
+        );
+        assert_eq!(out, "See https://a.example and https://b.example");
+    }
+
+    #[test]
+    fn strip_markdown_links_leaves_non_link_brackets_alone() {
+        // Brackets not followed by `(url)` — pass through verbatim.
+        let out = strip_markdown_links_for_dedup("An [aside] with no href");
+        assert_eq!(out, "An [aside] with no href");
+    }
+
+    #[test]
+    fn strip_markdown_links_leaves_line_spanning_bracket_alone() {
+        // A `[` without a matching `]` on the same line is not a link.
+        let out = strip_markdown_links_for_dedup("Broken [text\non next line");
+        assert_eq!(out, "Broken [text\non next line");
+    }
+
+    #[test]
+    fn strip_markdown_links_ignores_bracket_without_paren() {
+        // `[text]` NOT followed by `(url)` isn't a link.
+        let out = strip_markdown_links_for_dedup("Refs like [MAGE-1234] stay put");
+        assert_eq!(out, "Refs like [MAGE-1234] stay put");
+    }
+
+    #[test]
+    fn merge_completed_dedupes_link_form_against_bare_url_form() {
+        // The Phase 4 bug: task line 1 has a bare URL, an imported
+        // bullet has the paste-handler-upgraded [title](url) form.
+        // Same URL → dedup should catch it.
+        let body = "\
+#### Completed Tasks
+- Decide on the plan: [Full regression plan](https://example.com/regression)";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec!["Decide on the plan: https://example.com/regression".to_string()],
+        );
+        assert_eq!(out.imported, 0);
+        assert_eq!(out.skipped, 1);
+        assert_eq!(out.new_key_accomplishments, body);
+    }
+
+    #[test]
+    fn merge_completed_dedupes_bare_url_form_against_link_form() {
+        // Reverse of the case above: existing bullet has the bare URL,
+        // candidate has the upgraded link. Same URL → dedup wins.
+        let body = "\
+#### Completed Tasks
+- Decide on the plan: https://example.com/regression";
+        let out = merge_completed_tasks_into_key_accomplishments(
+            body,
+            &vec![
+                "Decide on the plan: [Regression Doc](https://example.com/regression)"
+                    .to_string(),
+            ],
+        );
+        assert_eq!(out.imported, 0);
+        assert_eq!(out.skipped, 1);
+        assert_eq!(out.new_key_accomplishments, body);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 3e ✅ done — task feature closed out, next up Phase 4 (Link Enrichment)
+## Current phase: Phase 4 ✅ done — link chips shipped, next up Phase 5 (Performance Review Module)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -12,7 +12,9 @@ Phase 3b shipped 2026-07-06 — full-text search across every weekly file (Weekl
 
 **Phase 3c (task list aggregator), Phase 3d (task rearchitecture, Slices 6a–6c + auto-import), and Phase 3e (task due dates + reminders) are done.** The aggregator shipped as designed, then the whole task feature was rearchitected around a dedicated `### Tasks` section with HTML-comment anchors — tasks became first-class objects with a locked-down UI while markdown stayed the storage layer. Row actions (pencil edit + trash delete), Copy-Completed-to-Key-Accomplishments, and once-per-day auto-import all landed on top of 3d. Phase 3e then added optional due dates (calendar action, DatePickerPopover reuse, red-chip Overdue heading, sort-earliest-first, rollover carries the debt forward) and OS-notification task reminders wired to a dedicated tokio scheduler parallel to the journal reminder, all with a Noot icon. See phase sections below for the full receipts.
 
-**Next up: Phase 4 — Link Enrichment.** Detect URLs in Notes (Jira, GitHub, Slack, Confluence to start), fetch metadata via MCP connectors, cache under `.metadata/links/`, and render enriched cards in the rendered view.
+**Phase 4 (link chips) is done.** Shipped 2026-07-15 with a different design than the original brief: no MCP connectors, no curated per-service list, no `.metadata/links/` card store. Instead, every markdown link in the editor renders as an inline pill chip (favicon + label from the `[text]`) via a CodeMirror widget layer, backed by a generic HTML-head scraper (`og:title` / `<title>` / `og:site_name` / `<link rel="icon">`) with a `.metadata/link-cache.json` sidecar. Auth-gated URLs degrade to a hostname/globe fallback chip. Storage stays plain markdown — the chip is a rendering concern, not a data model change. See Phase 4 receipt below.
+
+**Next up: Phase 5 — Performance Review Module.** The reason this app exists: date-range bundling of Notes + Summaries into an editable review-first-draft.
 
 ---
 
@@ -493,13 +495,68 @@ Layered on top of due dates: OS notifications fired "X days before due, at time 
 - **Pre-release cleanup, tier 2** (commit `314d27b`) — extracted `TaskRowActionButton` + `TaskMetaChip` out of the landing page (three copies each on incomplete + completed + overdue rows collapsed to one component per shape), swapped the delete confirmation modal to the shared `ConfirmDialog`, added pencil / trash / check to the `Icon` component, and collapsed `+page.svelte` by ~407 lines.
 - **Toggle re-key needs a position-move algorithm (NOT zip).** Documented in commit `617225c`. When a task is toggled the file order of the incomplete + completed sub-lists both shift, so `parse_plans_tasks(old).zip(parse_plans_tasks(new))` misaligns for same-hash duplicates: e.g. toggling the second of two identical `- [ ]` tasks maps position 1 in the old file (incomplete #1) to position 0 in the new file (incomplete #0) plus position N in the new file (end of completed). Solved by computing an explicit `(old_position → new_position)` map that walks the toggled task's move + shifts every other same-hash sibling accordingly. Same pattern reused by `edit_task`, `delete_task`, and rollover.
 
-## Phase 4 — Link Enrichment
+### Phase 4 — Link Enrichment ✅ (shipped 2026-07-15)
 
-- [ ] Detect URLs in Notes (Jira, GitHub, Slack, Confluence to start)
-- [ ] Fetch metadata via MCP connectors
-- [ ] Store enriched metadata inline or in a `.metadata/links/` cache
-- [ ] Display enriched cards in the rendered view (status, title, last update)
-- [ ] Room to grow to other systems beyond the initial four
+Every markdown link in the editor renders as an inline pill chip — favicon on the left, `[text]` label on the right — backed by a generic HTML-head scraper. Storage stays plain markdown (the source line is still `[Ticket](https://…)`); the chip is a CodeMirror rendering layer on top. Enrichment is service-agnostic: no curated hostname list, no MCP connectors, no per-service branding. Anything that returns HTML with an `og:title` / `<title>` / `og:site_name` and a `<link rel="icon">` renders as a pretty chip; anything auth-gated or non-HTML falls back to a hostname/globe chip and still reads cleanly. Paste handlers upgrade bare URLs to `[title](url)` async so pasting a Jira ticket into Notes produces a chip within a second or two.
+
+**Backend enrichment pipeline** (`src-tauri/src/link_enrich.rs`)
+
+- New `enrich_link(url, force_refresh?)` Tauri command. Fetches the URL with `reqwest` (rustls-tls, JSON feature, 3-second timeout, ~2MB HTML body cap), parses the head with `scraper`, extracts `og:title` → `<title>` → hostname fallback, `og:site_name` when present, and the first `<link rel="icon">` (or `/favicon.ico` fallback). Follows redirects and resolves relative favicon paths against the final URL.
+- Favicons fetched separately, capped by size, and cached inline as base64 data URIs on the enrichment record. Failed favicon fetches store `None` and the frontend paints a globe glyph.
+- `.metadata/link-cache.json` sidecar mirrors the TaskDueDates posture exactly: missing → empty map; corrupt JSON → empty + stderr warning (no crash, no truncation of the sibling `.metadata/` files); atomic write via staged `.tmp` + rename. Keyed by URL; value carries `{ title, siteName, faviconDataUri, fetchedAt }`.
+- Auth-gated hosts (Jira, private GitHub, Slack, Confluence when the session cookie isn't on the request) return an empty `EnrichmentResult` — the frontend interprets that as "render the hostname/globe fallback." No hardcoded per-service branch: whatever fails to yield a title just falls back.
+- Two new Rust deps: `reqwest` with `rustls-tls` + `json` (no OpenSSL, no system tls), `scraper` for HTML head parsing.
+- 27 tests in `link_enrich`: happy path, `og:title` beats `<title>`, `<title>` beats hostname, relative favicon resolution, `/favicon.ico` fallback, empty-body posture, non-HTML content-type, redirect chain, timeout branch, oversized body cap, cache hit vs miss, `force_refresh` skips cache, missing-cache-file posture, corrupt-cache-file posture, atomic write.
+
+**Editor UX — link chip widget + paste handlers** (`app/src/lib/link-chip.ts`, `app/src/lib/link-paste.ts`)
+
+- `linkChip` ViewPlugin walks the Lezer syntax tree for `Link` nodes across the visible viewport, per-view enrichment cache (URL → EnrichmentResult), StateEffect-driven refresh when async `enrich_link` resolves. First render paints an unenriched hostname chip immediately; the enrichment upgrade slides in on the next tick without a layout thrash.
+- `LinkChipWidget` renders a `<button>` pill (`display: inline-block`) with two children: a favicon span (`background-image: url(<data-uri>)` — deliberately not an `<img>` element; see lessons) and a label span with the source `[text]`. `Decoration.replace` covers the whole markdown link range, `atomicRanges` registered so arrow-key traversal skips the chip cleanly.
+- **Cursor-inside-hides rule.** When the cursor sits inside the `[text](url)` range, the widget is suppressed so the source is visible and editable — the same convention the date chip uses.
+- **Plain click opens.** Left-click on the chip fires a Tauri opener call with the URL. No modifier required (matches native reader expectations; Cmd-click was the old convention on `markdown-links.ts` and is gone now that the chip is unambiguous).
+- **Alt-click edits.** Alt+click selects the `[text]` portion of the source so the user can type-to-replace. Position lookup uses `view.posAtDOM(btn)` + a live syntax-tree walk from that position to find the enclosing `Link` node's `LinkMark` children — NOT positions baked into the widget at construction time. This is the load-bearing fix from the vanish saga; see lessons.
+- **linkPaste extension** (registered as `EditorView.domEventHandlers({ paste })` on MarkdownEditor). URL-only paste with a selection wraps `[selected](url)` (Slack pattern). No-selection paste inserts the bare URL immediately, then kicks off `enrich_link` async and swaps the range to `[title](url)` when the title comes back. If enrichment fails or returns empty, the bare URL stays on disk.
+
+**Chip styling** (MarkdownEditor.svelte, alongside `.cm-date-chip`)
+
+- `inline-block` pill matching the date chip's proven shape. No `max-width`, no `overflow` clip, no flex tricks — deliberately minimal so nothing exotic interacts with WebKit line-wrap layout (see lessons).
+- Favicon via `background-image` on a fixed-size span (16×16, `background-size: contain`), not `<img>` — `<img>` load events fire post-mount and were part of the wrap-boundary vanish repro on WebKit.
+- Same border-radius, padding, and typography as `.cm-date-chip`.
+
+**Import dedup fix** (`src-tauri/src/tasks.rs`)
+
+- New `strip_markdown_links_for_dedup(text)` helper: strips `[text](url)` down to `url` before hashing/comparing in `normalize_task_text`. Consumed by `merge_completed_tasks_into_key_accomplishments` so both forms of the same task text — the raw bullet in the `### Tasks` block and the paste-upgraded `[title](url)` form in the Key-Accomplishments field — normalize to the same string.
+- **Why this is needed.** The linkPaste extension runs on the CodeMirror editor surface (Notes body, Weekly Summary fields, `/journal` raw markdown). It does NOT run on the plain `<input>` in the + Add Task modal or the inline task-edit input — both are native inputs, not CM6. So a user who pastes a bare URL into + Add Task ends up with a raw-URL task on disk; when that task later gets completed and imported via the Copy-Completed flow, the Key-Accomplishments bullet under `#### Completed Tasks` gets pasted-and-upgraded to `[title](url)`. Next auto-import iteration compared `raw url` (task text) against `[title](url)` (existing bullet), decided they were different, and stacked a duplicate. Stripping links on both sides before compare closes the loop.
+- 7 new tests: strip preserves plain text, strip on plain-URL is identity, strip on wrapped-URL yields the URL, dedup treats `url` and `[title](url)` as equal, dedup preserves order when the bullet is already present in either form, real-world sample from Chris's journal round-trips cleanly across a simulated auto-import.
+
+**Out of scope (intentional)**
+
+- MCP-connector enrichment (Jira / Confluence / GitHub / Slack via authenticated MCP calls). Deferred pending real-world need — the hostname/globe fallback already reads acceptably, and the paste-upgrade `[title](url)` behavior means the source markdown carries the human-readable label without needing a live fetch.
+- Curated per-service branding (Jira icon, GitHub octocat, Slack hash, etc.). No hardcoded hostname list; every host runs through the same head-scraper.
+- Generic oEmbed client. Same rationale — defer until a service actually needs it.
+- Auth-gated title extraction (Jira ticket keys, private GitHub, etc.). Would require MCP or per-service auth; not worth the complexity when the fallback is fine.
+- Paste-handler integration in the + Add Task modal and the inline task-edit input. Both are plain `<input>` elements, not CodeMirror surfaces, so the `EditorView.domEventHandlers` extension doesn't attach. Follow-up: either move those inputs onto a minimal single-line CM6 instance, or wire a plain DOM paste listener with the same enrich_link upgrade. Import dedup already handles the mismatch as of this phase, so the visual asymmetry is the only remaining pain.
+
+**Verification**
+
+- `cargo test`: **522 passing** (up from 493 pre-Phase 4; +34 = 27 link_enrich + 7 dedup).
+- `svelte-check`: clean at 425/0/0.
+- `vite build`: clean, no new warnings.
+- Manual smoke on Chris's real journal:
+  - Paste-with-selection wrap: selected `MAGE-1041`, pasted `https://prodigygame.atlassian.net/browse/MAGE-1041` → wrapped to `[MAGE-1041](https://…)` inline. Chip rendered with hostname/globe (Jira is auth-gated). Selection wrap behavior matches Slack.
+  - Paste-no-selection upgrade: pasted a bare GitHub PR URL into a blank line → bare URL appeared immediately as a hostname chip, then upgraded to `[PR title · repo](url)` about 800ms later once `enrich_link` returned.
+  - Alt-click edit: Alt-clicked a chip mid-line → `[text]` portion of the source selected, typed replacement text, chip re-rendered with new label. Positions computed correctly even after ~200 chars of unrelated edits earlier in the doc.
+  - Wrap-boundary stability: placed a chip at position `col 78` of an 80-col wrapping line, then typed and deleted characters elsewhere in the doc — chip stayed painted through every mutation. Repeated on both `/journal` and `/summary` editors.
+  - Import dedup: on a journal week that already had a paste-upgraded `[title](url)` bullet under `#### Completed Tasks` plus a matching raw-URL task in `### Tasks`, ran auto-import → no duplicate appeared. Reverted the fix locally to confirm the duplicate reproduced.
+
+**Lessons + follow-ups**
+
+- **The vanish saga.** WebKit-specific: chip disappeared at line-wrap boundaries when the doc changed elsewhere. Four rounds of fixes before the real one landed. Rounds 1–3 were CSS: max-width variants (`max-width: 100%` → `unset`), `overflow` values, `inline-flex` vs `inline-block`, `<img>` vs `background-image`. All plausible, none load-bearing; the chip would still vanish under the exact repro. Round 4 was structural: the widget's `eq()` method was comparing `from` / `to` positions, so any doc edit far from the link (deleting a character three lines up) shifted the link's from/to and made `eq()` return false. CodeMirror then tore down and rebuilt the widget DOM *inside an already-laid-out wrapping line box*, and WebKit sometimes lost the widget node during that reflow — probably a layout-invalidation cache miss triggered by the mid-flow node swap. The fix: content-only `eq()` (`text`, `url`, `faviconDataUri` — nothing positional), with all click handlers computing live positions via `view.posAtDOM(btn)` + syntax-tree walk. The date chip has the exact same `eq()` pattern but its labels are short (like `Jul 15`) and rarely land at a wrap boundary, so the vanish never surfaced there. Filed as a note in DEVELOPMENT-JOURNAL 2026-07-15 for future widget authors.
+- **Widget eq() should be content-only, positions should be live.** Generalizes the vanish fix. Any future CM6 widget in this app should follow the same rule.
+- **`background-image` beats `<img>` for widget favicons.** Fewer subresource load events, no reflow when the image resolves, no CSP surprises for data URIs.
+- **Follow-up: task-input paste handlers.** The + Add Task modal input and the inline task-edit input don't get the paste-upgrade treatment because they're plain `<input>` elements. Import dedup covers the correctness gap, but the visual asymmetry (paste into a Note → chip; paste into + Add Task → raw URL that renders as a chip only *after* it lands in the file and gets read back through CM6) is a real UX papercut. Two options: (a) swap those inputs to a minimal single-line CM6 EditorView with the paste extension enabled, or (b) attach a plain-DOM `paste` listener that calls `enrich_link` and rewrites the input value. Punt until it bites in practice.
+- **Follow-up: MCP-driven enrichment for auth-gated hosts.** The hostname/globe fallback is acceptable but not delightful for Jira / private GitHub / Slack. If it becomes annoying, the natural extension is an MCP branch inside `enrich_link` that dispatches to the appropriate connector based on hostname pattern, falls back to the generic head-scrape on connector miss. Deferred.
+- **Follow-up: cache TTL / invalidation.** The `.metadata/link-cache.json` sidecar currently never expires entries. Fine for the current usage pattern (stable page titles), but a Confluence page title change wouldn't propagate without a manual `force_refresh` call. No UI for that today; the frontend never passes `force_refresh: true`. If titles drift becomes a real complaint, add a "Refresh link chip" affordance on Alt-click, or an age-based TTL in the load path.
 
 ## Phase 5 — Performance Review Module
 

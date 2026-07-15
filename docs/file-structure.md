@@ -15,6 +15,7 @@ How journal data is laid out on disk.
 │   ├── task-due-dates.json               # Phase 3e task due dates
 │   ├── rollover-log.json                 # Phase 3c rollover provenance
 │   ├── auto-import-log.json              # Phase 3c/Slice 6c auto-import trigger log
+│   ├── link-cache.json                   # Phase 4 URL → enrichment metadata cache
 │   └── pre-slice6-backups/               # Pre-6a byte-identical weekly-file backups
 ├── 2026/
 │   ├── 2026-W01.md
@@ -37,6 +38,10 @@ How journal data is laid out on disk.
 `task-completions.json` stores per-task completion timestamps + state; `rollover-log.json` tracks which tasks were rolled forward from prior weeks with provenance; `auto-import-log.json` logs when auto-import triggers to prevent duplicate processing; `task-due-dates.json` maps tasks to optional local due dates (Phase 3e).
 
 Tasks now live in a dedicated `### Tasks` section within the Weekly Summary (Phase 3c+), not in Plans and priorities. See data-format.md for the updated weekly file structure.
+
+## Link-chip sidecar
+
+`link-cache.json` maps URLs to their fetched enrichment metadata (title, siteName, favicon data URI) for the Phase 4 inline link-chip widget. Populated lazily by the `enrich_link` Tauri command; the frontend reads back cached entries so re-rendering a doc doesn't re-hit the network. Auth-gated URLs (Jira, Slack, private GitHub, etc.) cache an entry with null metadata fields and render as a hostname/globe fallback chip. See data-format.md for the full schema.
 
 ## Pre-Slice-6 backups
 
