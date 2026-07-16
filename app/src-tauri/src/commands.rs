@@ -4552,6 +4552,37 @@ pub async fn enrich_link(
 }
 
 // ---------------------------------------------------------------------------
+// Review-prep doc generator (Phase 5)
+// ---------------------------------------------------------------------------
+//
+// Assembles the "Prep Self Review" markdown doc from the wizard's
+// collected input plus every weekly file that falls in the chosen
+// review period. Returns the entire doc as a string — the frontend
+// then shows it in a preview modal and lets the user save-to-file or
+// copy-to-clipboard. Captain's Log does not fetch external URLs at
+// generate time; anything linked in the input passes through verbatim,
+// and the doc's own instructions tell the reviewing LLM to fetch via
+// its connectors.
+
+/// Generate the review-prep markdown for the given input. Errors on
+/// invalid date range (non-ISO strings, or start > end); everything
+/// else — empty fields, weeks with no journal, etc. — is handled
+/// gracefully in the assembly path.
+#[tauri::command]
+pub async fn generate_review_prep(
+    storage_state: State<'_, SharedStorage>,
+    input: crate::review_prep::ReviewPrepInput,
+) -> Result<String, String> {
+    let (start, end) = crate::review_prep::parse_date_range(&input.start_date, &input.end_date)?;
+    let weeks = crate::review_prep::enumerate_iso_weeks(start, end);
+    let storage = storage_state.read().await;
+    let contents = crate::review_prep::fetch_week_contents(&*storage, &weeks)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(crate::review_prep::assemble_review_prep_doc(&input, &contents))
+}
+
+// ---------------------------------------------------------------------------
 // Send weekly summary to manager (Phase 2.6)
 // ---------------------------------------------------------------------------
 //
