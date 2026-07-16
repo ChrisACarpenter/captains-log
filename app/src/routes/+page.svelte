@@ -14,6 +14,7 @@
   import ConfirmDialog from '$lib/ConfirmDialog.svelte';
   import TaskMetaChip from '$lib/TaskMetaChip.svelte';
   import TaskRowActionButton from '$lib/TaskRowActionButton.svelte';
+  import PrepSelfReviewWizard from '$lib/review-prep/PrepSelfReviewWizard.svelte';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -131,6 +132,12 @@
   let deleteConfirmTask = $state<TaskListEntry | null>(null);
   let deletingTask = $state(false);
   let deleteError = $state('');
+
+  // Phase 5 — Prep Self Review wizard. Modal-hosted, opened from the
+  // .main-actions button below. The wizard fetches its own settings
+  // and manages its own lifecycle; landing only owns the visibility
+  // flag.
+  let prepReviewOpen = $state(false);
 
   // Phase 3e — due-date picker state. Exactly one picker can be open
   // at a time, keyed by the target task. Storing the anchor element
@@ -891,6 +898,9 @@
         <button class="btn btn-marble" onclick={() => goto('/journal')}>
           Browse Journal
         </button>
+        <button class="btn btn-marble" onclick={() => (prepReviewOpen = true)}>
+          Prep Self Review
+        </button>
         <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
       </div>
 
@@ -1288,6 +1298,15 @@
         onClear={dueDatePickerTask.dueDate ? () => void clearDueDate() : undefined}
       />
     {/if}
+
+    <!-- Phase 5 — Prep Self Review wizard. Modal-hosted so it can
+         overlay the landing without stealing the whole route the way
+         onboarding does. Wizard owns its own state + settings refresh
+         cycle; landing just toggles visibility. -->
+    <PrepSelfReviewWizard
+      open={prepReviewOpen}
+      onClose={() => (prepReviewOpen = false)}
+    />
   </main>
 {/if}
 
