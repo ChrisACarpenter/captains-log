@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Phase 4 ✅ done — link chips shipped, next up Phase 5 (Performance Review Module)
+## Current phase: Pre-1.0 arc — Polish Sweep + MkDocs research + Style Finalization + Final Docs Pass
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -14,7 +14,7 @@ Phase 3b shipped 2026-07-06 — full-text search across every weekly file (Weekl
 
 **Phase 4 (link chips) is done.** Shipped 2026-07-15 with a different design than the original brief: no MCP connectors, no curated per-service list, no `.metadata/links/` card store. Instead, every markdown link in the editor renders as an inline pill chip (favicon + label from the `[text]`) via a CodeMirror widget layer, backed by a generic HTML-head scraper (`og:title` / `<title>` / `og:site_name` / `<link rel="icon">`) with a `.metadata/link-cache.json` sidecar. Auth-gated URLs degrade to a hostname/globe fallback chip. Storage stays plain markdown — the chip is a rendering concern, not a data model change. See Phase 4 receipt below.
 
-**Next up: Phase 5 — Performance Review Module.** The reason this app exists: date-range bundling of Notes + Summaries into an editable review-first-draft.
+**Phase 5 (Prep Self Review) is done.** Shipped 2026-07-16. The last major feature phase — landed on the same day as the 2026-07-16 roadmap re-eval that dropped Phase 6 (sync), Phase 7 (cross-platform), and the "nice to have" list (plugin API, mobile, multi-user). The remainder of the roadmap is the Pre-1.0 arc: Polish Sweep + MkDocs / markdown-renderer research + Style System finalization + Final Documentation Pass, then ship 1.0. Phase 5's design chose the "assemble source material, don't ghost-write the review" split: Captain's Log produces a markdown doc that the user hands to Claude (or any LLM); the LLM surfaces material from the user's journal for each review question with week numbers + Jira tickets, then optionally proofreads the user's drafts. See the Phase 5 receipt below.
 
 ---
 
@@ -558,43 +558,124 @@ Every markdown link in the editor renders as an inline pill chip — favicon on 
 - **Follow-up: MCP-driven enrichment for auth-gated hosts.** The hostname/globe fallback is acceptable but not delightful for Jira / private GitHub / Slack. If it becomes annoying, the natural extension is an MCP branch inside `enrich_link` that dispatches to the appropriate connector based on hostname pattern, falls back to the generic head-scrape on connector miss. Deferred.
 - **Follow-up: cache TTL / invalidation.** The `.metadata/link-cache.json` sidecar currently never expires entries. Fine for the current usage pattern (stable page titles), but a Confluence page title change wouldn't propagate without a manual `force_refresh` call. No UI for that today; the frontend never passes `force_refresh: true`. If titles drift becomes a real complaint, add a "Refresh link chip" affordance on Alt-click, or an age-based TTL in the load path.
 
-## Phase 5 — Performance Review Module
+## Phase 5 — Prep Self Review ✅ (shipped 2026-07-16)
 
-The reason this app exists.
+The reason this app exists — a "Prep Self Review" wizard that assembles a comprehensive markdown doc from the user's journal + a small amount of collected context, intended to be handed to an LLM with the instruction "look at this and do what it says." The LLM's job is to surface relevant material for each review question with week numbers + Jira ticket references; the user still writes the review, but they never dig through six months of paperwork to find the source material.
 
-- [ ] Date range picker (calendar UI)
-- [ ] "Bundle this range as a single markdown file" export
-- [ ] Bundle includes Notes + Summaries + enriched link metadata
-- [ ] Bundle prepends a configurable instruction block for the LLM
-- [ ] Configurable review-question templates (e.g. the 8-question Prodigy mid-year template)
-- [ ] One-click "draft my review" flow that produces editable first-draft answers
+**Design decisions locked with Chris (2026-07-16 plans-out):**
 
-## Phase 6 — Sync & Sharing
+- **The LLM does not write the review.** The generated doc's instructions explicitly forbid draft answers — point-form suggestions only, ranked most-compelling first, with week numbers + Jira ticket links per bullet. Ghost-writing performance reviews is a bad-outcome tail risk; a scaffold is the value.
+- **Markdown handoff doc as the output.** Clean split: Captain's Log owns "assemble source material," the LLM owns "reason over it." No API keys, no vendor lock-in.
+- **Every input field is optional except the review period.** Missing fields gate-check their instruction step and produce a "less useful without X" warning on the final screen — user chooses whether it's worth going back.
+- **No persistence of review questions or OKRs.** They change every cycle in practice.
+- **Include-notes toggle defaults OFF.** Weekly Summaries alone usually cover a review's needs; toggling on adds raw Note bodies (potentially 100k+ tokens on a 6-month range) with an inline "use a beefier model" warning.
+- **Save-file dialog defaults to Desktop.** Copy-to-clipboard is a secondary action on the same preview screen.
+- **Captain's Log doesn't fetch external URLs at generate time.** Linked docs (Google Docs, Confluence, Jira, etc.) pass through as text — the generated doc's instructions tell the LLM to fetch via ITS connectors, or ask the user to enable a connector / paste content.
 
-- [ ] Google Drive sync option (everyone at Prodigy has a Google account)
-- [ ] Conflict resolution for multi-device edits
-- [ ] At-rest encryption (so synced files aren't readable without the app)
+**Backend — `review_prep.rs`** (commit `a6e4db9`, 32 tests):
 
-## Phase 7 — Cross-Platform
+- `ReviewPrepInput` struct mirroring the wizard state; camelCase-serde for JS round-tripping.
+- `enumerate_iso_weeks(start, end)` walks ISO year+week pairs across the range via chrono's `iso_week()` — handles cross-year 52-vs-53-week boundaries correctly (no arithmetic on week numbers).
+- `parse_date_range` validates ISO YYYY-MM-DD input and `start <= end` at the Tauri boundary.
+- `assemble_review_prep_doc` — pure assembly of the full markdown doc from input + per-week markdown. Structure: title + reviewer meta → detailed step-by-step instructions to the reviewing LLM (skip-conditional on which fields the user provided) → reviewer profile → review questions → OKRs → best-practice references → journal entries. Uses `parse_weekly_summary` from `notes.rs` for structured subsection extraction; empty subsections are elided.
+- `WeekContent` + `fetch_week_contents` load each week's file via the storage backend; empty weeks land as `None` and are filtered out of the output.
+- Best-practice URL constants (Lattice, Culture Amp × 2, HBR) baked in at compile time — no runtime fetch — from the Phase 5 discovery pass.
+- New Tauri command `generate_review_prep` wires it end to end.
 
-- [ ] Validated Windows build
-- [ ] Validated Linux build
-- [ ] CI for all three platforms
+**Frontend — `PrepSelfReviewWizard.svelte`** (commit `86cfeaf`):
+
+- Modal-hosted five-step wizard invoked from a new "Prep Self Review" button in the landing page's `.main-actions` row. Follows onboarding's flat-`$state` pattern.
+- Step 1 (Confirm info) pre-fills from a fresh `get_settings` on open; edits push back via `update_settings` on Generate (merged into a full settings payload so non-wizard fields survive).
+- Step 2 (Review period) uses two `<input type="date">` fields; requires both filled with `start <= end` before Continue enables.
+- Steps 3 & 4 (Questions, OKRs) each render a single `TextAreaField` — a new reusable component that mirrors `InputField`'s label + hint/warning trio but wraps a `<textarea>`.
+- Step 5 (Generate) shows a missing-data audit banner, the include-Weekly-Notes toggle, and the Generate button. On success it swaps to a preview panel with Save-to-file + Copy-to-clipboard actions.
+- Cancel-if-dirty via a `$derived` that compares live wizard state against the loaded settings snapshot; ConfirmDialog fires ("Discard your progress?") only when meaningful edits exist and the doc hasn't been generated yet.
+- Save uses `saveDialog` defaulting to Desktop via `@tauri-apps/api/path`'s `desktopDir()`, filename `review-prep-{start}-to-{end}.md`, writes via `writeTextFile`. Copy uses `writeText`.
+
+**Out of scope (intentional):**
+
+- Review-question / OKR persistence — Chris confirmed they change per cycle.
+- LLM-side integration inside Captain's Log — the entire "reason over the doc" flow happens in Claude's chat, not in the app.
+- URL fetch at generate time — see the design decision above.
+
+**Verification:** 554 Rust tests (up from 522, +32 in `review_prep`). svelte-check clean (431 files). Vite build clean. Release bundle 8.9 MB — Phase 5's frontend adds ~1000 lines but the wizard reuses so many existing components that the compiled bundle grew by ~50 KB.
+
+**Lessons + follow-ups:**
+
+- **Onboarding pattern held up well.** Flat-`$state` fields + a single `step` counter + `{#if step === N}` conditional blocks scales cleanly to a five-step wizard without needing per-step sub-components. Save-file plumbing was already wired from theme export; clipboard plumbing was already wired from Send-to-manager. Every "reach for a component" question had an existing answer — the discovery pass paid for itself in reduced invention.
+- **`update_settings` as an all-or-nothing writer** made the wizard's push-changes-back path chunkier than expected — the wizard fetches the full settings snapshot at open so it can reconstitute the full payload with just the personal-info fields overwritten. Not a bug, but if we ever move to partial-settings writes it'd let a lot of "commit a small edit from anywhere" flows get simpler.
+- **The doc's instructions to the LLM matter a lot.** They're the difference between "surface material" and "write the review." Extra care went into the "**Do not write draft answers**" callout; the flow depends on the LLM interpreting the intent correctly.
+- **Deferred follow-up:** wire the paste-upgrade `[title](url)` handler into the wizard's TextAreaField instances too. Chris pastes URLs into Questions / OKRs frequently and the asymmetry with prose paste in MarkdownEditor is worth closing. Folded into the Pre-1.0 Polish Sweep item that already covers task inputs.
 
 ---
 
-## Deferred / TBD
+## Pre-1.0 Polish Sweep (planned)
 
-- [ ] **Editor edge cases from Phase 2.5** (tracked, not blockers):
-  - Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by `lineDelta > 1` guard).
-  - IME on body-line-start backspace edge case.
-  - Multi-cursor + most widget commands bail rather than handle each range.
-  - Setext headings not detected by active-state.
-- [ ] **Cross-route invalidation edge cases from Phase 2.5b**:
-  - `/journal` reschedule loop is bounded only by save settling — if `invoke('write_week')` gets genuinely stuck, the autoSaveTimer reschedule loop spins at 1.5s intervals. Cheap but not zero. Acceptable for local-SSD writes (< 100ms typical).
-  - External-writer-during-own-save race — if an external writer modifies the file while our save's invoke is in flight, the listener may either silently adopt the external content (clean form) or be overwritten by our save completing (we wrote last). Inherent two-writer race; the event mechanism only enables refresh, not coordination.
-- [ ] **Higher-resolution petbook source** — current app icon is upscaled from a 96×96 source PNG. Larger sizes (256/512/1024) are softer than they could be. Replace `src-tauri/icons/source-petbook.png` and re-run `npx @tauri-apps/cli icon …` if a higher-res asset surfaces.
-- [ ] **Spacing, motion, and component library finalization** — colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still TBD: final spacing scale tokens, animation/transition spec, complete reusable component spec library. No specific phase — bolt on whenever a new screen forces the question.
-- [ ] **Plugin / extension API** — let other tools read/write Captain's Log data.
-- [ ] **iOS/Android companion app** — flagged but probably not worth doing soon.
-- [ ] **Multi-user / team features** — flagged but likely never.
+A batch of small, independent UX gaps surfaced during Phase 3–4 verification. All small-to-medium; expected to ship as a single sweep or a series of tiny commits.
+
+- [ ] **"Hide Send-to-manager" opt-out toggle** — Settings > General checkbox, disabled by default. When enabled, hide the Send-to-manager action button(s) from the Weekly Summary view AND hide the manager name / manager email fields from the General tab itself (so the two concerns stay symmetrical — no orphan fields for a feature the user has hidden). Underlying values stay in `settings.json` so re-enabling restores everything without re-entering data.
+- [ ] **Paste-upgrade in task-add modal + inline task-edit input** — both are plain HTML `<input>` elements, so pasting a URL leaves it bare instead of upgrading to `[title](url)` the way prose paste does. Import dedup papers over the correctness bug (Phase 4), but the UX asymmetry remains.
+- [ ] **Auto-import silent failure surface** — when auto-import can't merge yesterday's completions (disk full, permission denied, etc.), only `console.error` fires today. Surface an in-app error banner so a failure is never invisible.
+- [ ] **Focus restoration after task edit or delete** — focus currently lands on `document.body` when the edit input unmounts or a row disappears. Should return to the pencil button (edit) or the next row's pencil / the "+ Add Task" button (delete).
+- [ ] **Persist error toasts until dismissed** — the import-receipt error toast auto-clears after 5s. Errors are worth surfacing until the user acknowledges them.
+
+## MkDocs research + markdown-renderer revamp (planned)
+
+Research [MkDocs](https://www.mkdocs.org/) and the surrounding Python-Markdown / markdown-it / commonmark-plus ecosystem for patterns worth adopting. Two potential wins:
+
+- **In-app renderer improvements.** The CodeMirror 6 live-preview handles the common markdown flavors we use daily, but the [Known Limitations](#known-limitations) section below tracks several rendering edge cases. Some may have well-established solutions in the MkDocs plugin ecosystem worth porting into `live-preview.ts`.
+- **External docs backbone.** Currently `docs/*.md` files live in-repo and are read directly. A static-site generator (MkDocs or similar) would give us search, cross-linking, and versioning for a public-facing docs site — potentially subsuming the in-app Help + Nerds Only surfaces.
+
+Scope is intentionally broad — this is a research block first, an implementation block second. Findings drive downstream work in the Polish Sweep + Final Documentation Pass.
+
+## Style System Finalization (planned, before 1.0)
+
+Colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still to be finalized:
+
+- [ ] **Final spacing scale tokens** — one authoritative list, not the "eyeball each screen" pattern of today.
+- [ ] **Animation / transition spec** — durations, easings, guidance on when to use each.
+- [ ] **Complete reusable component spec library** — props, variants, when to reach for which. Builds on the ad-hoc extractions from Phase 2.8c / 3d / 3e.
+
+## Final Documentation Pass (planned, before 1.0)
+
+Once feature work + polish sweep + style finalization are done, one comprehensive documentation refresh:
+
+- [ ] **Project docs** — README, ARCHITECTURE, DESIGN, ROADMAP, STYLE-GUIDE, `docs/*.md`. End-to-end audit for stale references, missing coverage, and shipped features that never made it in.
+- [ ] **In-app Help** — content refresh for accuracy + coverage of everything shipped since it was last written.
+- [ ] **In-app Nerds Only** — same. May get folded into the MkDocs static site if that path lands.
+- [ ] **Consolidate the [Known Limitations](#known-limitations) list into user-facing docs** where appropriate.
+
+DEVELOPMENT-JOURNAL.md is preserved as-is — it's an append-only historical record.
+
+## Confirmed design decisions
+
+Small record of decisions made during audits + reviews that don't need code changes, pinned so we don't re-litigate them.
+
+- **Edit-input onblur = cancel** (matches Escape). Confirmed 2026-07-16 during the pre-1.0 audit. Rationale: prevents accidental data loss when the user tabs out mid-edit or clicks elsewhere without pressing Enter. Save-on-blur was considered and declined.
+
+## Known Limitations
+
+Documented, not planned work. The MkDocs research above may resolve some of the live-preview items; reassess after that lands.
+
+### Editor edge cases from Phase 2.5
+
+- Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by the `lineDelta > 1` guard).
+- IME on body-line-start backspace edge case.
+- Multi-cursor + most widget commands bail rather than handle each range.
+- Setext headings not detected by the active-state check.
+
+### Cross-route invalidation edge cases from Phase 2.5b
+
+- `/journal` reschedule loop is bounded only by save settling — if `invoke('write_week')` gets genuinely stuck, the autoSaveTimer reschedule loop spins at 1.5s intervals. Cheap but not zero. Acceptable for local-SSD writes (< 100ms typical).
+- External-writer-during-own-save race — if an external writer modifies the file while our save's `invoke` is in flight, the listener may either silently adopt the external content or be overwritten by our save completing. Inherent two-writer race; the event mechanism only enables refresh, not coordination.
+
+### Live-preview list rendering (Phase 2.8 / 2.9c)
+
+- Double-digit ordered-list markers (`10.+`) visually overlap content by 1ch under the hang-indent technique. Revisit if a 10+ item ordered list surfaces.
+- The `.cm-md-list-line.cm-md-blockquote-line` joint selector is in place but untested under the current `margin-left` hang-indent technique.
+
+### Task migration + sidecar edge cases (Phase 3d)
+
+- Orphan sidecar / provenance entries after external file tampering — the Rebuild command handles cleanup; low real-world impact.
+- Fenced code blocks containing `- [ ]` lines could be picked up as tasks by the migration pass. Not hit in practice.
+- A partial `### Tasks` section containing hand-typed notes could be clobbered on the first write. Extremely rare.

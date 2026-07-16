@@ -1818,3 +1818,86 @@ Fix in `tasks.rs`: new `strip_markdown_links_for_dedup` helper collapses `[text]
 Phase 5 — Performance Review Module. Design brief in the roadmap; nothing locked yet. Or a polish pass on the deferred items (paste-handler in task inputs is the most user-facing gap).
 
 
+
+---
+
+## 2026-07-16 — Phase 5 shipped: Prep Self Review wizard
+
+Phase 5 was billed as the reason this app exists — a way to turn six months of journal entries plus a short questionnaire into a coherent brief that an LLM can reason over during self-review writing. Chris kicked off the design conversation this morning, we plans-outed it over four rounds of Q&A during the day, and I built the whole thing overnight with Chris asleep. All committed to `origin/main` in two slices (`a6e4db9` backend, `86cfeaf` frontend).
+
+The framing that shaped every design decision: **the LLM does not write the review**. The generated doc's job is to surface material — point-form suggestions per review question, each with a week number pointing back to the source journal entry and (where identifiable) a Jira ticket key. The user still writes the review; we just save them the archaeology. Ghost-writing self-reviews is a bad-outcome tail risk that we deliberately closed off in the doc's instructions to the LLM ("**Do not write draft answers.** I want a scaffold, not a script.").
+
+### Decisions made (in the plans-out rounds with Chris)
+
+- **Pre-fill from settings; edits push back.** The wizard's Confirm-info step reads name / email / job title / Jira project keys / manager info from `settings.json` on open. Any edits in the wizard get merged into a full settings payload and written via `update_settings` on Generate. Rationale: fixing a stale name/manager mid-review is a legitimate use of this flow. If the user cancels before Generate, the settings edits never happen — matches "no partial saves."
+- **Every field is optional except the review period.** Missing fields don't error — the doc's assembly path gates each section on presence, and the wizard's last step surfaces a "less useful without X" warning so the user can decide whether it's worth going back. Chris's exact framing: "we'll just leave that part of the generated instruction file out."
+- **Review questions and OKRs are per-run, no persistence.** Chris pushed back on my instinct to save these as reusable templates: "They change all the time actually. Its SUPER ANNOYING and one of the reasons reviews take so long." Fresh start every cycle.
+- **Include-notes toggle defaults OFF.** Weekly Summaries alone are the curated view; toggling on adds raw Note bodies which can push a 6-month range past 100k tokens. When ON, the toggle's description warns the user to use a 200k-context model. Chris asked for the tip explicitly.
+- **Save-file default = Desktop.** Copy-to-clipboard is a secondary action on the same preview screen.
+- **Captain's Log doesn't fetch anything at generate time.** Linked docs (Google Docs, Confluence, Jira, etc.) pass through as text; the doc's instructions tell the LLM to fetch via ITS connectors, or ask the user to enable a connector / paste content. Clean split: Captain's Log assembles source material, the LLM reasons over it.
+- **Handoff via markdown doc, no baked-in LLM integration.** No API keys, no vendor lock-in. Chris's phrasing for the target UX: "all they should have to do in an ideal situation is drop it into Claude, and say 'look at this please and do what it says.'"
+
+### Slice B — backend (commit `a6e4db9`)
+
+New module `src-tauri/src/review_prep.rs` with 32 tests. Structure:
+
+- `ReviewPrepInput` — camelCase-serde struct mirroring the wizard's collected state. Every field except `startDate` / `endDate` is optional.
+- `enumerate_iso_weeks(start, end)` — walks ISO year+week pairs across the range. Uses chrono's `iso_week()` (via `iso_year_week` from `notes.rs`) rather than arithmetic on week numbers, so 52-vs-53-week cross-year boundaries are correct. Six-month range = 26 entries; 12-month = ~52.
+- `parse_date_range` — ISO YYYY-MM-DD validation + `start <= end` check at the Tauri boundary.
+- `assemble_review_prep_doc` — pure function taking the input + per-week markdown, returning the full assembled doc. Order: title + reviewer meta → step-by-step instructions to the reviewing LLM (each step is skip-conditional on which fields the user provided) → reviewer profile → review questions → OKRs → best-practice references → journal entries. Reuses `parse_weekly_summary` from `notes.rs` for structured subsection extraction; empty subsections are elided (users often leave one or two blank — no need to advertise the gaps).
+- `fetch_week_contents` — async, hits the storage backend to load each week's file. Empty weeks (`None`) are silently filtered out in the assembly path.
+- Best-practice URL constants: Lattice, Culture Amp × 2, Harvard Business Review. Baked in at compile time from the Phase 5 discovery pass's research agent (validated for HTTP 200 + evergreen publisher).
+
+The Tauri command `generate_review_prep` wires validation → enumeration → fetch → assembly → return.
+
+**Design detail worth pinning:** the instructions section of the generated doc is skip-conditional. If the user didn't provide review questions, the "Understand the review questions" instruction step disappears. If they didn't provide OKRs, that step disappears. If job title is empty, the "research what makes a good QA Analyst" step disappears. If Jira keys are empty, the "look up my Jira work" step disappears. The doc renders exactly the instructions the LLM can act on with the provided context — nothing more, nothing less. Missing sections instead surface as prompts ("The user did not provide OKR context. Ask them to share the OKR document, or link a doc you can access via a connector.").
+
+### Slice A — frontend (commit `86cfeaf`)
+
+Modal-hosted five-step wizard invoked from a new "Prep Self Review" button in the landing page's `.main-actions` row. Follows onboarding's flat-`$state` pattern: all fields on the wizard component itself, per-step bindings survive Back/Continue without marshaling.
+
+The steps:
+
+1. **Confirm info** — six `InputField` instances pre-filled from `get_settings`. If the user edits any and hits Generate, the wizard reconstructs a full `update_settings` payload (merging edited fields over the loaded snapshot) so non-wizard settings (theme, mail prefs, task settings, reminders) survive the write.
+2. **Review period** — two `<input type="date">` fields. Continue disabled until both filled and `start <= end`. Native macOS date picker via the browser — no custom widget needed for the ranged case.
+3. **Review questions** — a single `TextAreaField`. Prose or link, no distinction; the LLM figures it out at fetch time.
+4. **OKRs** — same shape as Step 3.
+5. **Generate** — the payoff step. Shows a "You didn't provide X, Y, Z" panel if the user left optional fields empty. Renders the include-Weekly-Notes toggle with the "use a beefier model" warning inline in its description. Generate button calls the backend; on success swaps to a preview panel with Save-to-file + Copy-to-clipboard actions.
+
+Cancel-if-dirty: a `$derived` compares live wizard state against the loaded settings snapshot + the initial-empty state of the per-run fields. `attemptClose` fires ConfirmDialog ("Discard your progress?") when dirty AND no doc has been generated yet. After Generate, close is unblocked — the flow is essentially done.
+
+Save flow: `saveDialog` from `@tauri-apps/plugin-dialog`, `defaultPath: ${desktopDir()}/${filename}` where filename is `review-prep-{start}-to-{end}.md`. Copy uses `writeText` from the clipboard plugin.
+
+New reusable component: `TextAreaField.svelte` — mirrors `InputField`'s label + hint/warning trio but wraps a `<textarea>`. Turned out to be the only genuinely new UI primitive Phase 5 needed; every other component (Modal, ConfirmDialog, InputField, Checkbox, StepHeader) was already extant.
+
+### Discovery pass: what saved the most time
+
+Before writing any code, I ran a three-agent workflow: (1) onboarding wizard shape + landing-page action inventory, (2) reusable component inventory across `$lib`, (3) best-practice URL research via WebSearch/WebFetch. Two big wins:
+
+- The components inventory ruled out inventing new UI: date-picker, save-file, clipboard, modal, confirm-dialog, checkbox-with-description, wizard step chrome — all wired and documented. The only miss was a textarea component (built as `TextAreaField`).
+- The URL research surfaced four solid publisher-backed sources for the best-practice references block, all verified evergreen and publicly accessible. Lattice + Culture Amp turned out to be the most useful (concrete examples over abstract framework); HBR made the list on institutional authority even though its content is paywalled.
+
+Reasoning-through-workflow beats reasoning-in-main-loop when the questions are cleanly separable.
+
+### Lessons worth keeping
+
+- **Onboarding pattern held up perfectly.** Flat-`$state` fields + a single `step` counter + `{#if step === N}` inline blocks scales cleanly to a five-step wizard. No need to split into per-step components below a certain complexity threshold — the additional file-count overhead outweighs the readability win.
+- **`update_settings` as an all-or-nothing writer** made the wizard's push-changes-back path chunkier than expected. The wizard has to fetch the full settings snapshot at open so it can reconstitute the whole payload. Not a bug, but if I were designing settings from scratch I'd want a partial-write command too. Deferred as a general-cleanup thought.
+- **Instructions to the LLM are the actual product.** The whole app's Phase 5 value depends on a few hundred lines of markdown reading like a well-scoped brief. Extra care went into the "Do not write draft answers" callout, the skip-conditional structure, and the tone of the missing-data prompts (asking the LLM to ask the user, rather than the LLM assuming). If you're not sure whether an instruction is clear enough, imagine handing the doc cold to a brand-new LLM and see if it does the right thing.
+- **Failure-is-a-value everywhere.** Empty inputs, empty weeks, missing settings, an offline user — all handled by the doc's own text ("The user did not provide X…") rather than by wizard-level error surfaces. Same shape as Phase 4's `EnrichmentResult::empty()` pattern; same reasoning (a graceful-degrade path is what the LLM downstream can act on).
+
+### Verification
+
+- `cargo test`: 554 passed, 0 failed. Grew from 522 (Phase 4) to 554 — all 32 new tests are in `review_prep`: ISO week enumeration (single-week, cross-year, 6-month range, edge cases like Dec 29 landing in W1 of next year), date-range parsing (valid input, start-after-end rejection, garbage rejection), human-readable week label formatting (same month, cross month, cross year), and doc assembly across every combination of "field present / field empty" for the LLM instructions section, the reviewer profile, the review questions, the OKRs, and the journal entries — including the "no weeks in range have data" edge case.
+- `svelte-check`: 431 files, 0 errors, 0 warnings.
+- `vite build`: clean.
+- Release bundle: 8.8 MB.
+
+### Deferred as follow-ups
+
+- **Paste-upgrade in the wizard's TextAreaField instances.** Same class of gap as the task-input paste asymmetry noted in Phase 4: pasting a URL into the Questions / OKRs field leaves it bare instead of upgrading to `[title](url)`. The LLM handles both fine, but the visual asymmetry with prose-editor paste is worth closing. Folded into the Pre-1.0 Polish Sweep item that already covers task inputs.
+- **A cleaner partial-settings write path.** Current pattern (fetch full settings + reconstitute payload) works, but any future "commit a small settings edit from anywhere" flow would benefit from a partial writer. Not a Phase 5 concern.
+
+### Next
+
+The Pre-1.0 arc: Polish Sweep → MkDocs research + markdown-renderer revamp → Style System Finalization → Final Documentation Pass → ship 1.0. Roadmap has the full breakdown; nothing new to plans-out until Chris picks the next item.
