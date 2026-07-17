@@ -1192,15 +1192,6 @@
   // in three places.
   const selectionCount = $derived(selectedLabelNames.size);
 
-  // "Select all visible" checkbox state — true only when every visible
-  // label is currently selected (partial selection reads as unchecked
-  // for MVP; we don't set the indeterminate DOM property to keep this
-  // simple. Two-state toggle: click to select all, click again to clear.)
-  const allVisibleSelected = $derived(
-    visibleLabels.length > 0 &&
-      visibleLabels.every((l) => selectedLabelNames.has(l.name))
-  );
-
   function toggleLabelSelection(name: string): void {
     // Svelte 5 tracks Set identity, not internal mutation — assign a new
     // Set so the reactive derivations recompute.
@@ -1218,19 +1209,17 @@
     bulkOpError = '';
   }
 
-  function toggleSelectAllVisible(): void {
-    if (allVisibleSelected) {
-      // Deselect only the currently-visible labels — keep any selection
-      // that's outside the filter (rare but possible; user filters,
-      // selects, unfilters, filters again, hits "clear filtered").
-      const next = new Set(selectedLabelNames);
-      for (const l of visibleLabels) next.delete(l.name);
-      selectedLabelNames = next;
-    } else {
-      const next = new Set(selectedLabelNames);
-      for (const l of visibleLabels) next.add(l.name);
-      selectedLabelNames = next;
-    }
+  /**
+   * Select every currently-visible label. Additive — labels selected
+   * from an earlier filter set stay selected (rare but possible;
+   * user filters, selects, changes filter, wants to add more). The
+   * card checkbox's on-check path calls this; the on-uncheck path
+   * calls `clearBulkSelection` for a full reset.
+   */
+  function selectAllVisible(): void {
+    const next = new Set(selectedLabelNames);
+    for (const l of visibleLabels) next.add(l.name);
+    selectedLabelNames = next;
     bulkOpMessage = '';
     bulkOpError = '';
   }
@@ -2516,15 +2505,26 @@
                      first row + provides visual containment, and the
                      action buttons appear as a second row only when
                      a selection exists. -->
+                <!--
+                  Card checkbox represents "any selection active":
+                  checked when N > 0, unchecked at N == 0. Unchecking
+                  clears the whole selection (no separate Clear
+                  button); checking selects every visible label.
+                  Users unchecking-to-clear is the whole affordance
+                  Chris wanted after the first cut.
+                -->
                 <div class="bulk-selector">
                   <Checkbox
-                    checked={allVisibleSelected}
-                    onchange={toggleSelectAllVisible}
+                    checked={selectionCount > 0}
+                    onchange={(next) => {
+                      if (next) selectAllVisible();
+                      else clearBulkSelection();
+                    }}
                     label={selectionCount > 0
                       ? `${selectionCount} selected`
                       : 'Select all'}
                     description={selectionCount > 0
-                      ? 'Use the buttons below to act on the selected labels — or click this row again to clear the selection.'
+                      ? 'Use the buttons below to act on the selected labels — or uncheck this row to clear the selection.'
                       : 'Bulk-select labels below to delete or merge them together.'}
                   />
                   {#if selectionCount > 0}
@@ -2533,14 +2533,6 @@
                       role="toolbar"
                       aria-label="Bulk label actions"
                     >
-                      <button
-                        type="button"
-                        class="link-button bulk-clear"
-                        onclick={clearBulkSelection}
-                      >
-                        Clear
-                      </button>
-                      <div class="bulk-actions-spacer"></div>
                       <button
                         type="button"
                         class="btn btn-marble btn-sm"
@@ -3612,14 +3604,9 @@
   .bulk-actions-buttons {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: var(--space-3);
     padding: 0 var(--space-2);
-  }
-  .bulk-actions-spacer {
-    flex: 1;
-  }
-  .bulk-clear {
-    font-size: var(--text-caption);
   }
 
   /* Result / error banner after a bulk op. Persists until dismissed or
