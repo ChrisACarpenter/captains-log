@@ -731,8 +731,12 @@
   // tasks into Key accomplishments. All gating (setting off + already-
   // ran-today) is enforced by the backend; the frontend just fires
   // the same trigger set as the rollover check. Idempotent, best-
-  // effort — errors are logged, never surfaced.
+  // effort by construction — but Polish Sweep #3 surfaces failures
+  // in-app instead of hiding them in the JS console. Disk full,
+  // permission denied, a corrupt sidecar — the user deserves to know
+  // when yesterday's completions didn't roll into Key accomplishments.
   let autoImportInFlight = false;
+  let autoImportError = $state<string | null>(null);
   async function checkAndApplyAutoImport(): Promise<void> {
     if (autoImportInFlight) return;
     if (loading || settings === null || settings.firstRun) return;
@@ -743,9 +747,14 @@
     autoImportInFlight = true;
     try {
       await invoke('check_and_apply_auto_task_import');
+      // Success (or "nothing to do" — the backend swallows the
+      // no-op case as a no-op, not an error) clears any lingering
+      // error from a previous attempt.
+      autoImportError = null;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[auto-import] check failed:', err);
+      autoImportError = String(err);
     } finally {
       autoImportInFlight = false;
     }
@@ -943,6 +952,27 @@
                 sourceLabel={rolloverReceipt.sourceLabel}
                 onDismiss={() => (rolloverReceipt = null)}
               />
+            </div>
+          {/if}
+
+          <!-- Polish Sweep #3 — auto-import failure surface. Sits in
+               the same visual slot as the rollover receipt so the
+               user's attention naturally lands on either. Error
+               persists until manually dismissed (matches #2). -->
+          {#if autoImportError}
+            <div class="auto-import-error-wrap">
+              <div class="auto-import-error" role="alert" aria-live="assertive">
+                <span class="text">
+                  <strong>Couldn't auto-import completed tasks:</strong>
+                  {autoImportError}
+                </span>
+                <button
+                  type="button"
+                  class="dismiss"
+                  onclick={() => (autoImportError = null)}
+                  aria-label="Dismiss auto-import error"
+                >×</button>
+              </div>
             </div>
           {/if}
 
@@ -1518,6 +1548,52 @@
      don't clump together. */
   .rollover-receipt-wrap {
     margin-bottom: var(--space-3);
+  }
+
+  /* Polish Sweep #3 — auto-import failure banner. Same slot as the
+     rollover receipt so the visual language is "status about the
+     task list, appearing here." Persistent (no auto-clear); the ×
+     is the only way to dismiss. Red bordering + role="alert" mean
+     both sighted users and screen readers hear the failure. */
+  .auto-import-error-wrap {
+    margin-bottom: var(--space-3);
+  }
+  .auto-import-error {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    background: color-mix(in srgb, var(--accent-danger, #b32d2d) 8%, var(--bg-elevated));
+    border: 1px solid var(--accent-danger, #b32d2d);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+  .auto-import-error .text {
+    flex: 1;
+  }
+  .auto-import-error :global(strong) {
+    color: var(--accent-danger, #b32d2d);
+    font-weight: 600;
+  }
+  .auto-import-error .dismiss {
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 0 var(--space-2);
+    margin: 0;
+    cursor: pointer;
+    font-size: 1.2em;
+    line-height: 1;
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm, 4px);
+  }
+  .auto-import-error .dismiss:hover {
+    color: var(--text-primary);
+  }
+  .auto-import-error .dismiss:focus-visible {
+    outline: 2px solid var(--focus-glow);
+    outline-offset: 2px;
   }
 
   .toggle-error {
