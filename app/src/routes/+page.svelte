@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { goto } from '$app/navigation';
   import { invoke } from '@tauri-apps/api/core';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
@@ -161,6 +161,15 @@
   let savingEdit = $state(false);
   let editInputEl = $state<HTMLInputElement | null>(null);
 
+  // Polish Sweep #4 — focus-restoration handles. `pencilRefs` maps
+  // each task's key to the DOM node of its pencil (edit) action
+  // button, so on edit-exit and delete-success we can bring focus
+  // back to a sensible landing target instead of dropping to
+  // document.body. `addTaskButtonEl` is the safe fallback for
+  // delete-when-list-is-empty.
+  let pencilRefs: Record<string, HTMLButtonElement | null> = $state({});
+  let addTaskButtonEl = $state<HTMLButtonElement | null>(null);
+
   // Autofocus + select-all on edit open. Tracks `editingKey` so it
   // re-fires when the user switches between rows (pencil → other
   // pencil). Guarded by an element check because the input only
@@ -171,6 +180,15 @@
       editInputEl.select();
     }
   });
+
+  // Focus a target after Svelte's next DOM flush. Used by the
+  // edit-exit + delete-exit paths — both change state that unmounts
+  // an input or a row, and the target only exists AFTER the flush.
+  async function focusAfterFlush(getTarget: () => HTMLElement | null | undefined): Promise<void> {
+    await tick();
+    const target = getTarget();
+    target?.focus();
+  }
 
   /** How long to wait for either IPC before we consider it hung. In a
    *  local Tauri app the write is nearly instant; 30s exists purely as
@@ -422,9 +440,15 @@
 
   function cancelEdit(): void {
     if (savingEdit) return;
+    // Polish Sweep #4 — capture the key BEFORE clearing so focus
+    // can return to that row's pencil after the input unmounts.
+    const wasEditingKey = editingKey;
     editingKey = null;
     editText = '';
     editError = '';
+    if (wasEditingKey) {
+      void focusAfterFlush(() => pencilRefs[wasEditingKey]);
+    }
   }
 
   async function submitEdit(t: TaskListEntry): Promise<void> {
@@ -460,8 +484,19 @@
         ADD_TASK_TIMEOUT_MS,
         'Refresh task list',
       );
+      // Polish Sweep #4 — text edit may have changed the task's key
+      // (text_hash + ordinal shift). Look up the pencil ref via the
+      // NEW key so focus lands on the row the user just finished
+      // editing. Fall back to the +Add Task button if the row
+      // somehow isn't in the refreshed list.
+      const editedText = trimmed;
       editingKey = null;
       editText = '';
+      const nextRow = tasks.find(
+        (r) => r.year === t.year && r.week === t.week && r.text.trim() === editedText,
+      );
+      const nextKey = nextRow ? taskKey(nextRow) : null;
+      void focusAfterFlush(() => (nextKey && pencilRefs[nextKey]) || addTaskButtonEl);
     } catch (err) {
       editError = String(err);
     } finally {
@@ -498,6 +533,14 @@
     if (!t || deletingTask) return;
     deletingTask = true;
     deleteError = '';
+    // Polish Sweep #4 — capture the deleted row's index in the
+    // pre-refresh flat task list so we can focus a sensible
+    // neighbour after the row disappears. Same-index-after-delete
+    // gives us the "next row" the user expects; if the deleted row
+    // was last, we fall through to the previous row; if the list is
+    // now empty, we fall through to +Add Task.
+    const deletedKey = taskKey(t);
+    const priorIndex = tasks.findIndex((r) => taskKey(r) === deletedKey);
     try {
       await withTimeout(
         invoke('delete_task', {
@@ -514,7 +557,17 @@
         ADD_TASK_TIMEOUT_MS,
         'Refresh task list',
       );
+      // Free the stale pencil ref for the deleted row.
+      delete pencilRefs[deletedKey];
       deleteConfirmTask = null;
+      void focusAfterFlush(() => {
+        if (tasks.length === 0) return addTaskButtonEl;
+        // Prefer the row now at the deleted row's OLD index (i.e.
+        // the "next row down"). If the deleted row was last, back up.
+        const targetIndex = Math.min(priorIndex, tasks.length - 1);
+        const targetKey = targetIndex >= 0 ? taskKey(tasks[targetIndex]) : null;
+        return (targetKey && pencilRefs[targetKey]) || addTaskButtonEl;
+      });
     } catch (err) {
       deleteError = String(err);
     } finally {
@@ -940,6 +993,7 @@
               type="button"
               class="btn btn-marble btn-sm"
               onclick={openAddTask}
+              bind:this={addTaskButtonEl}
             >
               + Add Task
             </button>
@@ -1157,6 +1211,7 @@
                       title="Edit task"
                       disabled={togglingKeys[key] === true || editingKey !== null}
                       onclick={() => openEdit(t)}
+                      bind:el={pencilRefs[key]}
                     />
                     <TaskRowActionButton
                       icon="calendar"
