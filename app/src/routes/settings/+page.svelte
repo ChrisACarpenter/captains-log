@@ -2522,7 +2522,7 @@
                     }}
                     label={selectionCount > 0
                       ? `${selectionCount} selected`
-                      : 'Select all'}
+                      : 'Select All'}
                     description={selectionCount > 0
                       ? 'Use the buttons below to act on the selected labels — or uncheck this row to clear the selection.'
                       : 'Bulk-select labels below to delete or merge them together.'}
