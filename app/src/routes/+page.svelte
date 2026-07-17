@@ -898,10 +898,17 @@
         <button class="btn btn-marble" onclick={() => goto('/journal')}>
           Browse Journal
         </button>
-        <button class="btn btn-marble" onclick={() => (prepReviewOpen = true)}>
+        <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
+      </div>
+
+      <!-- Phase 5 — Prep Self Review lives in its own centered row
+           below the standard action set. Sapphire so it visually
+           announces itself as the flagship "big magic" action; a
+           marble button in the existing row would have felt lost. -->
+      <div class="secondary-actions">
+        <button class="btn btn-sapphire" onclick={() => (prepReviewOpen = true)}>
           Prep Self Review
         </button>
-        <button class="btn btn-marble" onclick={() => goto('/settings')}>Settings</button>
       </div>
 
       <!--
@@ -1389,6 +1396,14 @@
     display: flex;
     justify-content: flex-end;
     gap: var(--space-3);
+  }
+
+  /* Prep Self Review — its own centered row, sapphire, sits below the
+     three-button navigation cluster above. */
+  .secondary-actions {
+    margin-top: var(--space-4);
+    display: flex;
+    justify-content: center;
   }
 
   /* ---- Slice 1 task list ---- */

@@ -60,6 +60,8 @@
   import TextAreaField from '$lib/TextAreaField.svelte';
   import Checkbox from '$lib/Checkbox.svelte';
   import StepHeader from '$lib/onboarding/StepHeader.svelte';
+  import TipBubble from '$lib/onboarding/TipBubble.svelte';
+  import DatePickerPopover from '$lib/DatePickerPopover.svelte';
 
   // Payload shape mirrors backend `ReviewPrepInput` (Rust
   // src-tauri/src/review_prep.rs). Keep in lockstep with the struct's
@@ -132,6 +134,24 @@
   let reviewQuestions = $state('');
   let okrs = $state('');
   let includeNotes = $state(false);
+
+  // DatePickerPopover state (step 2). Two independent anchors — one
+  // per date button. `pickerOpen` names which popover is open, or
+  // null when neither is. `bind:this` on the buttons keeps the anchor
+  // elements live so the popover's positioning + outside-click
+  // detection can attach to them.
+  let startAnchorEl = $state<HTMLButtonElement | null>(null);
+  let endAnchorEl = $state<HTMLButtonElement | null>(null);
+  let pickerOpen = $state<'start' | 'end' | null>(null);
+
+  function todayIsoLocal(): string {
+    // Local YYYY-MM-DD, mirroring how the picker itself interprets
+    // strings (calendar date, not UTC midnight). Avoids the classic
+    // Date().toISOString() timezone-shift trap that would render
+    // "yesterday" for late-evening users.
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
   // Loaded settings snapshot — kept so the update_settings payload
   // can preserve non-wizard fields (theme, mail, tasks, reminders,
@@ -440,7 +460,7 @@
 
       {#if step === 1}
         <StepHeader
-          title="Confirm your info"
+          title="Confirm Your Info"
           level="h2"
           lead="These come from your Settings — edit anything that's out of date and it'll save back."
         />
@@ -492,30 +512,39 @@
 
       {#if step === 2}
         <StepHeader
-          title="Review period"
+          title="Review Period"
           level="h2"
           lead="Which weeks should the LLM look at? A 6-month range is typical for a mid-year self-review; a 12-month range for annual."
         />
         <div class="fields">
           <div class="field">
             <label for="prep-start-date">Start date</label>
-            <input
+            <!-- Button-anchored DatePickerPopover — same widget the
+                 in-editor date chips use. Clicking toggles the popover;
+                 popover's outside-click detection uses this element. -->
+            <button
               id="prep-start-date"
-              class="text-input date-input"
-              type="date"
-              bind:value={startDate}
-  
-            />
+              type="button"
+              class="date-anchor"
+              class:is-empty={!startDate}
+              bind:this={startAnchorEl}
+              onclick={() => (pickerOpen = pickerOpen === 'start' ? null : 'start')}
+            >
+              {startDate || 'Pick a date'}
+            </button>
           </div>
           <div class="field">
             <label for="prep-end-date">End date</label>
-            <input
+            <button
               id="prep-end-date"
-              class="text-input date-input"
-              type="date"
-              bind:value={endDate}
-  
-            />
+              type="button"
+              class="date-anchor"
+              class:is-empty={!endDate}
+              bind:this={endAnchorEl}
+              onclick={() => (pickerOpen = pickerOpen === 'end' ? null : 'end')}
+            >
+              {endDate || 'Pick a date'}
+            </button>
           </div>
           {#if startDate && endDate && startDate > endDate}
             <p class="field-hint is-warning" role="alert">Start date must be on or before end date.</p>
@@ -525,24 +554,26 @@
 
       {#if step === 3}
         <StepHeader
-          title="Performance review questions"
+          title="Performance Review Questions"
           level="h2"
-          lead="Paste the questions you need to answer, or drop in a link to the doc they live in (Google Doc, Confluence page, spreadsheet — anything the LLM's connectors can fetch). Prose and links can mix freely."
+          lead="Paste the questions you need to answer, or drop in a link to the doc they live in (Google Doc, Confluence page, spreadsheet — anything your LLM's connectors can fetch). Prose and links can mix freely."
         />
         <TextAreaField
           id="prep-review-questions"
           label="Review questions"
           placeholder={'Paste the questions here, or a link like:\nhttps://docs.google.com/document/d/...'}
           bind:value={reviewQuestions}
-          hint="Optional — but the LLM's output is only as focused as these questions."
           rows={8}
-
         />
+        <TipBubble heading="Tip">
+          Optional — but the LLM's output is only as focused as
+          <strong>these questions</strong>. If you have them, share them.
+        </TipBubble>
       {/if}
 
       {#if step === 4}
         <StepHeader
-          title="Company or team OKRs"
+          title="Company or Team OKRs"
           level="h2"
           lead="Same rules as the questions — plain text or links. The LLM uses these to calibrate what 'good' looks like against your team's stated objectives."
         />
@@ -551,36 +582,44 @@
           label="Company or team OKRs"
           placeholder={'Paste the OKRs here, or a link like:\nhttps://prodigygame.atlassian.net/wiki/spaces/...'}
           bind:value={okrs}
-          hint="Optional. Skip this if you don't have team OKRs to point at."
           rows={8}
-
         />
+        <TipBubble heading="Tip">
+          Optional — skip this if you don't have team OKRs to point at.
+          Without them the LLM can't calibrate <strong>impact</strong>
+          against stated objectives.
+        </TipBubble>
       {/if}
 
       {#if step === 5}
         <StepHeader
-          title="Generate your review prep"
+          title="Generate Your Review Prep"
           level="h2"
           lead="One button, one big markdown doc. Hand it to Claude (or your LLM of choice) and say 'look at this and do what it says.'"
         />
 
         {#if missingItems.length > 0 && !generatedDoc}
-          <div class="warn-panel" role="note">
-            <p class="warn-title">A few things weren't filled in</p>
-            <p class="warn-body">
-              You didn't provide {formatList(missingItems)}. The generated doc will still work,
-              but the LLM will have less context to work with. You can go back to add them, or
-              generate as-is.
-            </p>
-          </div>
+          <TipBubble heading="A few things weren't filled in">
+            You didn't provide <strong>{formatList(missingItems)}</strong>.
+            The generated doc will still work, but the LLM will have less
+            context to work with. You can go back to add them, or generate
+            as-is.
+          </TipBubble>
         {/if}
 
         <div class="options">
           <Checkbox
             bind:checked={includeNotes}
             label="Include Weekly Notes in the doc"
-            description="Off by default. Weekly Summaries alone usually cover a review's needs; toggle this on to also include the raw Note entries — potentially a lot of text. If you enable this on a 6-month range, use a 200k-context model (Claude Opus or Sonnet 5) — smaller models may truncate."
+            description="Off by default. Weekly Summaries alone usually cover a review's needs; toggle this on to also include the raw Note entries."
           />
+          <TipBubble heading="If you toggle Notes on">
+            A 6-month range with Notes included can push past
+            <strong>100,000 tokens</strong>. Use a
+            <strong>200k-context model</strong> — Claude
+            <strong>Opus</strong> or <strong>Sonnet 5</strong> — or the
+            doc will get truncated before the LLM finishes reading it.
+          </TipBubble>
         </div>
 
         {#if !generatedDoc}
@@ -612,11 +651,17 @@
         {/if}
       {/if}
 
+      <!-- Actions row. Back stays on the left (natural back = left);
+           Continue + Cancel both sit on the right, matching the
+           ConfirmDialog / SendToManagerButton preview convention.
+           Cancel is ruby (wine) to match every other cancel button in
+           the app. Once the doc has been generated, the right cluster
+           collapses to a single marble "Close" — the flow is done. -->
       <div class="actions">
-        {#if step === 1}
-          <button type="button" class="btn btn-marble" onclick={attemptClose}>Cancel</button>
-        {:else}
+        {#if step > 1}
           <button type="button" class="btn btn-marble" onclick={back} disabled={generating}>Back</button>
+        {:else}
+          <span class="actions-spacer"></span>
         {/if}
         <div class="actions-right">
           {#if step < TOTAL_STEPS}
@@ -628,10 +673,11 @@
             >
               Continue
             </button>
+            <button type="button" class="btn btn-ruby" onclick={attemptClose}>Cancel</button>
+          {:else if !generatedDoc}
+            <button type="button" class="btn btn-ruby" onclick={attemptClose}>Cancel</button>
           {:else}
-            <button type="button" class="btn btn-marble" onclick={attemptClose}>
-              {generatedDoc ? 'Close' : 'Cancel'}
-            </button>
+            <button type="button" class="btn btn-marble" onclick={attemptClose}>Close</button>
           {/if}
         </div>
       </div>
@@ -641,7 +687,7 @@
 
 {#if confirmingCancel}
   <ConfirmDialog
-    title="Discard your progress?"
+    title="Discard Your Progress?"
     confirmLabel="Discard"
     confirmVariant="ruby"
     cancelLabel="Keep editing"
@@ -652,6 +698,38 @@
       <p>You've started filling in the review-prep form. If you close now, your inputs will be lost.</p>
     {/snippet}
   </ConfirmDialog>
+{/if}
+
+<!--
+  Date pickers for the review-period step. Rendered outside the
+  Modal body since DatePickerPopover uses fixed positioning against
+  the anchor button's bounding rect — leaving them inside the modal
+  is fine but rendering at the top-level tag ensures the popover
+  z-index stacks cleanly above the modal card. Each picker seeds its
+  `iso` from the current selection when present, else today's local
+  date so the calendar opens somewhere sensible.
+-->
+{#if pickerOpen === 'start' && startAnchorEl}
+  <DatePickerPopover
+    iso={startDate || todayIsoLocal()}
+    from={0}
+    to={0}
+    anchorEl={startAnchorEl}
+    onCommit={(iso) => { startDate = iso; pickerOpen = null; }}
+    onClose={() => (pickerOpen = null)}
+    onClear={startDate ? () => { startDate = ''; pickerOpen = null; } : undefined}
+  />
+{/if}
+{#if pickerOpen === 'end' && endAnchorEl}
+  <DatePickerPopover
+    iso={endDate || todayIsoLocal()}
+    from={0}
+    to={0}
+    anchorEl={endAnchorEl}
+    onCommit={(iso) => { endDate = iso; pickerOpen = null; }}
+    onClose={() => (pickerOpen = null)}
+    onClear={endDate ? () => { endDate = ''; pickerOpen = null; } : undefined}
+  />
 {/if}
 
 <script lang="ts" module>
@@ -721,8 +799,35 @@
     font-size: var(--text-button);
     color: var(--text-primary);
   }
-  .date-input {
-    max-width: 240px;
+  /* Date-anchor buttons open the themed DatePickerPopover — same
+     widget the in-editor date chips use. Chip-like presentation to
+     signal "clickable date value"; falls back to a placeholder
+     appearance when unset. */
+  .date-anchor {
+    align-self: flex-start;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-md);
+    color: var(--accent-primary-text);
+    font: inherit;
+    font-family: var(--font-body);
+    cursor: pointer;
+    min-width: 160px;
+    text-align: left;
+    transition: border-color var(--transition-fast);
+  }
+  .date-anchor:hover,
+  .date-anchor:focus-visible {
+    border-color: var(--accent-primary);
+    outline: none;
+  }
+  .date-anchor:focus-visible {
+    box-shadow: 0 0 0 2px var(--focus-glow);
+  }
+  .date-anchor.is-empty {
+    color: var(--text-secondary);
+    font-style: italic;
   }
 
   .field-hint {
@@ -733,24 +838,6 @@
   }
   .field-hint.is-warning {
     color: var(--accent-pink-text);
-  }
-
-  .warn-panel {
-    padding: var(--space-3);
-    border-left: 3px solid var(--accent-primary);
-    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
-    border-radius: var(--radius-sm);
-  }
-  .warn-title {
-    font-family: var(--font-display);
-    color: var(--text-primary);
-    margin: 0 0 var(--space-1) 0;
-  }
-  .warn-body {
-    margin: 0;
-    font-size: var(--text-caption);
-    line-height: var(--text-caption-lh);
-    color: var(--text-secondary);
   }
 
   .options {
@@ -812,6 +899,11 @@
     gap: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--border-decorative);
+  }
+  /* Placeholder when step 1 has no Back button — preserves the
+     space-between layout so Continue + Cancel stay right-aligned. */
+  .actions-spacer {
+    flex: 0 0 auto;
   }
   .actions-right {
     display: flex;
