@@ -2509,55 +2509,57 @@
                   No labels match "{labelFilter.trim()}".
                 </p>
               {:else}
-                <!-- Bulk actions toolbar. Left side owns selection state
-                     (select-all + counter + clear); right side owns the
-                     batch actions and stays empty until N > 0 so the
-                     toolbar doesn't shout at users who aren't selecting. -->
-                <div class="bulk-actions" role="toolbar" aria-label="Bulk label actions">
-                  <div class="bulk-select-all">
-                    <Checkbox
-                      checked={allVisibleSelected}
-                      onchange={toggleSelectAllVisible}
-                      ariaLabel="Select all visible labels"
-                    >
-                      <span class="bulk-select-all-text">
-                        {#if selectionCount > 0}
-                          {selectionCount} selected
-                        {:else}
-                          Select all
-                        {/if}
-                      </span>
-                    </Checkbox>
-                  </div>
+                <!-- Bulk actions. Two-row layout so the select-all can
+                     use the app's card-variant Checkbox (same shape as
+                     the Tasks tab option cards) without a double-
+                     bordered nested-toolbar look: the card owns the
+                     first row + provides visual containment, and the
+                     action buttons appear as a second row only when
+                     a selection exists. -->
+                <div class="bulk-selector">
+                  <Checkbox
+                    checked={allVisibleSelected}
+                    onchange={toggleSelectAllVisible}
+                    label={selectionCount > 0
+                      ? `${selectionCount} selected`
+                      : 'Select all'}
+                    description={selectionCount > 0
+                      ? 'Use the buttons below to act on the selected labels — or click this row again to clear the selection.'
+                      : 'Bulk-select labels below to delete or merge them together.'}
+                  />
                   {#if selectionCount > 0}
-                    <button
-                      type="button"
-                      class="link-button bulk-clear"
-                      onclick={clearBulkSelection}
+                    <div
+                      class="bulk-actions-buttons"
+                      role="toolbar"
+                      aria-label="Bulk label actions"
                     >
-                      Clear
-                    </button>
-                  {/if}
-                  <div class="bulk-actions-spacer"></div>
-                  {#if selectionCount > 0}
-                    <button
-                      type="button"
-                      class="btn btn-marble btn-sm"
-                      disabled={selectionCount < 2}
-                      title={selectionCount < 2
-                        ? 'Pick at least 2 labels to merge'
-                        : ''}
-                      onclick={startBulkMerge}
-                    >
-                      Merge into…
-                    </button>
-                    <button
-                      type="button"
-                      class="btn btn-ruby btn-sm"
-                      onclick={startBulkDelete}
-                    >
-                      Delete {selectionCount}
-                    </button>
+                      <button
+                        type="button"
+                        class="link-button bulk-clear"
+                        onclick={clearBulkSelection}
+                      >
+                        Clear
+                      </button>
+                      <div class="bulk-actions-spacer"></div>
+                      <button
+                        type="button"
+                        class="btn btn-marble btn-sm"
+                        disabled={selectionCount < 2}
+                        title={selectionCount < 2
+                          ? 'Pick at least 2 labels to merge'
+                          : ''}
+                        onclick={startBulkMerge}
+                      >
+                        Merge into…
+                      </button>
+                      <button
+                        type="button"
+                        class="btn btn-ruby btn-sm"
+                        onclick={startBulkDelete}
+                      >
+                        Delete {selectionCount}
+                      </button>
+                    </div>
                   {/if}
                 </div>
 
@@ -3597,29 +3599,24 @@
   /* Phase 3a Slice 2 — multi-select toolbar. Renders above the label list
      when any labels are present. Left side owns selection state; right
      side owns batch actions (hidden until N > 0). */
-  .bulk-actions {
+  /* Card-variant Checkbox owns visual containment for the select-all
+     control, so the outer wrapper only stacks it above the button
+     row. Buttons live in a second sub-row that appears only when
+     selection > 0. */
+  .bulk-selector {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+  .bulk-actions-buttons {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-3);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-structural);
-    border-radius: var(--radius-md);
-    margin-bottom: var(--space-3);
+    padding: 0 var(--space-2);
   }
   .bulk-actions-spacer {
     flex: 1;
-  }
-  .bulk-select-all {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    cursor: pointer;
-  }
-  .bulk-select-all-text {
-    font-family: var(--font-display);
-    font-size: var(--text-caption);
-    color: var(--text-secondary);
   }
   .bulk-clear {
     font-size: var(--text-caption);
