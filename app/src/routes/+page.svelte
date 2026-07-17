@@ -1560,13 +1560,18 @@
     gap: var(--space-2);
   }
 
-  /* Fixed-height scroll region: caps the list at ~8 rows so a dense
+  /* Fixed-height scroll region: caps the list at ~10 rows so a dense
      week doesn't push the brand footer off-screen. Padding-right so
-     the scrollbar doesn't overlap task text on WebKit. */
+     the scrollbar doesn't overlap task text on WebKit. Top + bottom
+     borders act as visual bookends — signals "this is a scrollable
+     region" without needing scroll-shadow tricks that behave
+     inconsistently across themes. */
   .task-scroll {
-    max-height: 360px;
+    max-height: 420px;
     overflow-y: auto;
-    padding-right: var(--space-1);
+    padding: var(--space-2) var(--space-1) var(--space-2) 0;
+    border-top: 1px solid var(--border-decorative);
+    border-bottom: 1px solid var(--border-decorative);
   }
 
   /* "All done" empty-state — TipBubble + Open Settings CTA stacked
