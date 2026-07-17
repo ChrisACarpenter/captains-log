@@ -2689,7 +2689,7 @@
             </div>
             {#if taskReminderEnabled}
               <div class="field">
-                <label for="task-reminder-days-before" class="field-heading">Days before due</label>
+                <label for="task-reminder-days-before" class="field-heading">Days before due…</label>
                 <input
                   id="task-reminder-days-before"
                   class="text-input days-before-input"
@@ -2705,7 +2705,7 @@
                 </p>
               </div>
               <div class="field">
-                <label for="task-reminder-time" class="field-heading">Time of day</label>
+                <label for="task-reminder-time" class="field-heading">Time of day…</label>
                 <input
                   id="task-reminder-time"
                   class="text-input time-input"
