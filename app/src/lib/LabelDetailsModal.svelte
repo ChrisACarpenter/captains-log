@@ -780,15 +780,10 @@
   .spinner {
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     border: 2px solid var(--border-structural);
     border-top-color: var(--accent-primary);
-    animation: spin 0.9s linear infinite;
-  }
-  @keyframes spin {
-    to {
-      transform: rotate(360deg);
-    }
+    animation: spin 0.9s var(--ease-loop) infinite;
   }
 
   /* References list — Phase 3a Slice 1 drill-down. Bounded height with
@@ -801,7 +796,7 @@
     max-height: 280px;
     overflow-y: auto;
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
   }
   .ref-list li + li {
     border-top: 1px solid var(--border-structural);
@@ -819,7 +814,7 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
-    transition: background var(--transition-base);
+    transition: background var(--duration-base) var(--ease-standard);
   }
   .ref-row:hover,
   .ref-row:focus-visible {
@@ -874,7 +869,7 @@
     display: inline-block;
     width: 28px;
     height: 28px;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     border: 1px solid var(--border-structural);
     flex-shrink: 0;
   }

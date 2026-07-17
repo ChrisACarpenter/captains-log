@@ -72,10 +72,10 @@
     cursor: pointer;
     opacity: 0.55;
     transition:
-      opacity 120ms ease,
-      background 120ms ease,
-      border-color 120ms ease,
-      color 120ms ease;
+      opacity var(--duration-fast) var(--ease-standard),
+      background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard);
   }
 
   .task-row-action:hover,

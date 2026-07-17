@@ -984,7 +984,7 @@
   .chevron {
     display: inline-block;
     font-size: 10px;
-    transition: transform var(--transition-fast);
+    transition: transform var(--duration-fast) var(--ease-standard);
     color: var(--text-muted);
   }
 
@@ -1098,7 +1098,7 @@
     font-size: var(--text-caption);
     padding: 4px 10px;
     cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
   }
 
   .view-toggle-btn:hover {

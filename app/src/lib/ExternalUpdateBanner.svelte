@@ -77,7 +77,7 @@
     font: inherit;
     padding: 3px 10px;
     cursor: pointer;
-    transition: background var(--transition-fast), border-color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
   }
   .banner-action:hover {
     background: var(--bg-surface);

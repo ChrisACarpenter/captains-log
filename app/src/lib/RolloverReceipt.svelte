@@ -120,7 +120,7 @@
     font-size: 1.2em;
     line-height: 1;
     color: var(--text-secondary);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
   }
   .dismiss:hover {
     color: var(--text-primary);

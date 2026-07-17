@@ -1682,7 +1682,7 @@
     font-size: 1.2em;
     line-height: 1;
     color: var(--text-secondary);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
   }
   .auto-import-error .dismiss:hover {
     color: var(--text-primary);
@@ -1725,8 +1725,8 @@
     cursor: pointer;
     vertical-align: baseline;
     white-space: nowrap;
-    transition: background var(--transition-fast),
-      border-color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
   .task-text :global(.task-link-chip:hover) {
     background: var(--bg-surface);

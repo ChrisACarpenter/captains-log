@@ -412,7 +412,7 @@
     font-size: 18px;
     line-height: 1;
     cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
   }
   .dp-nav:hover {
     background: var(--bg-surface);
@@ -456,7 +456,7 @@
     font: inherit;
     font-size: var(--text-caption);
     cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
   }
   .dp-cell:hover {
     background: var(--bg-surface);
@@ -500,7 +500,7 @@
     font: inherit;
     font-size: var(--text-caption);
     cursor: pointer;
-    transition: background var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard);
   }
   .dp-action:hover {
     background: var(--bg-surface);

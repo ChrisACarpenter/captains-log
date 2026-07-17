@@ -27,7 +27,7 @@
     /* Rotate so the finger points right at the adjacent input. The
      * branded sprite ships pointing down-right by default. */
     transform: rotate(-15deg);
-    animation: pointer-bob 1.6s ease-in-out infinite;
+    animation: pointer-bob 1.6s var(--ease-oscillate) infinite;
   }
   .pointer-finger.hidden {
     visibility: hidden;

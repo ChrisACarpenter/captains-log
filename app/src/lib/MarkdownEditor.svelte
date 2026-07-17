@@ -491,7 +491,7 @@
     color: var(--text-primary);
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard);
     font-family: var(--md-font-family, var(--font-body));
     font-size: var(--md-font-size, var(--text-body));
     line-height: var(--md-line-height, var(--text-body-lh));
@@ -704,8 +704,8 @@
     cursor: pointer;
     vertical-align: baseline;
     white-space: nowrap;
-    transition: background var(--transition-fast),
-      border-color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
     /* Prevent the user-agent button outline; we draw our own ring below. */
     outline: none;
   }
@@ -758,8 +758,8 @@
     cursor: pointer;
     vertical-align: baseline;
     white-space: nowrap;
-    transition: background var(--transition-fast),
-      border-color var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
     outline: none;
   }
   .md-editor :global(.cm-link-chip:hover) {

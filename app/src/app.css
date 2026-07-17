@@ -96,19 +96,41 @@
 
   --neutral-cream: #f7e7db;
 
-  /* Spacing — 4px grid */
+  /*
+   * Spacing — 4px grid with one below-grid primitive
+   * ----------------------------------------------------
+   * `--space-half` is the only below-grid value; reserved for
+   * toolbar icon clusters, chip vertical padding, and other tight-
+   * cluster gaps where 4px reads as too much air. Everything else
+   * is on the +4 cadence. `--space-5` fills what was previously the
+   * biggest gap in the scale (16px → 24px jump) — added because it
+   * was already assumed by LabelDetailsModal.svelte before the token
+   * existed.
+   */
+  --space-half: 2px;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
+  --space-5: 20px;
   --space-6: 24px;
   --space-8: 32px;
   --space-12: 48px;
 
-  /* Radii */
+  /*
+   * Radii
+   * ----------------------------------------------------
+   * `--radius-xs` covers the checkbox-square / cm-toolbar-btn /
+   * inline-code cluster that was previously hard-coding 3px in
+   * three places. `--radius-full` is a semantic alias for the
+   * circle-affordance sites (loading spinner, radio dot, tray dot,
+   * layout icon-button) that were hard-coding 50%.
+   */
+  --radius-xs: 3px;
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
+  --radius-full: 50%;
   --radius-pill: 999px;
 
   /* Typography */
@@ -126,9 +148,32 @@
   --text-caption: 13px;
   --text-caption-lh: 18px;
 
-  /* Motion */
-  --transition-fast: 120ms ease-out;
-  --transition-base: 180ms ease-out;
+  /*
+   * Motion — orthogonal duration + easing tokens
+   * ----------------------------------------------------
+   * Durations describe HOW LONG, easings describe HOW. Split so
+   * one duration can pair with any easing (e.g. --duration-fast +
+   * --ease-oscillate for a subtle bounce, if that ever becomes a
+   * thing). Every transition callsite in the app writes them in
+   * pairs: `transition: prop var(--duration-fast) var(--ease-standard);`.
+   *
+   * Functional group → token mapping:
+   *   Chrome hover/focus              → --duration-fast + --ease-standard
+   *   Elevated hover (modal, cards)   → --duration-base + --ease-standard
+   *   Modal / tooltip / toast enter   → --duration-reveal + --ease-standard
+   *   Data-driven state reveal        → --duration-slow + --ease-standard
+   *   Focus ring                      → --duration-instant (no transition)
+   *   Spinner                         → 0.9s --ease-loop infinite
+   *   Attention pulse                 → 1.6s --ease-oscillate infinite
+   */
+  --duration-instant: 0ms;
+  --duration-fast: 120ms;
+  --duration-base: 180ms;
+  --duration-reveal: 240ms;
+  --duration-slow: 600ms;
+  --ease-standard: ease-out;
+  --ease-loop: linear;
+  --ease-oscillate: ease-in-out;
 }
 
 /* ---------- Light theme ---------- */
@@ -171,6 +216,21 @@
    * themes override this via deriveTokens (pale accents get a derived
    * dark; saturated accents stay #ffffff). */
   --btn-primary-text: #1f0a02;
+}
+
+/*
+ * Global keyframes
+ * ----------------------------------------------------
+ * `spin` is the shared spinner rotation used by LoadingOverlay and
+ * LabelDetailsModal. Defined at the app level rather than inside
+ * each component's scoped style block so the two spinners can't
+ * drift out of sync (previously they were near-identical duplicates
+ * with slightly different local names).
+ */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ---------- Base reset ---------- */
@@ -321,7 +381,7 @@ p {
   background: var(--brand-orange);
   box-shadow: var(--btn-shadow);
   cursor: pointer;
-  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  transition: transform var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
 }
 
 .btn:hover:not(:disabled) {
@@ -453,7 +513,7 @@ p {
   font-family: var(--font-display);
   font-size: var(--text-caption);
   padding: 2px var(--space-2);
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   background: var(--bg-elevated);
   color: var(--text-secondary);
 }
@@ -479,7 +539,7 @@ p {
   font-family: var(--font-body);
   font-size: var(--text-body);
   line-height: var(--text-body-lh);
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--duration-fast) var(--ease-standard);
 }
 .text-input:focus-visible {
   outline: none;
@@ -528,9 +588,9 @@ p {
   color: transparent;
   cursor: pointer;
   transition:
-    background var(--transition-fast),
-    border-color var(--transition-fast),
-    color var(--transition-fast);
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
   outline: none;
 }
 .checkbox-square:hover {

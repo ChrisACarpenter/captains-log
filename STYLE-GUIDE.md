@@ -268,8 +268,42 @@ Gemstone naming, ported directly from the game's `EStandardButtonType` enum:
 
 ### Spacing
 
-- **4px grid.** All paddings, margins, and sizes are multiples of 4.
-- Spacing scale tokens: `--space-1` (4px), `--space-2` (8px), `--space-3` (12px), `--space-4` (16px), `--space-6` (24px), `--space-8` (32px), `--space-12` (48px).
+- **4px grid.** All paddings, margins, and sizes snap to multiples of 4 — except for `--space-half`, the one deliberate below-grid primitive (see below).
+- Spacing scale tokens:
+  - `--space-half` (2px) — the only below-grid value. Reserved for tight-cluster gaps: toolbar icon rows, chip vertical padding, dense metadata rows. Don't use for section-level rhythm.
+  - `--space-1` (4px), `--space-2` (8px), `--space-3` (12px), `--space-4` (16px), `--space-5` (20px), `--space-6` (24px), `--space-8` (32px), `--space-12` (48px)
+- `--space-5` (20px) exists because LabelDetailsModal needed a value between 16 and 24 for its dense stat rows — a real gap in the scale, not a one-off.
+
+### Radii
+
+Tokenized corner radii, used across chrome, chips, buttons, and modals:
+
+- `--radius-xs` (3px) — checkbox squares, cm-toolbar buttons, inline `code` markers
+- `--radius-sm` (6px) — standard input + small chrome
+- `--radius-md` (10px) — modal cards, pill buttons, panels
+- `--radius-lg` (16px) — feature-height dialogs
+- `--radius-full` (50%) — circular affordances (spinner, radio dot, floor-cat focus ring)
+- `--radius-pill` (999px) — full-round pill buttons (day-pill, force-base-pill, tooltip)
+
+### Motion
+
+Motion is split into orthogonal **duration** and **easing** tokens so any duration can pair with any easing. Every transition callsite writes them in pairs: `transition: prop var(--duration-fast) var(--ease-standard);`.
+
+**Durations:**
+
+- `--duration-instant` (0ms) — focus ring, immediate state flips
+- `--duration-fast` (120ms) — chrome hover/focus (buttons, chips, inputs)
+- `--duration-base` (180ms) — elevated hover (modal chrome, cards)
+- `--duration-reveal` (240ms) — modal / tooltip / toast enter
+- `--duration-slow` (600ms) — data-driven state reveal (WeekStripe growth)
+
+**Easings:**
+
+- `--ease-standard` (ease-out) — every finite transition
+- `--ease-loop` (linear) — infinite rotational animations (spinner)
+- `--ease-oscillate` (ease-in-out) — attention pulses (PointerFinger bob)
+
+**Reduced-motion:** modal fade-in respects `prefers-reduced-motion: reduce` (all mount animations drop to instant). Any new animation must do the same.
 
 ### Dialogs
 
@@ -352,7 +386,7 @@ Phase 2 considerations: when the journal browser ships with a sidebar, the strip
 First-run setup uses a rotated `pointer-hand-straight` sprite (from the `ui-guide-hands` atlas) to point at the input the wizard is asking the user to fill in. Lives at `/branded/guide-hand.png` (extracted from upper-left of atlas, rotated 90° clockwise so the finger points right).
 
 - Placed inside a `.guide-row` flex container, left of the active input
-- ~36px tall, animates with a subtle 4px-amplitude horizontal "bob" every 1.8s to draw the eye toward the field
+- ~36px tall, animates with a subtle 4px-amplitude horizontal "bob" every 1.6s (`--ease-oscillate`, infinite) to draw the eye toward the field
 - Used on wizard steps 1 (Name), 2 (Location), 3 (Reminder) — not on the welcome step
 
 ### Open patterns to spec later
@@ -360,7 +394,6 @@ First-run setup uses a rotated `pointer-hand-straight` sprite (from the `ui-guid
 - Tooltips (delay, max width, dismissal)
 - Empty states
 - Loading / skeleton states
-- Motion / animation timings
 - Modals (beyond basic confirmation)
 - Week-stripe window-state behavior (unfocused, fullscreen, Phase 2 sidebar geometry)
 
@@ -420,7 +453,5 @@ Pulled from analysis of [prodigygame.com/main-en/teachers](https://www.prodigyga
 
 ## Open items
 
-- Spacing scale finalization (do we need `--space-5` for 20px, or stick to the powers-of-2 cadence?)
-- Motion / animation spec (timing functions, durations, easing curves)
 - Self-hosted font files for offline builds (currently Google Fonts CDN)
 - Corporate font identification (if we ever need the reference style)

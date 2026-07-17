@@ -152,9 +152,9 @@
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     background: var(--border-decorative);
-    transition: background var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard);
   }
   .dot.done {
     background: var(--accent-primary);

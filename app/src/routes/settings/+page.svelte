@@ -2963,7 +2963,7 @@
        the inactive tabs from shifting down 2px when one activates. */
     border-bottom: 2px solid transparent;
     margin-bottom: -1px;
-    transition: color var(--transition-fast), border-color var(--transition-fast);
+    transition: color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
   }
   .tab:hover {
     color: var(--text-primary);
@@ -3088,7 +3088,11 @@
     font-size: var(--text-caption);
     line-height: 1.2;
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
   .day-pill:hover {
     color: var(--text-primary);
@@ -3134,7 +3138,11 @@
     cursor: pointer;
     font-family: var(--font-body);
     color: var(--text-primary);
-    transition: all var(--transition-fast);
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
   .theme-radio:hover:not(.is-disabled) {
     border-color: var(--accent-primary);
@@ -3160,10 +3168,14 @@
     margin-top: 3px;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     border: 1.5px solid var(--border-structural);
     background: transparent;
-    transition: all var(--transition-fast);
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
   .theme-radio.active .radio-dot {
     border-color: var(--accent-primary);
@@ -3247,7 +3259,11 @@
     font-family: var(--font-display);
     font-size: var(--text-caption);
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition:
+      background var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
   .force-base-pill:hover {
     color: var(--text-primary);
@@ -3290,8 +3306,8 @@
     /* Subtle inner ring keeps the swatch visible when the user's chosen
        color matches the page surface exactly. */
     box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.06);
-    transition: border-color var(--transition-fast),
-      transform var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard),
+      transform var(--duration-fast) var(--ease-standard);
   }
   .token-swatch:hover {
     border-color: var(--accent-primary);
@@ -3448,8 +3464,8 @@
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     cursor: pointer;
-    transition: border-color var(--transition-fast),
-      background var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard),
+      background var(--duration-fast) var(--ease-standard);
   }
   .radio-row:hover {
     border-color: var(--accent-primary);
@@ -3471,12 +3487,12 @@
     margin-top: 3px;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     border: 1.5px solid var(--border-structural);
     background: transparent;
     flex-shrink: 0;
-    transition: border-color var(--transition-fast),
-      box-shadow var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard),
+      box-shadow var(--duration-fast) var(--ease-standard);
   }
   .radio-row:has(input[type='radio']:checked) {
     border-color: var(--accent-primary);
@@ -3647,7 +3663,7 @@
     max-height: 260px;
     overflow-y: auto;
     border: 1px solid var(--border-structural);
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
   }
   .bulk-merge-list li + li {
     border-top: 1px solid var(--border-structural);

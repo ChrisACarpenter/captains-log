@@ -776,7 +776,7 @@
   .dot {
     width: 8px;
     height: 8px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
     background: var(--border-decorative);
   }
   .dot.is-past {
@@ -819,7 +819,7 @@
     cursor: pointer;
     min-width: 160px;
     text-align: left;
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard);
   }
   .date-anchor:hover,
   .date-anchor:focus-visible {

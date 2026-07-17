@@ -1049,7 +1049,7 @@
     font-size: 1.2em;
     line-height: 1;
     color: inherit;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     opacity: 0.7;
   }
   .import-receipt-dismiss:hover {

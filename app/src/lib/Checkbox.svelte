@@ -210,8 +210,8 @@
     border: 1px solid var(--border-structural);
     border-radius: var(--radius-md);
     transition:
-      border-color var(--transition-fast),
-      background var(--transition-fast);
+      border-color var(--duration-fast) var(--ease-standard),
+      background var(--duration-fast) var(--ease-standard);
   }
   .row.card:hover:not(:disabled) {
     border-color: var(--accent-primary);

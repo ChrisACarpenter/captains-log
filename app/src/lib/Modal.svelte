@@ -256,6 +256,24 @@
     inset: 0;
     background: rgba(0, 0, 0, 0.32);
     backdrop-filter: blur(2px);
+    animation: modal-backdrop-in var(--duration-reveal) var(--ease-standard);
+  }
+
+  @keyframes modal-backdrop-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  @keyframes modal-card-in {
+    from { opacity: 0; transform: translate(-50%, calc(-50% + 8px)); }
+    to   { opacity: 1; transform: translate(-50%, -50%); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .modal-backdrop,
+    .modal-card {
+      animation: none;
+    }
   }
 
   /* Default + nested layers. Card sits one rung above its own backdrop so
@@ -291,6 +309,7 @@
     outline: none;
     font-family: var(--font-body);
     color: var(--text-primary);
+    animation: modal-card-in var(--duration-reveal) var(--ease-standard);
   }
 
   .modal-header {
@@ -323,7 +342,7 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: background var(--transition-base), color var(--transition-base);
+    transition: background var(--duration-base) var(--ease-standard), color var(--duration-base) var(--ease-standard);
   }
   .modal-close:hover {
     background: var(--bg-elevated);

@@ -208,7 +208,7 @@
     border: 0;
     background: transparent;
     cursor: pointer;
-    transition: transform 150ms ease-out;
+    transition: transform var(--duration-fast) var(--ease-standard);
   }
   .floor-cat:hover {
     transform: scale(1.06);
@@ -216,7 +216,7 @@
   .floor-cat:focus-visible {
     outline: 2px solid var(--accent-primary);
     outline-offset: 3px;
-    border-radius: 50%;
+    border-radius: var(--radius-full);
   }
 
   .floor-cat img {
@@ -250,7 +250,7 @@
     white-space: nowrap;
     opacity: 0;
     pointer-events: none;
-    transition: opacity 150ms ease-out;
+    transition: opacity var(--duration-fast) var(--ease-standard);
   }
   .floor-cat:hover .floor-cat-tooltip,
   .floor-cat:focus-visible .floor-cat-tooltip {

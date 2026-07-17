@@ -139,7 +139,7 @@
   .fill {
     height: 100%;
     background: var(--stripe-fill);
-    transition: width 600ms ease-out;
+    transition: width var(--duration-slow) var(--ease-standard);
   }
 
   .noot {

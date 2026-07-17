@@ -310,7 +310,7 @@
     min-height: 44px;
     align-items: center;
     cursor: text;
-    transition: border-color var(--transition-fast);
+    transition: border-color var(--duration-fast) var(--ease-standard);
   }
 
   .chips:focus-within {
@@ -343,7 +343,7 @@
     padding: 0 2px;
     margin-left: 2px;
     opacity: 0.7;
-    transition: opacity var(--transition-fast);
+    transition: opacity var(--duration-fast) var(--ease-standard);
   }
 
   .chip-x:hover {
@@ -395,7 +395,7 @@
     line-height: var(--text-body-lh);
     text-align: left;
     cursor: pointer;
-    transition: background var(--transition-fast);
+    transition: background var(--duration-fast) var(--ease-standard);
   }
 
   .option:hover,

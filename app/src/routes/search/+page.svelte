@@ -374,7 +374,7 @@
     font: inherit;
     text-align: left;
     cursor: pointer;
-    transition: background var(--transition-base), border-color var(--transition-base);
+    transition: background var(--duration-base) var(--ease-standard), border-color var(--duration-base) var(--ease-standard);
   }
   .result-card:hover {
     background: var(--bg-elevated);

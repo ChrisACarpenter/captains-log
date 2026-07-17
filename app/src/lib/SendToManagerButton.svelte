@@ -963,7 +963,7 @@
   .copy-status {
     font-size: 0.8rem;
     padding: 2px 8px;
-    border-radius: var(--radius-sm, 4px);
+    border-radius: var(--radius-sm);
     line-height: 1.4;
     white-space: nowrap;
   }

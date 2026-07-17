@@ -119,9 +119,9 @@
     padding: 4px 10px;
     cursor: pointer;
     transition:
-      background var(--transition-fast),
-      color var(--transition-fast),
-      border-color var(--transition-fast);
+      background var(--duration-fast) var(--ease-standard),
+      color var(--duration-fast) var(--ease-standard),
+      border-color var(--duration-fast) var(--ease-standard);
   }
   .help-btn:hover {
     background: var(--bg-surface);
