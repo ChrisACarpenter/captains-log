@@ -38,6 +38,7 @@
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { urlPasteUpgrade } from '$lib/url-paste-upgrade';
 
   type Props = {
     id: string;
@@ -56,6 +57,12 @@
     warning?: string;
     autocomplete?: import('svelte/elements').HTMLInputAttributes['autocomplete'];
     spellcheck?: boolean;
+    /** Opt in to URL paste-upgrade — see `$lib/url-paste-upgrade.ts`.
+     *  Off by default; opt in per field. Only meaningful for text-like
+     *  types (text, url, email) — no-op on number/date/time inputs
+     *  since paste events on those don't carry meaningful string
+     *  content. */
+    urlPaste?: boolean;
   };
 
   let {
@@ -70,6 +77,7 @@
     warning,
     autocomplete = 'off',
     spellcheck = false,
+    urlPaste = false,
   }: Props = $props();
 </script>
 
@@ -77,17 +85,32 @@
   <label for={id}>
     {#if labelSnippet}{@render labelSnippet()}{:else}{label}{/if}
   </label>
-  <input
-    {id}
-    {type}
-    {placeholder}
-    {autocomplete}
-    spellcheck={spellcheck ? 'true' : 'false'}
-    class="text-input"
-    aria-describedby={warning ? `${id}-warning` : undefined}
-    aria-invalid={warning ? 'true' : undefined}
-    bind:value
-  />
+  {#if urlPaste}
+    <input
+      {id}
+      {type}
+      {placeholder}
+      {autocomplete}
+      spellcheck={spellcheck ? 'true' : 'false'}
+      class="text-input"
+      aria-describedby={warning ? `${id}-warning` : undefined}
+      aria-invalid={warning ? 'true' : undefined}
+      bind:value
+      use:urlPasteUpgrade
+    />
+  {:else}
+    <input
+      {id}
+      {type}
+      {placeholder}
+      {autocomplete}
+      spellcheck={spellcheck ? 'true' : 'false'}
+      class="text-input"
+      aria-describedby={warning ? `${id}-warning` : undefined}
+      aria-invalid={warning ? 'true' : undefined}
+      bind:value
+    />
+  {/if}
   {#if warning}
     <!--
       role="alert" + aria-live="assertive" so screen readers announce

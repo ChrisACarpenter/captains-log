@@ -15,6 +15,7 @@
   import TaskMetaChip from '$lib/TaskMetaChip.svelte';
   import TaskRowActionButton from '$lib/TaskRowActionButton.svelte';
   import PrepSelfReviewWizard from '$lib/review-prep/PrepSelfReviewWizard.svelte';
+  import { urlPasteUpgrade } from '$lib/url-paste-upgrade';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -1150,6 +1151,7 @@
                       onblur={cancelEdit}
                       disabled={savingEdit}
                       aria-label="Task text"
+                      use:urlPasteUpgrade
                     />
                   {:else}
                     <!--
@@ -1303,8 +1305,9 @@
           label="Task"
           placeholder="What needs doing?"
           bind:value={addTaskText}
-          hint="Markdown formatting like **bold**, *italic*, and ~~strike~~ works."
+          hint="Markdown formatting like **bold**, *italic*, and ~~strike~~ works. Paste a URL to auto-link it."
           warning={addError}
+          urlPaste
         />
         <!--
           Order: primary (Add Task) first, secondary (Cancel) second.

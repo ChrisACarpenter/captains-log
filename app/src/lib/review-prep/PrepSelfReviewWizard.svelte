@@ -566,6 +566,7 @@
           placeholder={'Paste the questions here, or a link like:\nhttps://docs.google.com/document/d/...'}
           bind:value={reviewQuestions}
           rows={8}
+          urlPaste
         />
         <TipBubble heading="Tip">
           Optional — but the LLM's output is only as focused as
@@ -585,6 +586,7 @@
           placeholder={'Paste the OKRs here, or a link like:\nhttps://prodigygame.atlassian.net/wiki/spaces/...'}
           bind:value={okrs}
           rows={8}
+          urlPaste
         />
         <TipBubble heading="Tip">
           Optional — skip this if you don't have team OKRs to point at.

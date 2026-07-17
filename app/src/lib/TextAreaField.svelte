@@ -21,6 +21,7 @@
 -->
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { urlPasteUpgrade } from '$lib/url-paste-upgrade';
 
   type Props = {
     id: string;
@@ -33,6 +34,13 @@
     warning?: string;
     rows?: number;
     spellcheck?: boolean;
+    /** Opt in to URL paste-upgrade — paste-a-URL-with-selection wraps
+     *  the selection as `[selected](url)`; paste-a-URL-without-
+     *  selection inserts the bare URL then async-upgrades to
+     *  `[title](url)` when `enrich_link` resolves. Matches the
+     *  behavior of the CodeMirror `linkPaste` extension used by
+     *  MarkdownEditor. Off by default — opt in per field. */
+    urlPaste?: boolean;
   };
 
   let {
@@ -46,6 +54,7 @@
     warning,
     rows = 6,
     spellcheck = true,
+    urlPaste = false,
   }: Props = $props();
 </script>
 
@@ -53,16 +62,33 @@
   <label for={id}>
     {#if labelSnippet}{@render labelSnippet()}{:else}{label}{/if}
   </label>
-  <textarea
-    {id}
-    {placeholder}
-    {rows}
-    class="text-input text-area-input"
-    spellcheck={spellcheck ? 'true' : 'false'}
-    aria-describedby={warning ? `${id}-warning` : undefined}
-    aria-invalid={warning ? 'true' : undefined}
-    bind:value
-  ></textarea>
+  {#if urlPaste}
+    <!-- URL paste-upgrade opt-in. `use:` attaches the action that
+         intercepts paste events, mirroring MarkdownEditor's
+         behavior in a non-CodeMirror context. -->
+    <textarea
+      {id}
+      {placeholder}
+      {rows}
+      class="text-input text-area-input"
+      spellcheck={spellcheck ? 'true' : 'false'}
+      aria-describedby={warning ? `${id}-warning` : undefined}
+      aria-invalid={warning ? 'true' : undefined}
+      bind:value
+      use:urlPasteUpgrade
+    ></textarea>
+  {:else}
+    <textarea
+      {id}
+      {placeholder}
+      {rows}
+      class="text-input text-area-input"
+      spellcheck={spellcheck ? 'true' : 'false'}
+      aria-describedby={warning ? `${id}-warning` : undefined}
+      aria-invalid={warning ? 'true' : undefined}
+      bind:value
+    ></textarea>
+  {/if}
   {#if warning}
     <p
       id="{id}-warning"
