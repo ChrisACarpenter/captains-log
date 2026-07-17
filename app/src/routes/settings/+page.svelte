@@ -1777,7 +1777,7 @@
                  off restores everything without re-entering. -->
             <Checkbox
               bind:checked={hideSendToManager}
-              label="Hide the Send-to-manager feature"
+              label="Hide Send To Manager"
               description="Turn this on if you don't share weekly summaries with a manager. Hides the Send button on the Weekly Summary view and hides the manager name / email fields below. Your saved values stay put — you can turn it back on any time."
             />
 

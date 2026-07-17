@@ -530,7 +530,11 @@
   // ---- Slice 6c-followup: import completed tasks into Key Accomplishments ----
 
   // Small inline receipt shown under the label row after each import
-  // attempt. Auto-clears after 5s so it doesn't linger and get stale.
+  // attempt. Success + "nothing new" tones auto-clear after 5s so they
+  // don't linger; **error tone persists** (Polish Sweep #2) — errors
+  // are worth surfacing until the user acknowledges them, since the
+  // whole point of a receipt on a failed import is that something the
+  // user cared about didn't happen.
   type ImportReceipt = { text: string; tone: 'ok' | 'muted' | 'error' };
   let importReceipt = $state<ImportReceipt | null>(null);
   let importReceiptTimer: ReturnType<typeof setTimeout> | null = null;
@@ -538,10 +542,20 @@
 
   function scheduleImportReceiptClear(): void {
     if (importReceiptTimer) clearTimeout(importReceiptTimer);
+    // Error tone persists — the user dismisses via the × button below.
+    if (importReceipt?.tone === 'error') return;
     importReceiptTimer = setTimeout(() => {
       importReceipt = null;
       importReceiptTimer = null;
     }, 5000);
+  }
+
+  function dismissImportReceipt(): void {
+    if (importReceiptTimer) {
+      clearTimeout(importReceiptTimer);
+      importReceiptTimer = null;
+    }
+    importReceipt = null;
   }
 
   type TaskImportResult = {
@@ -798,8 +812,24 @@
             </button>
           </div>
           {#if importReceipt}
-            <p class="import-receipt import-receipt-{importReceipt.tone}" role="status">
-              {importReceipt.text}
+            <!-- role/aria-live vary by tone: error uses role="alert"
+                 + aria-live="assertive" so screen readers announce
+                 failures immediately; success/muted stay polite so
+                 they don't interrupt whatever the user is doing. -->
+            <p
+              class="import-receipt import-receipt-{importReceipt.tone}"
+              role={importReceipt.tone === 'error' ? 'alert' : 'status'}
+              aria-live={importReceipt.tone === 'error' ? 'assertive' : 'polite'}
+            >
+              <span class="import-receipt-text">{importReceipt.text}</span>
+              {#if importReceipt.tone === 'error'}
+                <button
+                  type="button"
+                  class="import-receipt-dismiss"
+                  onclick={dismissImportReceipt}
+                  aria-label="Dismiss import error"
+                >×</button>
+              {/if}
             </p>
           {/if}
           <MarkdownEditor
@@ -994,13 +1024,40 @@
     gap: var(--space-3);
   }
 
-  /* Inline receipt underneath the label row. Auto-clears after 5s.
-     Tone variants: `ok` = neutral positive, `muted` = "nothing to
-     do", `error` = red (unused today but reserved for future
-     failure modes). */
+  /* Inline receipt underneath the label row. Success + muted tones
+     auto-clear after 5s; error tone persists until the user
+     dismisses via the trailing × button (Polish Sweep #2). Tone
+     variants: `ok` = neutral positive, `muted` = "nothing to do",
+     `error` = red with dismiss affordance. */
   .import-receipt {
     margin: 0;
     font-size: var(--text-caption);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .import-receipt-text {
+    flex: 1;
+  }
+  .import-receipt-dismiss {
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 0 var(--space-2);
+    margin: 0;
+    cursor: pointer;
+    font-size: 1.2em;
+    line-height: 1;
+    color: inherit;
+    border-radius: var(--radius-sm, 4px);
+    opacity: 0.7;
+  }
+  .import-receipt-dismiss:hover {
+    opacity: 1;
+  }
+  .import-receipt-dismiss:focus-visible {
+    outline: 2px solid var(--focus-glow);
+    outline-offset: 2px;
   }
   .import-receipt-ok {
     color: var(--accent-primary-text);
