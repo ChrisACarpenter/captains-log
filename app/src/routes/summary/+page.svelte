@@ -108,14 +108,19 @@
   // Phase 2.8 follow-on: drives chip rendering in LabelInput. Refreshed on
   // 'settings-changed' so toggling Theme tab updates this page live.
   let colorfulLabels = $state(false);
+  // Polish Sweep #1 — reflects the JournalSettings opt-out. When true,
+  // the Send-to-manager button below is hidden (Settings > General's
+  // symmetrical hide of the manager fields lives in that tab).
+  let hideSendToManager = $state(false);
   let settingsUnlisten: UnlistenFn | null = null;
 
-  async function refreshColorfulLabels(): Promise<void> {
+  async function refreshDynamicSettings(): Promise<void> {
     try {
-      const s = await invoke<{ colorfulLabels?: boolean }>('get_settings');
+      const s = await invoke<{ colorfulLabels?: boolean; hideSendToManager?: boolean }>('get_settings');
       colorfulLabels = s.colorfulLabels ?? false;
+      hideSendToManager = s.hideSendToManager ?? false;
     } catch {
-      // Pre-storage / first-run — leave at default false.
+      // Pre-storage / first-run — leave at defaults.
     }
   }
 
@@ -360,9 +365,9 @@
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('captainslog:week-changed', onWeekChangedEvent);
 
-    await refreshColorfulLabels();
+    await refreshDynamicSettings();
     settingsUnlisten = await listen('settings-changed', () => {
-      void refreshColorfulLabels();
+      void refreshDynamicSettings();
     });
 
     // Subscribe to the cross-route file-changed broadcast. Any writer to
@@ -901,7 +906,7 @@
           <!-- Send to manager (Phase 2.6). Marble so it doesn't compete
             with the primary Save action. Component owns its own gating,
             sent-status display, and confirmation modal. -->
-          {#if yearWeek}
+          {#if yearWeek && !hideSendToManager}
             <SendToManagerButton
               year={yearWeek.year}
               week={yearWeek.week}

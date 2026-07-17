@@ -658,6 +658,18 @@ pub struct JournalSettings {
     /// upgrades cleanly; see [`TaskReminderSettings`] for defaults.
     #[serde(default)]
     pub task_reminder: TaskReminderSettings,
+    /// Pre-1.0 Polish Sweep item #1 — opt-out for the Send-to-manager
+    /// surface. When true: the Weekly Summary's Send button is
+    /// hidden, and the manager name / manager email fields are hidden
+    /// from Settings > General (so there's no orphan field for a
+    /// feature the user turned off). Underlying `manager_email` +
+    /// `manager_name` values are preserved untouched — re-enabling
+    /// the toggle restores the whole surface without re-entering.
+    /// `#[serde(default)]` so pre-Polish-Sweep settings.json upgrades
+    /// cleanly (default = false = show the feature, matching the
+    /// pre-toggle behavior).
+    #[serde(default)]
+    pub hide_send_to_manager: bool,
 }
 
 impl Default for JournalSettings {
@@ -679,6 +691,7 @@ impl Default for JournalSettings {
             colorful_labels: false,
             task_list: TaskListSettings::default(),
             task_reminder: TaskReminderSettings::default(),
+            hide_send_to_manager: false,
         }
     }
 }

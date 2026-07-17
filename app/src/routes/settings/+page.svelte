@@ -141,6 +141,11 @@
     taskList: TaskListSettings;
     // Phase 3e — controls the task-due-date reminder notifications.
     taskReminder: TaskReminderSettings;
+    // Polish Sweep #1 — Hide Send-to-manager opt-out. When true, the
+    // /summary Send button is hidden AND the manager name/email
+    // fields on the General tab are hidden too (symmetrical opt-out).
+    // Underlying manager values persist so re-enabling restores.
+    hideSendToManager: boolean;
   };
 
   type TabKey = 'general' | 'reminders' | 'mail' | 'theme' | 'labels' | 'tasks';
@@ -200,6 +205,11 @@
   let reminderTime = $state('16:00');
   let managerEmailInput = $state('');
   let managerNameInput = $state('');
+  // Polish Sweep #1 — opt out of the Send-to-manager surface. When
+  // checked, hides the manager fields below AND the Send button on
+  // /summary. Underlying manager values stay in settings.json so
+  // toggling back restores everything without re-entering.
+  let hideSendToManager = $state(false);
   let bambooTitleInput = $state('');
   // Jira keys are stored as a Vec<String> server-side. The form binds a
   // comma-separated string for ergonomics; backend tokenizes + uppercases
@@ -1370,6 +1380,7 @@
       reminderTime = `${String(s.reminder.hour).padStart(2, '0')}:${String(s.reminder.minute).padStart(2, '0')}`;
       managerEmailInput = s.managerEmail ?? '';
       managerNameInput = s.managerName ?? '';
+      hideSendToManager = s.hideSendToManager ?? false;
       bambooTitleInput = s.bambooTitle ?? '';
       jiraKeysInput = (s.jiraProjectKeys ?? []).join(', ');
       mailSendMode = s.mailSendMode ?? 'gmail';
@@ -1563,7 +1574,8 @@
             })(),
             hour: Number.parseInt(taskReminderTimeInput.split(':')[0] ?? '9', 10) || 9,
             minute: Number.parseInt(taskReminderTimeInput.split(':')[1] ?? '0', 10) || 0
-          }
+          },
+          hideSendToManager
         }
       });
       // Storage, reminder, and theme all hot-swap in-process — no restart needed.
@@ -1759,26 +1771,38 @@
               hint="Comma-separated. Captain's Log uppercases them on save."
             />
 
-            <InputField
-              id="manager-name"
-              label="Manager Name"
-              placeholder="Arthur"
-              bind:value={managerNameInput}
-              hint={'Used as the greeting in the email ("Hello Arthur,"). Leave blank for a plain "Hello,".'}
+            <!-- Polish Sweep #1 — Hide Send-to-manager. Toggling on
+                 hides the two manager fields AND the /summary Send
+                 button. Underlying manager values persist so toggling
+                 off restores everything without re-entering. -->
+            <Checkbox
+              bind:checked={hideSendToManager}
+              label="Hide the Send-to-manager feature"
+              description="Turn this on if you don't share weekly summaries with a manager. Hides the Send button on the Weekly Summary view and hides the manager name / email fields below. Your saved values stay put — you can turn it back on any time."
             />
 
-            <InputField
-              id="manager-email"
-              label="Manager Email"
-              type="email"
-              placeholder="manager@prodigygame.com"
-              autocomplete="email"
-              bind:value={managerEmailInput}
-              warning={!managerEmailLooksValid
-                ? "That doesn't look like an email address. Save anyway if it's intentional."
-                : undefined}
-              hintSnippet={managerEmailLooksValid ? managerEmailHint : undefined}
-            />
+            {#if !hideSendToManager}
+              <InputField
+                id="manager-name"
+                label="Manager Name"
+                placeholder="Arthur"
+                bind:value={managerNameInput}
+                hint={'Used as the greeting in the email ("Hello Arthur,"). Leave blank for a plain "Hello,".'}
+              />
+
+              <InputField
+                id="manager-email"
+                label="Manager Email"
+                type="email"
+                placeholder="manager@prodigygame.com"
+                autocomplete="email"
+                bind:value={managerEmailInput}
+                warning={!managerEmailLooksValid
+                  ? "That doesn't look like an email address. Save anyway if it's intentional."
+                  : undefined}
+                hintSnippet={managerEmailLooksValid ? managerEmailHint : undefined}
+              />
+            {/if}
           </div>
 
           <!-- File Location -->

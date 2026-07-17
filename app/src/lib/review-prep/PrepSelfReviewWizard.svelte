@@ -105,6 +105,7 @@
     colorfulLabels: boolean;
     taskList: unknown;
     taskReminder: unknown;
+    hideSendToManager: boolean;
   };
 
   let {
@@ -321,6 +322,7 @@
         colorfulLabels: loadedSettings.colorfulLabels,
         taskList: loadedSettings.taskList,
         taskReminder: loadedSettings.taskReminder,
+        hideSendToManager: loadedSettings.hideSendToManager,
       },
     });
     onSettingsChanged?.();

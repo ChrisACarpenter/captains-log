@@ -4034,6 +4034,11 @@ pub struct SettingsBundle {
     /// before due, at time Y" for tasks with a due date. See
     /// `settings::TaskReminderSettings`.
     pub task_reminder: crate::settings::TaskReminderSettings,
+    /// Pre-1.0 Polish Sweep #1 — opt-out for the Send-to-manager
+    /// surface. When true, /summary hides the Send button and the
+    /// Settings > General tab hides the manager fields (see
+    /// `JournalSettings::hide_send_to_manager` for the full contract).
+    pub hide_send_to_manager: bool,
 }
 
 #[tauri::command]
@@ -4081,6 +4086,7 @@ pub async fn get_settings(
         colorful_labels: journal_settings.colorful_labels,
         task_list: journal_settings.task_list,
         task_reminder: journal_settings.task_reminder,
+        hide_send_to_manager: journal_settings.hide_send_to_manager,
     })
 }
 
@@ -4195,6 +4201,11 @@ pub struct UpdateSettingsInput {
     /// so an older frontend that omits the field still round-trips.
     #[serde(default)]
     pub task_reminder: crate::settings::TaskReminderSettings,
+    /// General tab (Polish Sweep #1) — Hide Send-to-manager opt-out.
+    /// `#[serde(default)]` so older frontends that omit the field
+    /// round-trip cleanly (default false → show the feature).
+    #[serde(default)]
+    pub hide_send_to_manager: bool,
 }
 
 /// Writes both settings files. If the user picked a journal root different
@@ -4376,6 +4387,7 @@ pub async fn update_settings(
         colorful_labels: input.colorful_labels,
         task_list: input.task_list.clone(),
         task_reminder: input.task_reminder.clone(),
+        hide_send_to_manager: input.hide_send_to_manager,
     };
     journal_settings
         .save(&chosen_storage)
