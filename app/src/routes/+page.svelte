@@ -989,7 +989,7 @@
       {#if tasksLoaded && !taskListPrefs.hideTaskList}
         <section class="task-list" aria-labelledby="task-list-heading">
           <div class="task-list-header">
-            <h2 id="task-list-heading">This week's tasks...</h2>
+            <h2 id="task-list-heading">My task list...</h2>
             <button
               type="button"
               class="btn btn-marble btn-sm"
