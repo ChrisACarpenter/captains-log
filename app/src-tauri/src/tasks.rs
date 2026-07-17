@@ -890,17 +890,24 @@ fn flip_checkbox_in_line(line: &str) -> Option<String> {
 /// 2. ammonia with a tight inline-only allowlist. `<script>`,
 ///    `<img>`, event handlers, and `javascript:` / `data:` URLs are
 ///    all stripped by ammonia's default posture — but we narrow the
-///    tag list to `strong, em, del, code, br` so nothing block-level
-///    (headings, lists, blockquotes, tables) survives even if the user
-///    somehow embeds it.
+///    tag list to `strong, em, del, code, br, a` so nothing
+///    block-level (headings, lists, blockquotes, tables) survives even
+///    if the user somehow embeds it. `<a>` is scoped to http/https via
+///    `.url_schemes(…)` + gains rel="noopener noreferrer" via
+///    `.link_rel(…)`.
 /// 3. Peel the outer `<p>…</p>` wrapper. pulldown-cmark always emits
 ///    one for top-level prose; we're rendering into a `<span>` so a
 ///    block `<p>` would break layout.
+/// 4. Post-process every surviving `<a>` to add
+///    `class="task-link-chip"` so the landing page can style it as
+///    an inline chip. Ammonia doesn't have an API to inject
+///    attributes on all matched tags, so a string transform is the
+///    minimal path.
 ///
-/// Links (`[label](url)`) are intentionally NOT rendered in Slice 1 —
-/// ammonia strips the `<a>` tag but keeps the label text. If users
-/// ask for clickable links later, add `a` to the allowlist plus
-/// `.link_rel(Some("noopener noreferrer"))` and `.url_schemes(…)`.
+/// Links (`[label](url)`) render as chips (Phase 5-adjacent polish).
+/// The frontend intercepts clicks on `.task-link-chip` and routes
+/// through the Tauri opener plugin — the raw `href` never triggers a
+/// webview navigation.
 ///
 /// The output is safe to pass to Svelte's `{@html}`: everything is
 /// sanitized before it crosses the IPC boundary.
@@ -913,16 +920,78 @@ pub fn render_task_text_inline(text: &str) -> String {
 
     let cleaned = ammonia::Builder::default()
         .tags(std::collections::HashSet::from([
-            "strong", "em", "del", "code", "br",
+            "strong", "em", "del", "code", "br", "a",
         ]))
-        // No URL schemes needed — `<a>` isn't in the allowlist. Left
-        // explicit so a future change adding `a` doesn't inherit
-        // ammonia's default url_schemes surface by accident.
-        .url_schemes(std::collections::HashSet::new())
+        .url_schemes(std::collections::HashSet::from(["http", "https"]))
+        .link_rel(Some("noopener noreferrer"))
         .clean(&raw)
         .to_string();
 
-    strip_paragraph_wrapper(&cleaned)
+    let with_chip_class = tag_link_chip_class(&cleaned);
+    strip_paragraph_wrapper(&with_chip_class)
+}
+
+/// Post-process ammonia's sanitized output to (a) tag surviving
+/// `<a href=…>` anchors with `class="task-link-chip"` so the landing
+/// page can style them as chips, and (b) UNWRAP any `<a>` that lost
+/// its href (ammonia strips disallowed-scheme hrefs but leaves the
+/// tag, and `.link_rel(…)` still adds `rel` to it — the result would
+/// be a chip that visually promises "click me" but has nothing to
+/// open). Unwrapping means "keep the inner text as plain prose."
+///
+/// The pass is a hand-rolled string walk rather than a regex or
+/// full HTML parser: ammonia's output is already normalized enough
+/// (tags are lower-case, well-formed, attributes quoted) that
+/// substring matching is safe and cheap.
+fn tag_link_chip_class(html: &str) -> String {
+    // Fast-path: no anchors, nothing to do.
+    if !html.contains("<a ") {
+        return html.to_string();
+    }
+    let mut out = String::with_capacity(html.len() + 32);
+    let mut rest = html;
+    while let Some(idx) = rest.find("<a ") {
+        out.push_str(&rest[..idx]);
+        let attr_start = idx + "<a ".len();
+        let after = &rest[attr_start..];
+        let close_idx = match after.find('>') {
+            Some(i) => i,
+            None => {
+                // Malformed HTML from ammonia is unexpected; pass the
+                // remainder through verbatim rather than losing it.
+                out.push_str(&rest[idx..]);
+                return out;
+            }
+        };
+        let attrs = &after[..close_idx];
+        let content_start = attr_start + close_idx + 1;
+        if attrs.contains("href=") {
+            // Real link — inject the chip class and keep the tag.
+            out.push_str("<a class=\"task-link-chip\" ");
+            out.push_str(attrs);
+            out.push('>');
+            rest = &rest[content_start..];
+        } else {
+            // Href-less anchor (ammonia dropped a disallowed-scheme
+            // href but link_rel added `rel`, so `<a rel="...">` is
+            // what's left). Unwrap: emit the label text without the
+            // tag, and skip the matching `</a>`.
+            match rest[content_start..].find("</a>") {
+                Some(close_tag_rel) => {
+                    let content_end = content_start + close_tag_rel;
+                    out.push_str(&rest[content_start..content_end]);
+                    rest = &rest[content_end + "</a>".len()..];
+                }
+                None => {
+                    // Missing close — drop everything from `<a` onward
+                    // for this iteration rather than duplicating text.
+                    return out;
+                }
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// pulldown-cmark wraps top-level prose in `<p>…</p>`. We render into
@@ -2351,17 +2420,40 @@ mod tests {
     }
 
     #[test]
-    fn render_link_is_stripped_but_text_preserved() {
-        // Slice 1 policy: <a> not in allowlist, so ammonia strips the
-        // tag but ammonia's default is to KEEP the inner text.
+    fn render_markdown_link_becomes_task_link_chip() {
+        // Post-Polish-Sweep behavior: `<a>` is allowed and gets a
+        // task-link-chip class so the landing page can render it as
+        // a pill. rel + noopener + http-scheme lockdown come from
+        // ammonia's config.
         let out = render_task_text_inline("See [MAGE-1041](https://foo.com/x)");
-        assert!(!out.contains("<a "), "anchor tag stripped");
-        assert!(!out.contains("href="), "no href leaks");
-        assert!(out.contains("MAGE-1041"), "link label preserved as text");
+        assert!(out.contains("<a "), "anchor tag preserved");
         assert!(
-            !out.contains("https://foo.com"),
-            "URL not leaked to the DOM"
+            out.contains("class=\"task-link-chip\""),
+            "task-link-chip class injected"
         );
+        assert!(out.contains("href=\"https://foo.com/x\""), "href preserved");
+        assert!(out.contains(">MAGE-1041</a>"), "link label preserved");
+        assert!(out.contains("rel=\"noopener noreferrer\""), "safe rel injected");
+    }
+
+    #[test]
+    fn render_multiple_links_all_get_class() {
+        let out = render_task_text_inline(
+            "See [A](https://a.com) and [B](https://b.com)",
+        );
+        assert_eq!(
+            out.matches("class=\"task-link-chip\"").count(),
+            2,
+            "class injected once per anchor"
+        );
+    }
+
+    #[test]
+    fn render_task_without_links_needs_no_transform() {
+        // Fast-path: no anchors at all → post-processor is a no-op.
+        let out = render_task_text_inline("Plain **task** text");
+        assert!(!out.contains("<a "));
+        assert!(!out.contains("task-link-chip"));
     }
 
     // XSS / injection defense — vectors from the research phase.
@@ -2392,17 +2484,43 @@ mod tests {
 
     #[test]
     fn xss_javascript_url_in_markdown_link_is_dropped() {
+        // With `<a>` now in the allowlist, url_schemes must lock the
+        // href to http/https — otherwise `javascript:` would survive.
+        // Ammonia strips the tag entirely when the scheme is
+        // disallowed; the label text is kept as inert prose.
         let out = render_task_text_inline("[click](javascript:alert(1))");
-        assert!(!out.contains("<a "), "no anchor tag");
+        assert!(!out.contains("<a "), "no anchor tag (bad scheme drops tag)");
         assert!(!out.contains("javascript:"), "no js url leaks");
         assert!(!out.contains("alert(1)"), "no payload leaks");
     }
 
     #[test]
     fn xss_data_url_in_markdown_link_is_dropped() {
-        let out = render_task_text_inline("[click](data:text/html,<script>alert(1)</script>)");
+        // data: is not in url_schemes either — defends against
+        // <a href="data:text/html,<script>"> exfiltration attempts.
+        let out = render_task_text_inline(
+            "[hi](data:text/html,<script>alert(1)</script>)",
+        );
+        assert!(!out.contains("<a "), "no anchor tag");
         assert!(!out.contains("data:"), "no data url leaks");
-        assert!(!out.contains("<script"), "no script leaks");
+    }
+
+    #[test]
+    fn xss_file_url_in_markdown_link_is_dropped() {
+        // file:// is not in url_schemes.
+        let out = render_task_text_inline("[secrets](file:///etc/passwd)");
+        assert!(!out.contains("<a "), "no anchor tag");
+        assert!(!out.contains("file:"), "no file url leaks");
+    }
+
+    #[test]
+    fn xss_onclick_attribute_stripped_from_link() {
+        // Even if a `<a>` slipped through with an event handler,
+        // ammonia's attribute allowlist blocks it. Only href + rel
+        // (added by link_rel) + the class we post-inject survive.
+        let raw_html = "<a href=\"https://x.com\" onclick=\"alert(1)\">click</a>";
+        let out = render_task_text_inline(raw_html);
+        assert!(!out.contains("onclick"), "no event handler in output");
     }
 
     #[test]

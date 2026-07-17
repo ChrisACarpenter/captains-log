@@ -16,6 +16,7 @@
   import TaskRowActionButton from '$lib/TaskRowActionButton.svelte';
   import PrepSelfReviewWizard from '$lib/review-prep/PrepSelfReviewWizard.svelte';
   import { urlPasteUpgrade } from '$lib/url-paste-upgrade';
+  import { openUrl } from '@tauri-apps/plugin-opener';
 
   type ReminderSettings = {
     enabled: boolean;
@@ -189,6 +190,28 @@
     await tick();
     const target = getTarget();
     target?.focus();
+  }
+
+  // Task-link chip click handler. Task text is server-sanitized HTML
+  // (see render_task_text_inline in tasks.rs) that emits
+  // <a class="task-link-chip" href="…">…</a> for each markdown link.
+  // If we let the browser follow the href, the Tauri webview would
+  // navigate the app to that URL — breaks routing. Intercept clicks
+  // that landed on (or inside) a chip, resolve the href, and hand it
+  // to the Tauri opener plugin — same route markdown-links.ts uses
+  // for Cmd-click on prose.
+  function handleTaskListClick(event: MouseEvent): void {
+    const target = event.target as HTMLElement | null;
+    if (!target) return;
+    const chip = target.closest?.('a.task-link-chip') as HTMLAnchorElement | null;
+    if (!chip) return;
+    event.preventDefault();
+    const href = chip.getAttribute('href');
+    if (!href) return;
+    openUrl(href).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('[task-link-chip] openUrl failed:', err);
+    });
   }
 
   /** How long to wait for either IPC before we consider it hung. In a
@@ -987,7 +1010,17 @@
         settings hydrate.
       -->
       {#if tasksLoaded && !taskListPrefs.hideTaskList}
-        <section class="task-list" aria-labelledby="task-list-heading">
+        <!-- Event delegation for task-link chip clicks. Every row's
+             .task-text bubbles here, so we catch chip clicks without
+             per-row wiring. handleTaskListClick preventDefault's the
+             navigation and hands the URL to Tauri's opener plugin.
+             The <a> chips inside remain focusable + keyboard-
+             activatable (native Enter → click), so the delegation
+             on <section> is safe without a separate keydown handler —
+             suppressing Svelte's conservative a11y warnings. -->
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <section class="task-list" aria-labelledby="task-list-heading" onclick={handleTaskListClick}>
           <div class="task-list-header">
             <h2 id="task-list-heading">My task list...</h2>
             <button
@@ -1661,6 +1694,43 @@
   .task-text {
     flex: 1;
     word-break: break-word;
+  }
+
+  /* Task link chips — the render-side twin of the CodeMirror
+     .cm-link-chip. Same visual language (inline-block pill, accent
+     text, marble surface), but rendered from server-sanitized HTML
+     inside a task row rather than as a CM widget. The chip class is
+     injected by tag_link_chip_class in src-tauri/src/tasks.rs;
+     clicks are intercepted by handleTaskListClick so they open in
+     the system browser via Tauri's opener plugin rather than trying
+     to navigate the webview. */
+  .task-text :global(.task-link-chip) {
+    display: inline-block;
+    padding: 1px 8px 1px 6px;
+    margin: 0 1px;
+    background: var(--bg-elevated);
+    color: var(--accent-primary-text);
+    border: 1px solid var(--border-structural);
+    border-radius: var(--radius-pill);
+    font: inherit;
+    font-size: 0.92em;
+    font-weight: 500;
+    line-height: 1.4;
+    text-decoration: none;
+    cursor: pointer;
+    vertical-align: baseline;
+    white-space: nowrap;
+    transition: background var(--transition-fast),
+      border-color var(--transition-fast);
+  }
+  .task-text :global(.task-link-chip:hover) {
+    background: var(--bg-surface);
+    border-color: var(--accent-primary);
+  }
+  .task-text :global(.task-link-chip:focus-visible) {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--focus-glow);
+    border-color: var(--accent-primary);
   }
 
   /* Inline edit input. Matches .task-text's flex:1 so the input
