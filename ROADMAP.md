@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Pre-1.0 arc — Polish Sweep + MkDocs research + Style Finalization + Final Docs Pass
+## Current phase: Pre-1.0 arc — Style Finalization + Final Docs Pass (Polish Sweep + MkDocs research ✅ done)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -619,14 +619,29 @@ A batch of small, independent UX gaps surfaced during Phase 3–4 verification. 
 - [ ] **Focus restoration after task edit or delete** — focus currently lands on `document.body` when the edit input unmounts or a row disappears. Should return to the pencil button (edit) or the next row's pencil / the "+ Add Task" button (delete).
 - [ ] **Persist error toasts until dismissed** — the import-receipt error toast auto-clears after 5s. Errors are worth surfacing until the user acknowledges them.
 
-## MkDocs research + markdown-renderer revamp (planned)
+## MkDocs research + markdown-renderer revamp ✅ (done — no action taken, one bug fix shipped, 2026-07-17)
 
-Research [MkDocs](https://www.mkdocs.org/) and the surrounding Python-Markdown / markdown-it / commonmark-plus ecosystem for patterns worth adopting. Two potential wins:
+Ran a four-agent research fan-out over MkDocs itself, the Python-Markdown / PyMdown ecosystem, the markdown-it / remark / Lezer JS ecosystem, and a full SSG comparison (MkDocs vs VitePress vs Astro Starlight vs Docusaurus vs mdBook vs Zola vs SvelteKit DIY). Two headline findings changed the block's outcome:
 
-- **In-app renderer improvements.** The CodeMirror 6 live-preview handles the common markdown flavors we use daily, but the [Known Limitations](#known-limitations) section below tracks several rendering edge cases. Some may have well-established solutions in the MkDocs plugin ecosystem worth porting into `live-preview.ts`.
-- **External docs backbone.** Currently `docs/*.md` files live in-repo and are read directly. A static-site generator (MkDocs or similar) would give us search, cross-linking, and versioning for a public-facing docs site — potentially subsuming the in-app Help + Nerds Only surfaces.
+- **Material for MkDocs entered maintenance mode Nov 2025.** Only critical bug + security fixes committed through Nov 2026; the maintainer has pivoted to a successor project (Zensical). Adopting Material in 2026 means picking a frozen product. This alone knocks MkDocs out of the running as the block's namesake.
+- **The Known Limitations items aren't parser gaps.** `@lezer/markdown` already has a `SetextHeading` node in its default block-parser list; our "Setext not detected" bug is a live-preview.ts active-state gap, not a parser gap. The fenced-code-task false positive is a traversal bug on both sides (both `pulldown-cmark` and Lezer already differentiate code blocks from list items in their trees; the fix is walking the tree correctly).
 
-Scope is intentionally broad — this is a research block first, an implementation block second. Findings drive downstream work in the Polish Sweep + Final Documentation Pass.
+**What actually shipped from this block:**
+
+- One correctness fix — `parse_plans_tasks` and `parse_tasks_body` in `tasks.rs` now track a fenced-code state and skip `- [ ]` lines that live inside a ```` ``` ```` or `~~~` block. 8 new tests covering both scanners, backtick + tilde fences, indented fences (up to 3 spaces), mismatched close characters, and the < 3-fence-char case. Fixed both the "Not hit in practice" flag (which was still real correctness) and preemptively closed the same bug in the writer-side scanner used by toggle/edit/delete.
+
+**What we deliberately DIDN'T do, and why:**
+
+- All the other Known Limitations items are documented-but-not-actively-annoying. Nobody has hit "Cmd+End on a fence line" in production; nobody has written a 10+ item ordered list; nobody uses Setext headings in this app; nobody types in a non-Latin IME. Each fix is small on its own, but each also delivers roughly zero user-visible value. See the Known Limitations section below — they stay documented, unclosed, revisitable if any becomes a real user complaint later.
+- No external docs backbone. The recommendation if we ever change our minds is Astro Starlight (Pagefind out of the box, `@astrojs/svelte` mounts real Svelte 5 components inside MDX for a genuine single-source-of-truth story between docs and in-app Help). But for a one-maintainer pre-1.0 app with 6 `docs/*.md` files that already work as-is, adding an SSG is negative ROI right now. `Cmd+F` in a text editor handles our search needs at this scale.
+
+**Knowledge banked for later:**
+
+- MkDocs → dead in 2026, migrate to Zensical if we ever want a Python SSG.
+- Astro Starlight is the fit if we want an SSG that respects our Svelte stack.
+- Setext + fenced-code cursor-skip fixes are one-liners in live-preview.ts, if they ever get annoying.
+- The `attr_list` pattern from Python-Markdown is worth adopting for future data-driven decorations.
+- Reference libraries for CM6 + Lezer extensions: `erykwalder/lezer-markdown-obsidian`, `blueberrycongee/codemirror-live-markdown`, `segphault/codemirror-rich-markdoc`.
 
 ## Style System Finalization (planned, before 1.0)
 
@@ -655,14 +670,14 @@ Small record of decisions made during audits + reviews that don't need code chan
 
 ## Known Limitations
 
-Documented, not planned work. The MkDocs research above may resolve some of the live-preview items; reassess after that lands.
+Documented, not planned work. Reassessed in the 2026-07-17 MkDocs research block; the honest ROI on fixing any of these individually is low against the "no user has hit it" bar. Each is a one-liner if it ever becomes a real complaint.
 
 ### Editor edge cases from Phase 2.5
 
-- Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by the `lineDelta > 1` guard).
+- Cmd+Home / Cmd+End / Cmd+F landing on a fence line + arrowing breaks the cursor-skip filter assumption (mitigated today by the `lineDelta > 1` guard). Fix if hit: cursor-skip filter should consult Lezer's `FencedCode` / `CodeMark` node type via `syntaxTree(state).resolveInner(pos)` rather than pattern-matching the line text.
 - IME on body-line-start backspace edge case.
 - Multi-cursor + most widget commands bail rather than handle each range.
-- Setext headings not detected by the active-state check.
+- Setext headings not detected by the active-state check. Fix if hit: `@lezer/markdown` already exposes a `SetextHeading` node in its default block-parser list — extend the cursor-position node check to also match `SetextHeading` (and its child `HeaderMark`). Zero-dependency fix.
 
 ### Cross-route invalidation edge cases from Phase 2.5b
 
@@ -671,11 +686,11 @@ Documented, not planned work. The MkDocs research above may resolve some of the 
 
 ### Live-preview list rendering (Phase 2.8 / 2.9c)
 
-- Double-digit ordered-list markers (`10.+`) visually overlap content by 1ch under the hang-indent technique. Revisit if a 10+ item ordered list surfaces.
-- The `.cm-md-list-line.cm-md-blockquote-line` joint selector is in place but untested under the current `margin-left` hang-indent technique.
+- Double-digit ordered-list markers (`10.+`) visually overlap content by 1ch under the hang-indent technique. Revisit if a 10+ item ordered list surfaces. Fix pattern (from `pymdownx.tasklist` custom_checkbox): render markers as fixed-width spans of measured width instead of relying on the browser's default `<li>::marker` sizing.
+- The `.cm-md-list-line.cm-md-blockquote-line` joint selector is in place but untested under the current `margin-left` hang-indent technique. Reference approach: `blueberrycongee/codemirror-live-markdown`'s `CODEMIRROR_LIVE_PREVIEW_DESIGN.md` walks through splitting the indent into separate CSS custom properties per line-decoration.
 
 ### Task migration + sidecar edge cases (Phase 3d)
 
 - Orphan sidecar / provenance entries after external file tampering — the Rebuild command handles cleanup; low real-world impact.
-- Fenced code blocks containing `- [ ]` lines could be picked up as tasks by the migration pass. Not hit in practice.
+- ~~Fenced code blocks containing `- [ ]` lines could be picked up as tasks by the migration pass.~~ **Fixed 2026-07-17** (see MkDocs block above): both `parse_plans_tasks` and `parse_tasks_body` now track fenced-code state and skip task detection inside ```` ``` ```` / `~~~` blocks. 8 new tests.
 - A partial `### Tasks` section containing hand-typed notes could be clobbered on the first write. Extremely rare.

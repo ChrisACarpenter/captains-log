@@ -97,6 +97,14 @@ pub struct ParsedTask {
 pub fn parse_plans_tasks(plans_content: &str) -> Vec<ParsedTask> {
     let mut tasks: Vec<ParsedTask> = Vec::new();
     let mut hash_counts: HashMap<String, u32> = HashMap::new();
+    // Track fenced code block state so a `- [ ]` inside a ```fence
+    // block reads as a code sample, not a task. Documented as a
+    // real-but-latent bug in the Known Limitations list; closed as
+    // Polish Sweep follow-up on 2026-07-17 after the MkDocs research
+    // block confirmed the fix belongs here (walk the parser event
+    // stream + gate on code-block depth, same pattern as
+    // pymdownx.tasklist and the `remark-gfm` task extractor).
+    let mut fence_char: Option<char> = None;
 
     let mut cursor: usize = 0;
     for line_with_newline in plans_content.split_inclusive('\n') {
@@ -104,6 +112,29 @@ pub fn parse_plans_tasks(plans_content: &str) -> Vec<ParsedTask> {
         cursor += line_with_newline.len();
 
         let line = line_with_newline.trim_end_matches('\n');
+
+        // Fence transitions come BEFORE task detection: a fence
+        // opener line is itself not a task, and every subsequent
+        // line until a matching closer is code and inert. Same
+        // matcher for opener + closer; if we're inside a fence,
+        // only a matching character can close it.
+        if let Some(fc) = detect_code_fence(line) {
+            match fence_char {
+                None => fence_char = Some(fc),
+                Some(open) if open == fc => fence_char = None,
+                _ => {
+                    // Different fence char inside an active fence —
+                    // treat as content, not a nested fence. Matches
+                    // CommonMark's behavior (only same-char closer
+                    // ends the block).
+                }
+            }
+            continue;
+        }
+        if fence_char.is_some() {
+            continue;
+        }
+
         let Some((is_completed, text_start)) = match_task_marker(line) else {
             continue;
         };
@@ -158,6 +189,38 @@ fn match_task_marker(line: &str) -> Option<(bool, usize)> {
     let after_bracket = &line[after_bracket_offset..];
     let ws_after = after_bracket.len() - after_bracket.trim_start().len();
     Some((is_completed, after_bracket_offset + ws_after))
+}
+
+/// If `line` opens or closes a CommonMark fenced code block, return
+/// the fence character (`` ` `` or `~`). Otherwise return `None`.
+///
+/// A fence line is:
+///   - up to 3 leading spaces
+///   - 3+ contiguous backticks or tildes
+///   - anything after the fence (info string) is ignored for the
+///     open/close decision — same-character-and-at-least-as-long
+///     matching is handled by the caller
+///
+/// This is deliberately narrower than pulldown-cmark's tokenizer:
+/// we only need "is this line the boundary of a fenced code block"
+/// to gate task-scanning inside a Tasks-section body, not full
+/// CommonMark fidelity. Indented code blocks aren't a concern here
+/// because task lines are always at column 0-3 too.
+fn detect_code_fence(line: &str) -> Option<char> {
+    let stripped = line.trim_start();
+    let leading_ws = line.len() - stripped.len();
+    if leading_ws > 3 {
+        return None;
+    }
+    let first = stripped.chars().next()?;
+    if first != '`' && first != '~' {
+        return None;
+    }
+    let fence_len = stripped.chars().take_while(|c| *c == first).count();
+    if fence_len < 3 {
+        return None;
+    }
+    Some(first)
 }
 
 /// Normalize task text for identity comparison.
@@ -452,7 +515,24 @@ struct TasksBodyBreakdown {
 fn parse_tasks_body(tasks_body: &str) -> TasksBodyBreakdown {
     let mut incomplete = Vec::new();
     let mut completed = Vec::new();
+    // Same fenced-code guard as `parse_plans_tasks`. A `- [ ]` line
+    // inside a ```fence block is a code sample; it must not survive
+    // an edit/delete round-trip as a real task line either. Both
+    // scanners have to agree on what "is a task" means.
+    let mut fence_char: Option<char> = None;
     for line in tasks_body.split('\n') {
+        if let Some(fc) = detect_code_fence(line) {
+            match fence_char {
+                None => fence_char = Some(fc),
+                Some(open) if open == fc => fence_char = None,
+                _ => {}
+            }
+            continue;
+        }
+        if fence_char.is_some() {
+            continue;
+        }
+
         let trimmed = line.trim_start();
         let Some(rest) = trimmed.strip_prefix("- [") else {
             continue;
@@ -1418,6 +1498,134 @@ mod tests {
     fn parse_ignores_non_task_bullets() {
         let input = "- just a bullet\n- another one\n";
         assert!(parse_plans_tasks(input).is_empty());
+    }
+
+    // ---- Fenced-code-guard tests (Polish Sweep follow-up, 2026-07-17)
+    // The scanner must treat `- [ ]` lines inside a ```fence or ~~~fence
+    // as code samples, not tasks. Both parse_plans_tasks and
+    // parse_tasks_body ship the guard; both are covered here so future
+    // refactors of either can't silently regress the pair.
+
+    #[test]
+    fn parse_ignores_task_marker_inside_backtick_fence() {
+        let input = "\
+- [ ] Real task
+```markdown
+- [ ] Not a task, this is a code sample
+- [x] Also not a task
+```
+- [ ] Second real task
+";
+        let tasks = parse_plans_tasks(input);
+        assert_eq!(tasks.len(), 2, "only the two lines outside the fence count");
+        assert_eq!(tasks[0].text, "Real task");
+        assert_eq!(tasks[1].text, "Second real task");
+    }
+
+    #[test]
+    fn parse_ignores_task_marker_inside_tilde_fence() {
+        let input = "\
+- [ ] Before
+~~~
+- [ ] Inside a tilde fence
+~~~
+- [ ] After
+";
+        let tasks = parse_plans_tasks(input);
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].text, "Before");
+        assert_eq!(tasks[1].text, "After");
+    }
+
+    #[test]
+    fn parse_handles_indented_fence_up_to_three_spaces() {
+        // CommonMark allows up to 3 leading spaces before the fence
+        // characters. Four or more means an indented code block —
+        // still shouldn't produce tasks either, but that's covered
+        // by no user typing 4-space-indented `- [ ]` at column 4.
+        let input = "\
+   ```
+   - [ ] Inside a 3-space-indented fence
+   ```
+- [ ] After
+";
+        let tasks = parse_plans_tasks(input);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].text, "After");
+    }
+
+    #[test]
+    fn parse_fence_only_closes_on_matching_char() {
+        // Opening ``` shouldn't be closed by ~~~. The task line
+        // between them is still inside a code block.
+        let input = "\
+```
+- [ ] Inside ` fence
+~~~
+- [ ] Still inside ` fence (~~~ doesn't close it)
+```
+- [ ] Outside
+";
+        let tasks = parse_plans_tasks(input);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].text, "Outside");
+    }
+
+    #[test]
+    fn parse_two_backticks_is_not_a_fence() {
+        // Less than 3 backticks is inline code, not a fence.
+        let input = "\
+``
+- [ ] This IS a task even though the line above starts with two backticks
+``
+";
+        let tasks = parse_plans_tasks(input);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].text,
+            "This IS a task even though the line above starts with two backticks"
+        );
+    }
+
+    #[test]
+    fn parse_tasks_body_ignores_fenced_task_markers() {
+        // Same guard as parse_plans_tasks, applied to parse_tasks_body
+        // (the writer-side scanner used by toggle/edit/delete). If
+        // this regresses, an edit round-trip would resurrect the
+        // fenced code sample as a real task line.
+        let body = "\
+<!-- captainslog:tasks:incomplete -->
+- [ ] Real open task
+```
+- [ ] Code sample, not a task
+```
+<!-- captainslog:tasks:completed -->
+- [x] Real completed task
+";
+        let bd = parse_tasks_body(body);
+        assert_eq!(bd.incomplete_lines.len(), 1);
+        assert_eq!(bd.incomplete_lines[0], "- [ ] Real open task");
+        assert_eq!(bd.completed_lines.len(), 1);
+        assert_eq!(bd.completed_lines[0], "- [x] Real completed task");
+    }
+
+    #[test]
+    fn detect_code_fence_recognizes_valid_fences() {
+        assert_eq!(detect_code_fence("```"), Some('`'));
+        assert_eq!(detect_code_fence("````"), Some('`'));
+        assert_eq!(detect_code_fence("~~~"), Some('~'));
+        assert_eq!(detect_code_fence("```rust"), Some('`'));
+        assert_eq!(detect_code_fence("   ```"), Some('`')); // 3 spaces OK
+    }
+
+    #[test]
+    fn detect_code_fence_rejects_non_fences() {
+        assert_eq!(detect_code_fence(""), None);
+        assert_eq!(detect_code_fence("``"), None); // only 2
+        assert_eq!(detect_code_fence("~~"), None);
+        assert_eq!(detect_code_fence("    ```"), None); // 4 spaces = too indented
+        assert_eq!(detect_code_fence("- [ ] task"), None);
+        assert_eq!(detect_code_fence("hello"), None);
     }
 
     #[test]
