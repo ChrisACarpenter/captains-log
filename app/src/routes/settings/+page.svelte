@@ -2624,16 +2624,13 @@
             <h2 class="section-title">Display</h2>
             <div class="checkbox-stack">
               <!--
-                "Hide the Task List" leads the list per Chris's request:
-                if you're going to opt out of the whole feature, that
-                choice sits at the top. Everything below it is a
-                sub-preference of the "on" case.
+                Ordering (Polish Sweep follow-up): default-ON options
+                sit at the top, default-OFF options at the bottom.
+                Reads as "here's what the app does; scroll down to
+                opt out of pieces." "Hide Task List" lives at the
+                bottom because it's the biggest opt-out — the tip of
+                that spectrum, not the top.
               -->
-              <Checkbox
-                bind:checked={taskHideTaskList}
-                label="Hide the Task List"
-                description="Removes the task list section entirely from the main page. Useful if you don't use the task feature."
-              />
               <Checkbox
                 bind:checked={taskShowCompleted}
                 label="Show Completed Tasks"
@@ -2645,11 +2642,6 @@
                 description="Open tasks appear at the top; completed ones sink to the bottom. When off, tasks show in the order they were written in your Weekly Summary."
               />
               <Checkbox
-                bind:checked={taskShowCompletedTimestamp}
-                label="Show Completion Timestamp"
-                description={'Adds a subtle “checked 2h ago” chip next to completed tasks. Off by default to keep the list tight.'}
-              />
-              <Checkbox
                 bind:checked={taskAutoRolloverEnabled}
                 label="Auto-Roll Over Incomplete Tasks"
                 description="At the start of each week, any tasks you didn't finish last week are copied into this week's list. Rolled-over tasks show a small chip so you can see where they came from. Turn off to start each week with a clean list."
@@ -2658,6 +2650,16 @@
                 bind:checked={taskAutoImportCompleted}
                 label="Auto Add Completed Tasks"
                 description="Once per day, automatically append every completed task from this week under a #### Completed Tasks heading in your Weekly Summary's Key accomplishments field. Same behavior as the /summary editor's Import button, but run for you. Duplicates are always skipped."
+              />
+              <Checkbox
+                bind:checked={taskShowCompletedTimestamp}
+                label="Show Completion Timestamp"
+                description={'Adds a subtle “checked 2h ago” chip next to completed tasks. Off by default to keep the list tight.'}
+              />
+              <Checkbox
+                bind:checked={taskHideTaskList}
+                label="Hide Task List"
+                description="Removes the task list section entirely from the main page. Useful if you don't use the task feature."
               />
             </div>
           </div>
