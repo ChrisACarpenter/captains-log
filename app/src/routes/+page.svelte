@@ -148,6 +148,7 @@
   let dueDatePickerTask = $state<TaskListEntry | null>(null);
   let dueDatePickerAnchor = $state<HTMLElement | null>(null);
   let dueDatePickerBusy = $state(false);
+  let dueDateError = $state<string | null>(null);
 
   // Slice 6b inline-edit state. Exactly one row can be in edit mode at
   // a time (identified by `editingKey`); its input field is bound to
@@ -611,6 +612,7 @@
 
   function openDueDatePicker(t: TaskListEntry, anchor: HTMLElement): void {
     if (dueDatePickerTask || dueDatePickerBusy) return;
+    dueDateError = null;
     dueDatePickerTask = t;
     dueDatePickerAnchor = anchor;
   }
@@ -634,12 +636,11 @@
         dueDate: iso,
       });
       tasks = await invoke<TaskListEntry[]>('list_tasks');
+      dueDateError = null;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[due-date] set failed:', err);
-      // TODO: surface a user-facing error like editError / deleteError
-      // does. For now the picker closes and the task list refetches
-      // don't reflect the failed change; user can retry.
+      dueDateError = `Couldn't set due date on "${t.text}": ${String(err)}`;
     } finally {
       dueDatePickerBusy = false;
       dueDatePickerTask = null;
@@ -660,9 +661,11 @@
         dueDate: null,
       });
       tasks = await invoke<TaskListEntry[]>('list_tasks');
+      dueDateError = null;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[due-date] clear failed:', err);
+      dueDateError = `Couldn't clear due date on "${t.text}": ${String(err)}`;
     } finally {
       dueDatePickerBusy = false;
     }
@@ -1059,6 +1062,20 @@
                   class="dismiss"
                   onclick={() => (autoImportError = null)}
                   aria-label="Dismiss auto-import error"
+                >×</button>
+              </div>
+            </div>
+          {/if}
+
+          {#if dueDateError}
+            <div class="auto-import-error-wrap">
+              <div class="auto-import-error" role="alert" aria-live="assertive">
+                <span class="text">{dueDateError}</span>
+                <button
+                  type="button"
+                  class="dismiss"
+                  onclick={() => (dueDateError = null)}
+                  aria-label="Dismiss due date error"
                 >×</button>
               </div>
             </div>

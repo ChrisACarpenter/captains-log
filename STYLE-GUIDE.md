@@ -166,13 +166,16 @@ Slightly tighter than the original RPG spec (which targets 1280×720 game canvas
 
 ### Loading the fonts
 
-Via Google Fonts CSS import in `index.html` or a global stylesheet:
+Self-hosted via [Fontsource](https://fontsource.org/) npm packages. Bundled at build time so a first launch without network still renders display type correctly — a requirement for a local-first Tauri app.
 
-```css
-@import url('https://fonts.googleapis.com/css2?family=ABeeZee&family=Paytone+One&display=swap');
+```ts
+// app/src/routes/+layout.svelte
+import '@fontsource/paytone-one/latin-ext-400.css';
+import '@fontsource/abeezee/latin-ext-400.css';
+import '@fontsource/abeezee/latin-ext-400-italic.css';
 ```
 
-For offline-capable Tauri builds, we may self-host these later — both fonts have OFL licenses that permit redistribution.
+Latin-ext subset (Vietnamese excluded) covers English, Portuguese, French, Spanish, German, and other European diacritics that show up in user prose. Both fonts are OFL — redistribution is fine, and Fontsource pins compatible versions of the upstream Google Font sources.
 
 ## Iconography
 
@@ -453,5 +456,4 @@ Pulled from analysis of [prodigygame.com/main-en/teachers](https://www.prodigyga
 
 ## Open items
 
-- Self-hosted font files for offline builds (currently Google Fonts CDN)
 - Corporate font identification (if we ever need the reference style)

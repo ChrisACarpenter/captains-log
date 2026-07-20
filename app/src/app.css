@@ -16,8 +16,12 @@
  *   - New: --stripe-track / --stripe-fill for the week-progress stripe
  */
 
-/* ---------- Fonts ---------- */
-@import url('https://fonts.googleapis.com/css2?family=ABeeZee:ital@0;1&family=Paytone+One&display=swap');
+/* ---------- Fonts ----------
+ * Self-hosted via @fontsource — the @font-face rules load from
+ * /Users/chris.carpenter/PROJECTS/Prodigy/CaptainsLog/app/src/routes/+layout.svelte
+ * (which imports @fontsource/paytone-one and @fontsource/abeezee CSS
+ * bundles). Bundled at build time; no network fetch on first launch.
+ * See STYLE-GUIDE.md Typography → "Loading the fonts". */
 
 /* ---------- Dark theme (default) ---------- */
 :root {

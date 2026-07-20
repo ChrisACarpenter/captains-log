@@ -609,15 +609,17 @@ The reason this app exists — a "Prep Self Review" wizard that assembles a comp
 
 ---
 
-## Pre-1.0 Polish Sweep (planned)
+## Pre-1.0 Polish Sweep ✅ (shipped 2026-07-17)
 
-A batch of small, independent UX gaps surfaced during Phase 3–4 verification. All small-to-medium; expected to ship as a single sweep or a series of tiny commits.
+A batch of small, independent UX gaps surfaced during Phase 3–4 verification. All small-to-medium; shipped as a series of tiny commits.
 
-- [ ] **"Hide Send-to-manager" opt-out toggle** — Settings > General checkbox, disabled by default. When enabled, hide the Send-to-manager action button(s) from the Weekly Summary view AND hide the manager name / manager email fields from the General tab itself (so the two concerns stay symmetrical — no orphan fields for a feature the user has hidden). Underlying values stay in `settings.json` so re-enabling restores everything without re-entering data.
-- [ ] **Paste-upgrade in task-add modal + inline task-edit input** — both are plain HTML `<input>` elements, so pasting a URL leaves it bare instead of upgrading to `[title](url)` the way prose paste does. Import dedup papers over the correctness bug (Phase 4), but the UX asymmetry remains.
-- [ ] **Auto-import silent failure surface** — when auto-import can't merge yesterday's completions (disk full, permission denied, etc.), only `console.error` fires today. Surface an in-app error banner so a failure is never invisible.
-- [ ] **Focus restoration after task edit or delete** — focus currently lands on `document.body` when the edit input unmounts or a row disappears. Should return to the pencil button (edit) or the next row's pencil / the "+ Add Task" button (delete).
-- [ ] **Persist error toasts until dismissed** — the import-receipt error toast auto-clears after 5s. Errors are worth surfacing until the user acknowledges them.
+- [x] **"Hide Send-to-manager" opt-out toggle** — Settings > General checkbox, disabled by default. When enabled, hides the Send-to-manager action button(s) from the Weekly Summary view AND hides the manager name / manager email fields from the General tab itself. Underlying values stay in `settings.json` so re-enabling restores everything.
+- [x] **Paste-upgrade in task-add modal + inline task-edit input (and Prep Self Review wizard TextAreaFields)** — `url-paste-upgrade.ts` Svelte action wires selection-wrap + bare-URL + async title-enrichment into plain `<input>` and `<textarea>` surfaces. Wizard TextAreaFields (Questions, OKRs) picked up the same treatment.
+- [x] **Auto-import silent failure surface** — dismissible in-app banner replaces `console.error`. Persists until user acknowledges. Same visual slot as the rollover receipt.
+- [x] **Focus restoration after task edit or delete** — edit-input unmount returns focus to the row's pencil button; delete-success returns focus to the next row's pencil or the "+ Add Task" button when the list is empty.
+- [x] **Persist error toasts until dismissed** — import-receipt error toast + auto-import error banner + due-date error banner all persist until dismissed. No auto-clear.
+- [x] **Fence-aware task extraction** (bonus, from the MkDocs research block) — `parse_plans_tasks` and `parse_tasks_body` now track fenced-code state and skip `- [ ]` lines inside ```` ``` ```` / `~~~` blocks. 8 new tests.
+- [x] **`commitDueDate` error surface** (2026-07-20) — matches the editError/deleteError pattern. Backend failures on due-date set surface as a dismissible banner in the tasks section.
 
 ## MkDocs research + markdown-renderer revamp ✅ (done — no action taken, one bug fix shipped, 2026-07-17)
 
@@ -643,13 +645,14 @@ Ran a four-agent research fan-out over MkDocs itself, the Python-Markdown / PyMd
 - The `attr_list` pattern from Python-Markdown is worth adopting for future data-driven decorations.
 - Reference libraries for CM6 + Lezer extensions: `erykwalder/lezer-markdown-obsidian`, `blueberrycongee/codemirror-live-markdown`, `segphault/codemirror-rich-markdoc`.
 
-## Style System Finalization (planned, before 1.0)
+## Style System Finalization ✅ (shipped 2026-07-17)
 
-Colors, typography, iconography, and core component patterns are locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Still to be finalized:
+Colors, typography, iconography, and core component patterns were locked in [STYLE-GUIDE.md](STYLE-GUIDE.md). Finalized in the token pass commit `fac0555`:
 
-- [ ] **Final spacing scale tokens** — one authoritative list, not the "eyeball each screen" pattern of today.
-- [ ] **Animation / transition spec** — durations, easings, guidance on when to use each.
-- [ ] **Complete reusable component spec library** — props, variants, when to reach for which. Builds on the ad-hoc extractions from Phase 2.8c / 3d / 3e.
+- [x] **Final spacing scale tokens** — authoritative list in app.css: `--space-half` (2px, below-grid primitive), `--space-1` (4px) → `--space-12` (48px). STYLE-GUIDE.md `Spacing` section documents the scale.
+- [x] **Motion spec** — orthogonal `--duration-*` × `--ease-*` tokens. Every callsite (43 across 16 files) rewritten to the paired form. Modal gains a `--duration-reveal` fade-in gated on `prefers-reduced-motion`. STYLE-GUIDE.md `Motion` section documents the tokens + reduced-motion contract.
+- [x] **Radii tokens** — `--radius-xs` (3px), `--radius-sm` (6px), `--radius-md` (10px), `--radius-lg` (16px), `--radius-full` (50%), `--radius-pill` (999px). STYLE-GUIDE.md `Radii` section documents them.
+- [ ] **Reusable component spec library — extended patterns.** Buttons, dialogs, toasts, inputs, tabs, section banners, progress indicators, week stripe, and the wizard guide hand are specced. The `Open patterns to spec later` list (tooltip, empty state, loading/skeleton, modal-beyond-confirmation, week-stripe window-state) is deferred to post-1.0 unless one of these gets hit in real use — none is blocking a first release.
 
 ## Final Documentation Pass (planned, before 1.0)
 

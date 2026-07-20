@@ -16,6 +16,13 @@
   } from '$lib/theme';
   import { parse } from 'culori';
   import '../app.css';
+  // Self-hosted fonts (Fontsource packages, latin-ext coverage for
+  // accented characters in user prose). Bundled at build time — no
+  // network fetch on first launch, so display type renders correctly
+  // offline. See STYLE-GUIDE.md Typography → "Loading the fonts".
+  import '@fontsource/paytone-one/latin-ext-400.css';
+  import '@fontsource/abeezee/latin-ext-400.css';
+  import '@fontsource/abeezee/latin-ext-400-italic.css';
 
   // Phase 2.8 — CustomTheme wire shape mirrors Rust's struct and the
   // Settings page's local type. Keep in sync with both if the token list
