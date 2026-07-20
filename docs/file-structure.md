@@ -70,16 +70,9 @@ The user picks a new location from Settings. The app:
 3. Offers to move existing files (rsync-equivalent)
 4. On confirm, copies everything to the new location and (optionally) cleans up the old folder
 
-## Cross-device safety (Phase 6)
+## Cross-device sync
 
-When Google Drive sync exists, the same root folder is shared across machines. Some settings are per-device (notification preferences, window positions) and some are per-journal (user name, label index).
-
-This means `settings.json` may eventually split:
-
-- `settings.json` in `.metadata/` (synced, journal-wide)
-- App-support directory equivalent (per-machine, device-specific)
-
-Cross that bridge when we build sync.
+Cross-device sync was dropped from the roadmap on 2026-07-16 (see ROADMAP.md). Captain's Log is single-machine by design; users who want sync can point the journal root at a folder inside iCloud Drive / Dropbox / Google Drive at their own risk.
 
 ## Backup
 

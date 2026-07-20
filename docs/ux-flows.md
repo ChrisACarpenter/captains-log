@@ -2,14 +2,14 @@
 
 Step-by-step interaction flows for the core experiences.
 
-Flows marked **(Phase N — planned)** describe future work and are aspirational. Everything else reflects current behavior.
+All flows below reflect current shipped behavior.
 
 ## Flow 1 — Quick capture (the main loop)
 
 Goal: 2 clicks from "I just did a thing" to "it's logged."
 
 1. User clicks the menu bar icon (🧭)
-2. Quick-capture popup appears (460×460px window, resizable)
+2. Quick-capture popup appears (560×460px window, resizable; geometry persisted by the window-state plugin)
    - Cursor focused in the body text field (live-preview MarkdownEditor)
    - Optional title field at top
    - Labels field below (chip-based autocomplete)
@@ -91,7 +91,7 @@ Reachable from `/settings` (via the main window's nav). Six tabs:
 2. **Reminders** — enable toggle, multi-day pills, time picker. Notification-permission tip if macOS hasn't granted it yet.
 3. **Mail** — Send-to-Manager dispatch path (Gmail / Native Mac Mail / Outlook), body delivery mode (Prefilled vs. Compose + paste), body format (Clean text vs. Markdown source), per-mode tips and sub-controls (Outlook flavor, Native HTML toggle).
 4. **Theme** — Light / Dark / Custom. Custom theme editor (12 primaries → ~23 OKLCH-derived tokens, AA contrast warnings, `.captheme.json` export/import). Colorful Labels toggle.
-5. **Labels** — per-label details modal (rename / color override / delete). Bulk operations land in Phase 3a.
+5. **Labels** — per-label details modal (rename / color override / delete), plus a "Referenced In" list inside [LabelDetailsModal](../app/src/lib/LabelDetailsModal.svelte) (bounded at 50 rows, click-to-navigate into `/journal?year=Y&week=W`). Multi-select is available on the Labels tab: a bulk toolbar exposes **Delete N** and **Merge into…** (radio-select Modal pre-filled with the highest-count label; merges reuse `rename_label`'s auto-merge-on-collision behavior).
 6. **Tasks** — task-list display toggles (show completed, open tasks first, "checked N ago" chip, auto-rollover of incomplete tasks, auto-import completed tasks into Key Accomplishments) plus task-reminder controls (enable, days-before-due, time-of-day). See Flow 2a.
 
 Tray-menu escape hatches: "Preset Theme" submenu (Dark / Light) flips theme without going through Settings — used when a Custom palette makes the in-app picker unreadable.
@@ -141,10 +141,24 @@ Surface: a **Send weekly summary** button on `/summary` and `/journal` (when a w
 5. On confirmed dispatch, the sent-log (`<root>/.metadata/sent-log.json`) is stamped with `sentAt`, `contentHash`, `sentTo`.
 6. Resends re-derive the hash; the button surface shows `Sent {time}` when locked or `Send updated version` (stale) when the content has shifted.
 
-## Flow 8 — Search & Navigation (Phase 3b — planned)
+## Flow 8 — Search & Navigation
 
-Full-text search across all weekly files with label / date / file filters and click-to-jump. Not yet shipped; design parked until Phase 3a (Label Library viewer + bulk management) lands first.
+Surface: a dedicated `/search` route reachable from the `/journal` sidebar or the global **⌘K** shortcut.
 
-## Flow 9 — Performance Review export (Phase 5 — planned)
+1. User hits ⌘K anywhere in the app (or clicks the search entry in the `/journal` sidebar) → `/search` opens with the query field focused.
+2. User types a query. Search runs full-text across every weekly file, covering both Weekly Summary content and Note bodies.
+3. Optional label filter narrows results to weeks / notes tagged with the chosen label.
+4. Results render as cards grouped by surface: a **Summary** vs. **Note** kind badge, the `YYYY-Wnn` week label, the Note timestamp (for Note hits), and any labels on the row.
+5. Click a result → jumps to `/journal?year=Y&week=W&scrollTo=<byte-offset>`. MarkdownEditor scrolls the target byte into view so the hit lands on-screen instead of at the top of the week.
 
-The reason this whole app exists. Date-range picker, review-question templates, bundled markdown export with link-enriched metadata, one-click "draft my review" handoff to an LLM. Not yet shipped; design lives in [ROADMAP.md](../ROADMAP.md#phase-5--performance-review-module).
+## Flow 9 — Prep Self Review
+
+Surface: the Prep Self Review wizard (shipped in Phase 5). See [ROADMAP.md](../ROADMAP.md#phase-5--prep-self-review) for the shipping receipt.
+
+Goal: assemble the source material a self-review needs — Captain's Log does **not** ghost-write the review. It produces a markdown doc the user hands to Claude (or another LLM), and the LLM does the surfacing and proofreading.
+
+1. User opens the Prep Self Review wizard and enters the review questions (or picks a template).
+2. Wizard bundles the relevant slice of the journal — weekly summaries, notes, tasks, labels — into a single markdown handoff document scoped to the review period.
+3. Handoff doc bakes in best-practice references the LLM can lean on: Lattice's self-review guide, Culture Amp's two write-ups on self-reviews, and the HBR article noted in the Phase 5 receipt.
+4. User hands the markdown to Claude / an LLM. For each review question, the LLM surfaces supporting material from the journal — every claim comes with the week number(s) it was pulled from and any Jira ticket keys mentioned in-line.
+5. User drafts each answer against that material. Optional second pass: the LLM proofreads the drafts against the same source doc, flagging claims that aren't backed by a journal entry.

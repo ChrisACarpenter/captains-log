@@ -3,8 +3,10 @@
  * help-popups-discovery workflow (parallel agents drafted content from
  * a survey of actual keyboard shortcuts + clickable affordances in the
  * codebase; synthesizer plugged in the real shortcut list). Updated
- * 2026-07-06 to cover Phase 2.6–2.8c additions (Send-to-manager, Custom
- * themes, Colorful labels, multi-day reminders, Rust module layout).
+ * 2026-07-20 to cover Phases 3a–5 + the Pre-1.0 Polish Sweep (Cmd+K
+ * search, Tasks + due dates + reminders, Prep Self Review wizard, link
+ * chips, hide-send-to-manager, Fontsource self-hosted fonts, task/link
+ * sidecars, tasks.rs / review_prep.rs / link_enrich.rs modules).
  *
  * The strings are HTML, not markdown — rendered via Svelte's {@html ...}
  * inside HelpButtons.svelte's popup container. Update them here when
@@ -14,11 +16,12 @@
 export const HELP_HTML = `<h3>What is Captain's Log?</h3>
 <p>A private, local-first journal for capturing your work as it happens — so performance reviews write themselves.</p>
 
-<h3>The three surfaces</h3>
+<h3>The main surfaces</h3>
 <ul>
   <li><strong>/capture</strong> — a fast jot box for in-the-moment notes; whatever you type lands in this week's journal.</li>
   <li><strong>/summary</strong> — a structured weekly form (key accomplishments, plans, challenges, anything else on your mind) that you can mail to your manager.</li>
   <li><strong>/journal</strong> — the full chronological log, browsable and editable by ISO week.</li>
+  <li><strong>/search</strong> — full-text search across every week; filter by label, click a hit to jump to that week. Open from anywhere in the main window with <kbd>Cmd</kbd>+<kbd>K</kbd>.</li>
 </ul>
 
 <h3>What's a note?</h3>
@@ -45,6 +48,29 @@ export const HELP_HTML = `<h3>What is Captain's Log?</h3>
   <li><strong>Compose + paste (formatted)</strong> — compose opens empty and the fully formatted HTML lands on your clipboard. <kbd>Cmd</kbd>+<kbd>V</kbd>, then Send. Two clicks in Captain's Log, one paste, one Send.</li>
 </ul>
 <p>The <strong>Preview</strong> button on the Send dialog shows exactly what your manager will receive before you hand off. Captain's Log never sends the mail itself — you review and send from your real mail identity, so threading and the Sent folder work normally.</p>
+<p>Don't want any of this? <strong>Settings → General → Hide Send-to-manager</strong> suppresses the Send buttons and the manager-name / manager-email fields (your saved values are kept, so re-enabling picks up where you left off).</p>
+
+<h3>Tasks</h3>
+<p>Tasks live in two places at once: aggregated on the landing page and inside each week's file under a <code>### Tasks</code> section. Use <strong>+ Add Task</strong> to append a new one; the pencil icon on a row edits it, the trash icon deletes it. Check a task and it moves under <strong>Completed</strong> in the same week's file.</p>
+<ul>
+  <li><strong>Rollover</strong> — incomplete tasks roll forward every Monday to the new week's file, so nothing gets lost when the week flips.</li>
+  <li><strong>Auto-import</strong> — completed tasks flow into that week's Key Accomplishments once per day. Toggle it in <strong>Settings → Tasks</strong>; the <strong>Copy Completed</strong> button on /summary is the manual equivalent.</li>
+</ul>
+
+<h4>Due dates and task reminders</h4>
+<p>Click the calendar icon on any task row to set (or clear) a due date. Rows show a <strong>Due</strong> chip — "Due today", "Due Fri", "Due Jul 15" — and overdue tasks surface under a red <strong>Overdue</strong> header sorted oldest-first. Rollover preserves the date, so a task that was due yesterday is still due yesterday next Monday.</p>
+<p><strong>Settings → Tasks</strong> lets you enable task reminders, choose how many days before the due date to fire, and pick a time of day (default 09:00). Notifications use <strong>Noot</strong> as the icon, matching the weekly-reminder flow.</p>
+
+<h3>Prep Self Review</h3>
+<p>The <strong>Prep Self Review</strong> button on the landing page opens a wizard that assembles a markdown handoff doc for you to feed to an LLM (Claude, ChatGPT, whatever you use). Five steps:</p>
+<ol>
+  <li><strong>Confirm info</strong> — your name, role, and any framing you want to give.</li>
+  <li><strong>Review period</strong> — pick the date range the doc should cover.</li>
+  <li><strong>Questions</strong> — paste the self-review prompts you're being asked to answer.</li>
+  <li><strong>OKRs</strong> — paste your current OKRs / goals.</li>
+  <li><strong>Generate</strong> — the app stitches everything together, optionally including full Weekly Notes for the period (toggle on step 5), and gives you <strong>Save to Desktop</strong> and <strong>Copy to clipboard</strong> outputs.</li>
+</ol>
+<p>Captain's Log assembles the source material — it does not write your review. Hand the generated doc to your LLM of choice and iterate from there.</p>
 
 <h3>Weekly reminders (and Noot)</h3>
 <p><strong>Settings → Reminders</strong> lets you pick day(s) of the week (multi-select pills) and a time. macOS posts a native notification when the time arrives — click it to jump straight to /summary. Reminders automatically suppress for weeks you've already written a summary. The Reminders tab has a tip about switching macOS to "Persistent" Alert Style if you want the notification's action buttons to stay visible.</p>
@@ -62,7 +88,7 @@ export const HELP_HTML = `<h3>What is Captain's Log?</h3>
   <li><kbd>Cmd</kbd>+<kbd>B</kbd> — bold</li>
   <li><kbd>Cmd</kbd>+<kbd>I</kbd> — italic</li>
   <li><kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd> — strikethrough</li>
-  <li><kbd>Cmd</kbd>+<kbd>K</kbd> — link</li>
+  <li><kbd>Cmd</kbd>+<kbd>K</kbd> — link (inside an editor; outside an editor the same shortcut opens /search — see Navigation)</li>
   <li><kbd>Cmd</kbd>+<kbd>E</kbd> — inline code / fenced code block</li>
   <li><kbd>Cmd</kbd>+<kbd>Alt</kbd>+<kbd>0</kbd> — cycle heading level (none → H1 → H2 → H3)</li>
   <li><kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>8</kbd> — bullet list</li>
@@ -83,6 +109,7 @@ export const HELP_HTML = `<h3>What is Captain's Log?</h3>
 <h4>Navigation</h4>
 <ul>
   <li><kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> — toggle Preview / Source mode (/journal only)</li>
+  <li><kbd>Cmd</kbd>+<kbd>K</kbd> — open /search (main window only; inside an editor <kbd>Cmd</kbd>+<kbd>K</kbd> still inserts a link — the shortcut is contextual)</li>
 </ul>
 
 <h3>Things you can click that aren't obvious</h3>
@@ -90,6 +117,8 @@ export const HELP_HTML = `<h3>What is Captain's Log?</h3>
   <li>The thin orange bar at the very top is a week-progress indicator — it fills from Monday to Sunday. Not clickable, just a quiet status line.</li>
   <li>Rendered task checkboxes toggle when clicked.</li>
   <li>Any <code>YYYY-MM-DD</code> in your prose becomes a clickable date chip with a picker.</li>
+  <li>Markdown links render as favicon+label <strong>link chips</strong>. Plain click opens the URL in your browser; <kbd>Alt</kbd>+click puts the <code>[text]</code> label in edit mode so you can rename it without touching the URL.</li>
+  <li>Paste a URL <em>over a selection</em> and it wraps the selection as a link. Paste a URL <em>on its own</em> and it inserts, then async-upgrades to <code>[page title](url)</code> once the head-scrape returns. Works everywhere you can type a link — the MarkdownEditor surfaces (Notes, Summary, Journal), the + Add Task input, the inline task-edit input, and the Prep Self Review Questions / OKRs textareas.</li>
   <li>Individual label chips in the Labels tab open a details modal (rename, color override, delete).</li>
   <li>The <strong>?</strong> button on the editor toolbar opens a markdown cheat sheet in your browser.</li>
 </ul>
@@ -111,6 +140,7 @@ export const NERDS_HTML = `<p>Captain's Log is a homebrew, single-developer proj
 
 <h3>The editor</h3>
 <p>The journal pane is <a href="https://codemirror.net" target="_blank" rel="noopener">CodeMirror 6</a> with a custom decoration layer that does the live-preview trick. The markdown grammar is <a href="https://github.com/lezer-parser/markdown" target="_blank" rel="noopener">@lezer/markdown</a> with the <a href="https://github.github.com/gfm/" target="_blank" rel="noopener">GitHub-flavored extensions</a> enabled — tables, strikethrough, autolinks, task lists, the usual suspects. Setext-style headings (the <code>===</code> / <code>---</code> underline flavor) are explicitly disabled to keep a stray dash on the line below a paragraph from retroactively re-styling it as an H2.</p>
+<p>The widget layer sitting on top of the buffer covers date chips, task checkboxes, bullet / ordered-list markers, and (Phase 4) link chips. Widgets use a content-only <code>eq()</code> so identical text re-uses the same DOM node across edits, and a live position-lookup so click handlers always dispatch to the right buffer range even after upstream edits shift offsets.</p>
 
 <h3>Live-preview model</h3>
 <p>The pattern is rich on top, canonical markdown underneath. Heading hashes, bold asterisks, link brackets — they're all still in the buffer. They're just hidden via CodeMirror's <code>Decoration.replace</code>, and the rendered styling is layered over the text via <code>Decoration.mark</code>. Move your cursor onto a line and the markers reappear so you can edit them. Move away and they vanish again. The file on disk is plain, portable markdown the whole time.</p>
@@ -123,16 +153,41 @@ export const NERDS_HTML = `<p>Captain's Log is a homebrew, single-developer proj
   <li><code>labels.rs</code> — parses inline <code>#labels</code> and explicit <code>**Labels:**</code> lines out of markdown, maintains the label index, and honors word-boundary rules that keep URLs (<code>#section</code>) from false-positiving.</li>
   <li><code>email.rs</code> + <code>email_html.rs</code> — build the send-to-manager payloads. Gmail and Outlook get URL-encoded compose URLs; Native Mac Mail gets an AppleScript block piped through <code>osascript</code>; the Styled HTML path emits a multipart <code>.eml</code>.</li>
   <li><code>reminders.rs</code> — the <a href="https://tokio.rs" target="_blank" rel="noopener">tokio</a> scheduler that fires weekly reminders. Re-derives the next fire instant from <code>chrono::Local::now()</code> on every wake so macOS hibernation can't strand it in the past.</li>
+  <li><code>tasks.rs</code> — parses the <code>### Tasks</code> section out of each week file, handles the Monday rollover of incomplete tasks, owns the task sidecars (completions, due-dates, rollover-log, auto-import-log), and runs a second tokio scheduler for task reminders (N days before due at time Y).</li>
+  <li><code>review_prep.rs</code> — assembles the Prep Self Review markdown handoff doc. Takes the wizard payload (info, review period, questions, OKRs, optional weekly notes) and produces the string that the frontend saves to Desktop or copies to the clipboard.</li>
+  <li><code>link_enrich.rs</code> — the head-scrape service behind link chips. <a href="https://docs.rs/reqwest" target="_blank" rel="noopener">reqwest</a> fetches the target, <a href="https://docs.rs/scraper" target="_blank" rel="noopener">scraper</a> pulls <code>&lt;title&gt;</code> / <code>og:title</code> / favicon, and results are cached in <code>.metadata/link-cache.json</code> so a second paste of the same URL is instant and offline-safe.</li>
 </ul>
 
 <h3>Custom themes + the OKLCH walker</h3>
 <p>Custom themes take 12 user-picked primary colors and derive ~23 dependent tokens — hover states, focus rings, subtle borders, error tints. The engine walks in <a href="https://oklch.com" target="_blank" rel="noopener">OKLCH</a> color space using <a href="https://culorijs.org" target="_blank" rel="noopener">culori</a> and iterates the L axis on each token until it hits WCAG AA contrast against its host surface (4.5:1 for text, 3:1 for UI). Non-convergent tokens fall back to better-of-black-or-white, so nothing paints below AA. Palettes serialize to a small <code>.captheme.json</code> you can share, version-control, or drop into Settings → Theme on a new machine.</p>
 
 <h3>Storage</h3>
-<p>Each ISO week is one <a href="https://commonmark.org" target="_blank" rel="noopener">CommonMark</a> + <a href="https://github.github.com/gfm/" target="_blank" rel="noopener">GFM</a> file at <code>YYYY/YYYY-Wnn.md</code> under your journal root. Alongside them a <code>.metadata/</code> folder holds the label index, journal-level settings, a sent-log for the manager-email flow, and any in-flight capture draft — all JSON, all rebuildable from the markdown if you ever delete them. No database, no proprietary format, no lock-in — you can <code>cat</code> a year of journal from the terminal, grep it, sync it via iCloud or Git, or open it in any editor on earth. If Captain's Log disappears tomorrow, your data is fine.</p>
+<p>Each ISO week is one <a href="https://commonmark.org" target="_blank" rel="noopener">CommonMark</a> + <a href="https://github.github.com/gfm/" target="_blank" rel="noopener">GFM</a> file at <code>YYYY/YYYY-Wnn.md</code> under your journal root. Alongside them a <code>.metadata/</code> folder holds:</p>
+<ul>
+  <li>the label index and journal-level settings;</li>
+  <li>a sent-log for the manager-email flow and any in-flight capture draft;</li>
+  <li>the task sidecars — <code>task-completions.json</code>, <code>task-due-dates.json</code>, <code>rollover-log.json</code>, <code>auto-import-log.json</code>;</li>
+  <li><code>link-cache.json</code>, populated by <code>link_enrich.rs</code>;</li>
+  <li><code>pre-slice6-backups/</code>, the pre-migration snapshots the Phase 3c task-restructure took of every week file before it rewrote them.</li>
+</ul>
+<p>All JSON, all rebuildable from the markdown if you ever delete them — the task sidecars re-derive from a fresh parse via <strong>Settings → Tasks → Rebuild task index</strong>, and the link cache repopulates itself from the next paste (or manual refresh). No database, no proprietary format, no lock-in — you can <code>cat</code> a year of journal from the terminal, grep it, sync it via iCloud or Git, or open it in any editor on earth. If Captain's Log disappears tomorrow, your data is fine.</p>
+<p>Email HTML and inline task text share a small Markdown→HTML pipeline in Rust: <a href="https://github.com/pulldown-cmark/pulldown-cmark" target="_blank" rel="noopener">pulldown-cmark</a> renders the markdown, then <a href="https://github.com/rust-ammonia/ammonia" target="_blank" rel="noopener">ammonia</a> sanitizes the output so nothing user-authored can smuggle scripts or dangerous attributes into a rendered surface.</p>
 
 <h3>Look and feel</h3>
-<p>Body type is <a href="https://fonts.google.com/specimen/ABeeZee" target="_blank" rel="noopener">ABeeZee</a>, a friendly humanist sans. Display headings use <a href="https://fonts.google.com/specimen/Paytone+One" target="_blank" rel="noopener">Paytone One</a>. Code is rendered in the OS monospace stack (SF Mono on macOS). Icons live in a small <code>Icon.svelte</code> component that inlines hand-picked <a href="https://lucide.dev" target="_blank" rel="noopener">Lucide</a>-derived SVG paths — no icon-font runtime dependency.</p>
+<p>Body type is ABeeZee, a friendly humanist sans. Display headings use Paytone One. Both are self-hosted via <a href="https://fontsource.org" target="_blank" rel="noopener">@fontsource</a> npm packages (Paytone One + ABeeZee, <code>latin-ext-400</code> plus italic), so the app has no Google Fonts CDN dependency at runtime — everything ships inside the bundle. Code is rendered in the OS monospace stack (SF Mono on macOS). Icons live in a small <code>Icon.svelte</code> component that inlines hand-picked <a href="https://lucide.dev" target="_blank" rel="noopener">Lucide</a>-derived SVG paths — no icon-font runtime dependency.</p>
+
+<h3>Rough edges</h3>
+<p>Small quirks that haven't hit any real user yet, documented so you're not surprised if you do. All are one-liner fixes if they ever become a real complaint.</p>
+<ul>
+  <li><strong>Editor cursor near fenced code:</strong> Cmd+Home / Cmd+End / Cmd+F landing directly on a triple-backtick fence line and then arrowing can confuse the cursor-skip filter. Move a line up or down and it recovers.</li>
+  <li><strong>IME composition + body-line-start backspace:</strong> the widget layer bails on this edge case rather than trying to handle every input-method state machine.</li>
+  <li><strong>Multi-cursor + widget commands:</strong> most widget-aware commands (task toggle, chip commit) bail on multi-selection rather than dispatch per range. Regular typing / paste / delete work fine with multiple cursors.</li>
+  <li><strong>Setext headings (<code>===</code> / <code>---</code> underlines):</strong> the live-preview active-state check doesn't detect them. The parser does, so on-disk markdown is still correct — only the "unhide markers when your cursor is on the line" cue is missing. ATX headings (<code>#</code> prefix) work fully.</li>
+  <li><strong>Double-digit ordered-list markers:</strong> at 10+ items in an ordered list the marker column visually overlaps the content by a hair under the hang-indent layout. Fine at nine and below.</li>
+  <li><strong>External writes during our own save:</strong> if another app modifies a week file at the exact millisecond Captain's Log is mid-save, one write wins and the other is dropped. Two-writer race inherent to plain files; the cross-route invalidation event mechanism can trigger a refresh but can't coordinate a merge.</li>
+  <li><strong>Orphan task sidecar entries:</strong> if you hand-edit a week file outside the app to remove a task, its <code>task-completions.json</code> / <code>task-due-dates.json</code> entries linger. <strong>Settings → Tasks → Rebuild task index</strong> cleans them up.</li>
+  <li><strong>Hand-typed content in <code>### Tasks</code>:</strong> the section is owned by the app — free-form notes typed directly inside it (as opposed to actual <code>- [ ]</code> task lines) can be clobbered by the next task write. Put freehand notes anywhere else in the week file.</li>
+</ul>
 
 <h3>Source</h3>
 <p>Repo at <a href="https://github.com/ChrisACarpenter/captains-log" target="_blank" rel="noopener">github.com/ChrisACarpenter/captains-log</a>. Bug reports welcome; PRs accepted from anyone who wants to contribute.</p>`;

@@ -49,10 +49,10 @@ All four fields optional. The Bamboo link in the tip opens BambooHR in the syste
 ```
 Tell me about your manager.
 
-For the weekly Send-to-Manager email flow. Optional.
+Personalizes the weekly email greeting and pre-fills the To: field. Leave blank to send to whoever you like at the time.
 
-  Manager's name                      [ ____________________ ]
-  Manager's email                     [ ____________________ ]
+  Their name                          [ ____________________ ]
+  Their email                         [ ____________________ ]
 
   Tip: Used to personalize the Send weekly summary button on the
   /summary screen — name in the greeting, email in the To: field.
@@ -63,23 +63,22 @@ For the weekly Send-to-Manager email flow. Optional.
 ### Step 4 — Settings (journal location + reminders)
 
 ```
-Settings.
+A few last settings.
 
-Your journal lives in one folder. Pick where, then decide if you want
-a weekly nudge.
+Where your journal lives, and whether Captain's Log should nudge you to write a weekly summary.
 
   Folder        [ ~/Documents/CaptainsLog/ ] [ Browse… ]
-                Plain markdown on your machine.
+                Plain markdown on your machine. You can move it later.
 
   ☑ Send me a weekly reminder to fill in the Weekly Summary
-    Day(s)     [ M T W T F S S — multi-select pills ]
+    Day        [ Friday ]
     Time       [ 4:00 PM ]
 
   [ Back ]                          [ Finish setup ]
 ```
 
 - Folder picker uses the shared [PathPickerField](../app/src/lib/PathPickerField.svelte) component (label + path input + Browse button + Tauri dialog). If the chosen folder doesn't exist, it's created. If it exists and already contains journal data, the existing data is used as-is.
-- Reminders default to off. When on, the day picker is multi-select pills (Phase 2.7 widened from a single dropdown). Time defaults to 4:00 PM (end-of-week reflection time).
+- Reminders default to off. The wizard collects a single day via a dropdown (persisted as a one-element `daysOfWeek` array); the multi-day pill picker lives on the Settings > Reminder tab, not the wizard. Time defaults to 4:00 PM (end-of-week reflection time).
 - "Finish setup" calls `complete_first_run` on the Rust side — writes settings, hot-swaps the storage layer, requests notification permission if reminders are enabled, and starts the scheduler.
 
 ### Step 5 — All set

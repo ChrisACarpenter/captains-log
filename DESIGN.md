@@ -11,8 +11,8 @@ High-level architecture and key design decisions. Detailed specs live under [doc
 | Frontend | TypeScript + Svelte 5 | Smaller bundle than React, less boilerplate, plays well with Tauri's lightweight philosophy |
 | Markdown editor | CodeMirror 6 | Mature, lightweight, good markdown support; live-preview decorations layered on top (Phase 2.5) |
 | Storage (v1) | Plain markdown files on disk | Portable, future-proof, grep-able, git-friendly |
-| Sync (future) | Google Drive | Everyone at Prodigy has a Google account |
-| Encryption (future) | Layered on top of storage backend | Plug-in stage between content and disk/sync |
+| Sync | Not planned (Phase 6 dropped 2026-07-16) | — |
+| Encryption | Not planned; the `EncryptedStorage<B>` wrapper trait remains available if a future need surfaces | — |
 
 ## Architecture at a glance
 
@@ -26,8 +26,7 @@ High-level architecture and key design decisions. Detailed specs live under [doc
 │  Backend (Rust)                                  │
 │   Notes API        Label Index    Notifications  │
 │   Storage Layer (trait)                          │
-│      ├─ LocalFilesystem  (v1)                    │
-│      └─ GoogleDrive      (Phase 6)               │
+│      └─ LocalFilesystem  (v1)                    │
 └──────────────────────────────────────────────────┘
                   ↕
         Disk: <root>/YYYY/YYYY-Www.md
@@ -40,7 +39,7 @@ High-level architecture and key design decisions. Detailed specs live under [doc
 
 ### Storage layer abstraction
 
-The Notes API never touches the filesystem directly. It calls a `StorageBackend` trait with implementations for `LocalFilesystem` (v1) and `GoogleDrive` (Phase 6).
+The Notes API never touches the filesystem directly. It calls a `StorageBackend` trait with a single `LocalFilesystem` implementation today. The trait exists so a future backend could be dropped in without changing the Notes API, but no additional backend is planned as of the 2026-07-16 roadmap re-eval.
 
 Each backend implements:
 
@@ -70,6 +69,8 @@ See [docs/label-system.md](docs/label-system.md). Labels can come from a dedicat
 
 Everything is markdown. The label index, settings, etc. are JSON for performance, but they're rebuildable from the markdown files. If `.metadata/` is ever deleted, the app rebuilds it from a scan.
 
+Rendering layers (link chips, date chips, task widgets) live in the editor only — the on-disk bytes stay portable markdown. Even first-class UI features like the task list (Phase 3d) store their state in a plain `### Tasks` section anchored by HTML comments, not in a sidecar-only representation.
+
 This guarantees:
 
 - No vendor lock-in
@@ -84,6 +85,7 @@ This guarantees:
 ## Resolved decisions
 
 - **Editor (Phase 2.5):** CodeMirror 6 shipped — markdown stays byte-identical on disk, Slack/Typora-style live-preview decorations hide markers (`**`, `*`, `~~`, `#`, etc.) without mutating the source. WYSIWYG approaches (TipTap, Milkdown) were considered but lose source fidelity.
+- **Prep Self Review (Phase 5):** Prep Self Review generates a markdown handoff doc for an external LLM. The app assembles source material with week numbers + Jira ticket links; the LLM is instructed to surface material as point-form suggestions ranked by relevance, NOT to draft review answers. Ghost-writing performance reviews is a bad-outcome tail risk; a scaffold is the value.
 
 ## Voice & brand
 
@@ -95,6 +97,6 @@ UI copy follows Prodigy's brand voice (per the Prodigy deck template):
 - Pronouns (we, our, you), contractions, concise / friendly / benefit-driven
 - Direct, not blunt; educational, not verbose
 
-Colors are defined in [STYLE-GUIDE.md](STYLE-GUIDE.md). Typography is TBD — see [ROADMAP.md](ROADMAP.md) "Deferred / TBD."
+Colors are defined in [STYLE-GUIDE.md](STYLE-GUIDE.md). Typography (Paytone One display + ABeeZee body, self-hosted via Fontsource) is defined in [STYLE-GUIDE.md](STYLE-GUIDE.md) under Typography.
 
 The app supports **Light, Dark, and Custom** themes. Dark is the default; the picker lives in Settings → Theme. Custom themes (Phase 2.8) let the user edit 12 primary colors; the engine derives ~23 dependent tokens via OKLCH with WCAG AA contrast validation, and themes export/import as `.captheme.json`. A tray-menu "Preset Theme" submenu is the escape hatch if a Custom palette makes the in-app picker unreadable. Phase 2.8b's "Colorful Labels" toggle gives each label a per-name hue that regenerates against the active surface (no theme-burn).

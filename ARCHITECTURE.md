@@ -33,11 +33,11 @@ The app exposes three distinct routes, each tuned for a different mode of writin
 
 ### `/capture` — the menu-bar quick-capture popup
 
-A 460×460 popup window (window label `capture`, hidden by default) summoned from the macOS menu-bar icon. It's optimized for the in-the-moment "I just did a thing, log it before I forget" flow — two clicks from tray to submitted note. The form is a title input, a body `MarkdownEditor`, and a `LabelInput` chip strip. Submitting calls the `create_note` Tauri command, which appends a timestamped Note to the current week's `### Weekly Notes` section, creating the weekly file with an empty Summary scaffold if it doesn't exist yet. Drafts auto-save to `.metadata/capture-draft.json` on a 1.5s debounce, so closing the popup mid-thought is non-destructive — the same content reappears next open. `Cmd+Enter` submits; `Esc` hides without discarding.
+A 560×460 popup window (window label `capture`, hidden by default) summoned from the macOS menu-bar icon. It's optimized for the in-the-moment "I just did a thing, log it before I forget" flow — two clicks from tray to submitted note. The form is a title input, a body `MarkdownEditor`, and a `LabelInput` chip strip. Submitting calls the `create_note` Tauri command, which appends a timestamped Note to the current week's `### Weekly Notes` section, creating the weekly file with an empty Summary scaffold if it doesn't exist yet. Drafts auto-save to `.metadata/capture-draft.json` on a 1.5s debounce, so closing the popup mid-thought is non-destructive — the same content reappears next open. `Cmd+Enter` submits; `Esc` hides without discarding.
 
 ### `/summary` — the structured weekly form
 
-A long-form route holding the four-field Lattice-template summary for the current ISO week: **Key accomplishments**, **Plans and priorities for next week**, **Challenges or roadblocks**, and **Anything else on your mind**, plus a `Labels` chip field. Each field is its own `MarkdownEditor` instance with a `--md-min-height` of 112px and `resize: vertical` so the user can drag a section taller. Edits auto-save to the same `journals/YYYY/YYYY-Www.md` file on a 1.5s debounce via `update_weekly_summary`; `Cmd+S` / `Cmd+Enter` force-saves. A **Send to manager** button composes a `mailto:` URL (or falls back to an `.eml` file when the URL would exceed ~1800 bytes), opens the user's default mail app via `tauri-plugin-opener`, and stamps `.metadata/sent-log.json` with a SHA-256 content hash so the UI can detect "edited since last send" and re-enable the button with a `Send updated version` label.
+A long-form route holding the four-field Lattice-template summary for the current ISO week: **Key accomplishments**, **Plans and priorities for next week**, **Challenges or roadblocks**, and **Anything else on your mind**, plus a `Labels` chip field. Each field is its own `MarkdownEditor` instance with a `--md-min-height` of 112px and `resize: vertical` so the user can drag a section taller. Edits auto-save to the same `journals/YYYY/YYYY-Www.md` file on a 1.5s debounce via `update_weekly_summary`; `Cmd+S` / `Cmd+Enter` force-saves. A **Send to manager** button drives a settings-configured pipeline (see the Mail tab in Settings): a **send mode** — Gmail (browser compose URL), Native Mac Mail (AppleScript over `osascript`), or Outlook (web compose URL) — and a **body delivery** toggle between *Prefilled* (the body ships as part of the URL / AppleScript payload) and *Compose+paste* (an empty draft opens and the rendered body is placed on the clipboard for the user to paste). Every mode routes through a universal Preview modal that renders the final body and exposes a one-click clipboard copy before the send actually fires. `mailto:` is no longer used at all; the `.eml`-fallback path only survives for the single Native Mac Mail + Styled-HTML peer-override combination where AppleScript can't inject HTML directly. On send, `.metadata/sent-log.json` is stamped with a SHA-256 content hash so the UI can detect "edited since last send" and re-enable the button with a `Send updated version` label. See the Phase 2.9b / 2.9c sections of `ROADMAP.md` for the full rollout.
 
 ### `/journal` — the past-weeks browser
 
@@ -55,7 +55,13 @@ Journal data lives as plain markdown files on the local disk, one file per ISO 8
 │   ├── labels.json
 │   ├── settings.json
 │   ├── sent-log.json
-│   └── capture-draft.json
+│   ├── capture-draft.json
+│   ├── task-completions.json
+│   ├── rollover-log.json
+│   ├── auto-import-log.json
+│   ├── task-due-dates.json
+│   ├── link-cache.json
+│   └── pre-slice6-backups/
 ├── 2026/
 │   ├── 2026-W01.md
 │   ├── 2026-W24.md
@@ -68,7 +74,7 @@ Journal data lives as plain markdown files on the local disk, one file per ISO 8
 
 ### File format
 
-Every weekly file is YAML frontmatter, an `h1` week title, a `## Weekly Summary` section with five `###` subsections in a fixed canonical order, and a `## Weekly Notes` section that timestamped `###` notes get appended into. The scaffold for a brand-new file (produced by `weekly_file_scaffold`):
+Every weekly file is YAML frontmatter, an `h1` week title, a `## Weekly Summary` section with five `###` subsections in a fixed canonical order, a `### Tasks` section bracketed by two HTML-comment anchors (`captainslog:tasks:incomplete` and `captainslog:tasks:completed`) that the task command family reads and rewrites, and a `## Weekly Notes` section that timestamped `###` notes get appended into. The scaffold for a brand-new file (produced by `weekly_file_scaffold`):
 
 ```markdown
 ---
@@ -94,6 +100,11 @@ last_modified: 2026-06-22T09:00:00-04:00
 
 ### Labels
 
+### Tasks
+<!-- captainslog:tasks:incomplete -->
+
+<!-- captainslog:tasks:completed -->
+
 ## Weekly Notes
 ```
 
@@ -112,6 +123,8 @@ The `**Labels:**` line is omitted when a note has no labels; the ` — Title` su
 
 Captain's Log treats the file tree as the source of truth, not a database. Files are human-readable, `cat`-able, `grep`-able, can be committed to git, synced through iCloud or Dropbox, opened in any text editor, and pasted directly into Lattice or a Slack DM. The frontmatter is standard YAML, so Obsidian, Bear, and any static-site generator can ingest it without a custom adapter. If Captain's Log disappears tomorrow, the data is fine — every weekly file stands alone and reads as a normal markdown journal entry.
 
+Structured feature state that has no natural home in the prose — task completion timestamps, rollover ledgers, per-task due dates, link-enrichment favicon/title cache — lives in the sidecar JSON files under `.metadata/`, keyed off a positional `(year, week, textHash, ordinal)` tuple. That keeps the on-disk markdown authoritative for content while letting features layer state on top without polluting the file the user reads in vim.
+
 ### Read / write commands
 
 The backend exposes raw and structured surfaces over the same files:
@@ -121,6 +134,8 @@ The backend exposes raw and structured surfaces over the same files:
 - `update_weekly_summary(input)` is what `/summary` calls. It reads the existing file, parses out the structured `WeeklySummary` fields, mutates them from the form payload, stamps `last_updated` server-side from `Local::now()`, then splices the freshly rendered summary section back into the file via `replace_weekly_summary_in_file` — preserving frontmatter, the week heading, and every Weekly Note below.
 
 `create_note` is the third write path: it reads the file (or scaffolds a new one), appends the rendered note, and writes it back.
+
+Beyond those four, several command families touch the same weekly files or their sidecars. The Phase 3d task mutations — `toggle_task`, `edit_task`, `delete_task`, `append_task_to_current_week`, `import_completed_tasks`, plus Phase 3e's `set_task_due_date` — all follow a read-migrate-backup-write shape: they read the current file, migrate any legacy pre-Slice-6 task layout into the `### Tasks` section (dropping a copy of the pre-migration file under `.metadata/pre-slice6-backups/` on first write), then re-key the positional `(year, week, textHash, ordinal)` entries in `task-completions.json` and `task-due-dates.json` so the sidecar rows stay pinned to the right task after edit/delete/toggle churn. Query commands — Phase 3b's `search_journal` and Phase 3a's `get_notes_for_label` — read the same weekly files without mutating them, and Phase 4's `enrich_link` fetches favicon + title metadata for a URL and writes the result into `link-cache.json` for the live-preview link-chip widget to consume.
 
 ### Trim behavior
 
@@ -254,6 +269,17 @@ Each button calls `btnClass(format)` which emits `is-active` plus `aria-pressed=
 `Cmd+;` runs `insertCurrentDate`, which writes a local-timezone ISO `YYYY-MM-DD` at the cursor (replacing any selection) and lands the cursor at the end of the inserted text. Local time, not UTC — a late-night entry doesn't get stamped with tomorrow's date.
 
 The date *chip* is a separate concern registered as part of `livePreview()`. It scans the visible viewport for `\b\d{4}-\d{2}-\d{2}\b` outside code spans and swaps each match for a clickable pill widget. The commit path is covered in the next section.
+
+### Link chip
+
+Phase 4 (2026-07-15, see `ROADMAP.md`) shipped a second widget layer that is architecturally a peer of the date chip: the **link chip**. A CodeMirror `ViewPlugin` walks the viewport, finds every markdown `[text](url)` link outside code spans, and replaces the whole span with a pill widget rendering a favicon + `[text]` label. Metadata (favicon PNG as a base64 data URI, resolved page title, host, auth-gated flag) is served by the `enrich_link` Rust command and cached in `.metadata/link-cache.json` keyed by URL, so the same link across weeks reuses one fetch. Alongside the widget, a `linkPaste` extension upgrades a pasted URL into a `[title](url)` link on paste when a selection is present or when the pasted text is a bare URL.
+
+Two implementation quirks are worth knowing about before touching this code:
+
+- **`eq()` is content-only, positions resolved at click time.** Where the date chip pins `from` / `to` into `eq()` to force a rebuild on any range shift, the link chip *cannot* — including the range in `eq()` triggers a WebKit-specific bug where a chip that gets remeasured across a soft-wrap boundary vanishes to zero width and never comes back. The link-chip widget instead compares only the URL + text in `eq()` and resolves the live document positions at click time via `view.posAtDOM(this.dom)`. That gets us WebKit-safe DOM reuse and still lands click-through at the current coordinates.
+- **Favicons are `background-image`, not `<img>`.** Rendering the favicon as an inline `<img>` triggers an extra WebKit layout pass that visibly reflows the chip when the doc scrolls; painting the base64 data URI via CSS `background-image` skips that pass. Hosts flagged auth-gated by `enrich_link` (Jira, Confluence, Miro, and similar) degrade the chip to a hostname label with a globe fallback icon rather than showing a broken/blank favicon.
+
+The cursor-inside-hides rule matches the date chip: when a selection endpoint lands inside a `Link` node, the link chip yields to the raw `[text](url)` so the URL is editable.
 
 ## Routing Doc Changes
 

@@ -116,6 +116,7 @@ Settings → Labels lists every label with count + first/last used dates. Clicki
 - **Color override** — when Colorful Labels is on, override the auto-generated hue with a hex value, or **Reset** back to auto
 - **Rename** — change the label everywhere it's referenced (updates all weekly files + the index). Confirm via [ConfirmDialog](../app/src/lib/ConfirmDialog.svelte)
 - **Delete** — remove the label from every Note and Weekly Summary's labels list (inline `#hashtag` text in note bodies is left alone)
+- **Referenced In** — a drill-down list of every site the label appears in, backed by the [`get_notes_for_label`](../app/src-tauri/src/commands.rs) Rust command. One row per label site with a Summary vs Note kind badge, the week label (`YYYY-Wnn`), and the Note's timestamp/title; sorted newest-first and capped at 50 rows with a TipBubble explaining truncation. Clicking a row closes the modal and `goto('/journal?year=Y&week=W')`, where the sidebar auto-expands the year and selects the week
 
 ## Bulk label management (Phase 3a Slice 2 — shipped)
 
@@ -126,6 +127,3 @@ Settings > Labels has a multi-select toolbar layered on top of the per-label lis
 - **Merge Into** — pick a canonical label from the selection, then run `rename_label` from every other selected label into that canonical name (labels.json entries merge, weekly files are rewritten)
 - Execution is sequential and continues on failure; when the pass finishes a success / failure banner appears above the list summarising files modified, occurrences touched, and any per-label errors
 
-### Deferred
-
-- Label library viewer that drills into the Notes using a given label — still planned, not shipped.

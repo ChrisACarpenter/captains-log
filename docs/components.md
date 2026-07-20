@@ -20,6 +20,7 @@ When the index and the in-file header disagree, **trust the header**. Open an is
 | [DatePickerPopover](#datepickerpopover) | Form | A hand-rolled date picker popover that anchors to a chip element, handles month/year navigation and keyboard input, and commits selected dates back to a CodeMirror 6 editor extension |
 | [Checkbox](#checkbox) | Form | Canonical checkbox control with inline (glyph + one-line label) and card (heading + description) variants; source of truth for every checkbox in the app |
 | [InputField](#inputfield) | Form | Standard "label + text input + hint" field component used across settings, capture, and onboarding steps |
+| [TextAreaField](#textareafield) | Form | Multi-line sibling of InputField — same label + hint/warning trio wrapping a `<textarea>`, built for Phase 5 review-prep Questions/OKRs |
 | [LabelInput](#labelinput) | Form | Autocomplete tag/label input with chip display, filtering against a persisted label index, and optional per-label hex coloring |
 | [PathPickerField](#pathpickerfield) | Form | A labeled path input field with a folder-picker button and optional hint/error messaging for directory selection tasks |
 | [MarkdownEditor](#markdowneditor) | Editor | CodeMirror 6 wrapper for markdown editing that preserves source formatting byte-for-byte, with optional live preview and formatting toolbar |
@@ -32,6 +33,7 @@ When the index and the in-file header disagree, **trust the header**. Open an is
 | [SendToManagerButton](#sendtomanagerbutton) | Feature | Send-to-Manager button + confirmation modal + sent-status display for sharing weekly summaries to the default mail client |
 | [TaskMetaChip](#taskmetachip) | Feature | Pill chip for task-row metadata — provenance (origin), completed-at time (time), due date (due), or maroon overdue-due variant |
 | [TaskRowActionButton](#taskrowactionbutton) | Feature | Inline pencil/trash/calendar action button on task rows, with variant-driven hover tint and bindable button element for popover anchoring |
+| [PrepSelfReviewWizard](#prepselfreviewwizard) | Feature | Modal-hosted five-step wizard that assembles a review-prep markdown doc from journal notes plus per-run context (period, questions, OKRs) |
 | [StepHeader](#stepheader) | Onboarding | Renders a shared header block (with heading and optional lead text) for onboarding step pages |
 | [Wizard](#wizard) | Onboarding | First-run onboarding wizard with five-step flow for capturing user info, manager details, and journal settings |
 | [WizardFrame](#wizardframe) | Onboarding | Renders the visual chrome (card frame, Ed character, progress dots) shared across every onboarding wizard step |
@@ -130,7 +132,7 @@ A pair of chrome-light buttons (Help, Nerds Only) fixed in the lower-left corner
 **Usage**
 
 ```svelte
-<help-buttons />
+<HelpButtons />
 ```
 
 **Related:** [Modal](#modal)
@@ -423,6 +425,49 @@ Standard "label + text input + hint" field component used across settings, captu
 **Notes**
 
 Visual treatment (styling via .text-input utility class) lives in app.css and honors the per-context --input-bg CSS variable—this component only owns markup wiring and structure. The component header identifies three variants deliberately kept inline (path picker with Browse button, time input with max-width clamp, reminder day pills) because they need layout control or custom behavior that doesn't fit InputField's flow-block API. The spellcheck boolean converts to the string values 'true'/'false' for the HTML attribute. Both labelSnippet and hintSnippet take precedence over their plain-text counterparts when provided.
+
+### TextAreaField
+
+**Source:** [`TextAreaField.svelte`](app/src/lib/TextAreaField.svelte)
+
+Multi-line sibling of InputField — same label + hint/warning trio, but wraps a `<textarea>` instead of an `<input>`.
+
+**When to use.** Use this whenever you need a labeled multi-line text input and MarkdownEditor would be overkill. Built for Phase 5's review-prep flow ("prose or a URL, no distinction" fields — review Questions, OKRs), but reusable anywhere the same shape is needed.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `id` | `string` | **yes** | DOM id forwarded to the `<textarea>` and used by the `<label for=…>` linkage. |
+| `label` | `string` | no | Plain-text label rendered above the textarea. |
+| `labelSnippet` | `Snippet` | no | Snippet variant of label for cases needing inline markup — takes precedence over `label` when both are set. |
+| `value` | `string` | **yes** | Bindable via bind:value for two-way reactive binding. |
+| `placeholder` | `string` | no | Placeholder text. Defaults to empty string. |
+| `hint` | `string` | no | Optional helper microcopy below the textarea. |
+| `hintSnippet` | `Snippet` | no | Snippet variant of hint for inline markup — takes precedence over `hint` when both are set. |
+| `warning` | `string` | no | Optional warning text in contrast-safe pink. When present, replaces hint and wires role=alert + aria-invalid + aria-describedby. |
+| `rows` | `number` | no | Initial textarea height in rows. Default 6. |
+| `spellcheck` | `boolean` | no | Defaults to true — multi-line inputs are usually prose. |
+| `urlPaste` | `boolean` | no | Opt in to URL paste-upgrade — paste-with-selection wraps as `[selected](url)`, paste-without-selection inserts the bare URL then async-upgrades to `[title](url)` via `enrich_link`. Off by default. |
+
+**Usage**
+
+```svelte
+<TextAreaField
+  id="review-questions"
+  label="Questions your manager sent"
+  bind:value={reviewQuestions}
+  placeholder="Paste the questions here…"
+  hint="One per line. Leave blank if you don't have any yet."
+  rows={8}
+/>
+```
+
+**Related:** [InputField](#inputfield)
+
+**Notes**
+
+Shares the `.text-input` utility class with InputField/PathPickerField, so per-context `--input-bg` theming Just Works. Both `labelSnippet` and `hintSnippet` win over their plain-text counterparts when provided. When `urlPaste` is true, the component attaches the `urlPasteUpgrade` action so paste behavior matches MarkdownEditor's CodeMirror `linkPaste` extension in a non-CodeMirror context.
 
 ### LabelInput
 
@@ -908,6 +953,36 @@ Inline pencil/trash/calendar action button on task rows, with variant-driven hov
 **Notes**
 
 Rest state is muted (opacity 0.55, no border) so a row full of chrome doesn't dominate the eye; the variant tint only paints on hover and `:focus-visible`. Callers still own the disabled logic — the button just consumes the boolean. The `el` handle is `$bindable()` because the calendar action needs a real DOM reference to anchor DatePickerPopover; without it, the popover has nothing to position against. Icons render at `size={14}` inside the 24×24 button so the glyph reads at the small scale.
+
+### PrepSelfReviewWizard
+
+**Source:** [`PrepSelfReviewWizard.svelte`](app/src/lib/review-prep/PrepSelfReviewWizard.svelte)
+
+Modal-hosted five-step wizard that assembles a review-prep markdown doc from the user's journal plus a small amount of collected context (review period, questions, OKRs). The generated doc is intended to be handed off to an LLM with a "look at this and do what it says" prompt.
+
+**When to use.** Use this for Phase 5's self-review prep flow — the wizard opens from the landing page (and can be triggered from other routes) whenever the user wants to bundle up their journal notes and per-run context into a shareable markdown brief. Landing owns visibility via the `open` prop; on close the wizard drops its state entirely.
+
+**Props**
+
+| Prop | Type | Required | Description |
+|---|---|---|---|
+| `open` | `boolean` | **yes** | Visibility gate. Wizard renders nothing when false and calls `reset()` on close so state doesn't leak between runs. |
+| `onClose` | `() => void` | **yes** | Called on backdrop click, Escape, ×, or explicit Cancel. If the user has entered data (`dirty = true`), a ConfirmDialog fires first — cancel is unblocked once the doc has been generated. |
+
+**Usage**
+
+```svelte
+<PrepSelfReviewWizard
+  open={showPrepWizard}
+  onClose={() => (showPrepWizard = false)}
+/>
+```
+
+**Related:** [Modal](#modal), [ConfirmDialog](#confirmdialog), [TextAreaField](#textareafield)
+
+**Notes**
+
+No partial persistence — wizard state lives on the component's lifetime and drops when the modal closes. Personal-info fields (name/email/manager) are the exception: edits there feed back into `settings.json` on Generate, since the wizard is a legitimate place to fix a stale value. Questions, OKRs, and the date range are per-run only. Missing data is fine — every input except the review period dates is optional, and the final step surfaces a "less useful without these" warning so the user knows what they're giving up. Captain's Log never fetches linked docs; the generated doc's instructions tell the downstream LLM to fetch via its own connectors. Steps are inlined as `{#if step === N}` blocks rather than sub-components — each step is compact enough that per-file splitting would cost more than it earns.
 
 ## Onboarding
 

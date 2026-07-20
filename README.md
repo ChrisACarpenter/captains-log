@@ -10,17 +10,19 @@ Captain's Log fixes this by capturing work as it happens, organized weekly, in a
 
 ## What it is
 
-A small, native Mac (cross-platform later) app that:
+A small, native Mac app that:
 
 - Captures timestamped Notes throughout the week via a quick-capture flow (2 clicks)
 - Organizes Notes into weekly markdown files
 - Supports an optional structured Weekly Summary (the 4-question Lattice template)
+- Tracks Tasks as a first-class part of each week — aggregated on the landing page, with due dates and OS-notification reminders, rolling forward automatically across weeks
+- Full-text search across every weekly file with a `Cmd+K` shortcut
 - Stores everything as plain markdown on disk, fully portable
 - Powers a Performance Review module that bundles a date range of Notes + Summaries and feeds them to an LLM along with review questions
 
 ## Status
 
-In active development. Phase 2.8c shipped 2026-06-30 — see [ROADMAP.md](ROADMAP.md) for the full phase history. Next up: **Phase 3a — Label library viewer + bulk management**.
+Phases 1–5 have all shipped. The app is in the Pre-1.0 arc — only the Final Documentation Pass remains before 1.0. See [ROADMAP.md](ROADMAP.md) for the phase-by-phase record.
 
 ## Project vocabulary
 
@@ -46,7 +48,9 @@ In active development. Phase 2.8c shipped 2026-06-30 — see [ROADMAP.md](ROADMA
 
 - **App framework:** Tauri 2.x (Rust backend + WebKit frontend)
 - **Frontend:** TypeScript + Svelte 5 + SvelteKit (static adapter)
-- **Editor:** CodeMirror 6 with live-preview decorations + custom markdown extensions
+- **Editor:** CodeMirror 6 + Lezer with live-preview decorations + custom markdown extensions
+- **HTML rendering:** pulldown-cmark + ammonia (for send-to-manager and other markdown-to-HTML surfaces)
+- **Fonts:** Self-hosted Paytone One + ABeeZee via [Fontsource](https://fontsource.org/) (no Google Fonts CDN)
 - **Storage:** Plain markdown files on disk + sidecar `.metadata/` JSON
 
 ## Brand & voice

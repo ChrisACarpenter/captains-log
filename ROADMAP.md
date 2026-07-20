@@ -1,6 +1,6 @@
 # Captain's Log — Roadmap
 
-## Current phase: Pre-1.0 arc — Style Finalization + Final Docs Pass (Polish Sweep + MkDocs research ✅ done)
+## Current phase: 1.0 ready — all Pre-1.0 arc work done (Polish Sweep + MkDocs research + Style Finalization + Fontsource migration + Final Docs Pass ✅)
 
 Phase 1 MVP and Phase 2 polish are complete. Phase 2.6 ("Send weekly summary to manager") shipped 2026-06-24. Phase 2.5 (editor upgrade, Architecture B live-preview) shipped 2026-06-25 — Slack/Typora-style marker hiding on CodeMirror 6 with markdown-on-disk; live-preview engine, widgets (date chip + picker, bullets, task checkboxes), toolbar overhaul, /journal Preview/Source toggle, layout chrome polish, and an architecture doc all landed in a single session. Phase 2.7 (onboarding wizard expansion + Settings tabbed redesign + multi-day reminders) shipped 2026-06-26, plus a cross-app UX polish pass (Phase 2.7b): dark-theme contrast audit + 30+ fixes, button/UX standardization, shared component extractions, and a scrollbar-gutter fix. Phase 2.9 (HTML email body + Preview modal) landed 2026-06-26 but was dark-released — Phase 2.9b (2026-06-29) finished the job by adding a Mail tab to Settings, three send modes (Gmail default, Native Mac Mail, Outlook), a universal Preview modal with clipboard, a week-rollover fix, and a sleep-drift fix on the reminder scheduler. Phase 2.9c (2026-06-29) layered on the "Compose + paste" body-delivery mode (open empty compose + write rich HTML to clipboard = 2-click formatted send across all clients), restructured the Mail tab around a single "How should Send work?" section, and burned down a stack of editor-rendering bugs around lists, numbered-marker contrast, and task-item double-markers.
 
@@ -654,14 +654,14 @@ Colors, typography, iconography, and core component patterns were locked in [STY
 - [x] **Radii tokens** — `--radius-xs` (3px), `--radius-sm` (6px), `--radius-md` (10px), `--radius-lg` (16px), `--radius-full` (50%), `--radius-pill` (999px). STYLE-GUIDE.md `Radii` section documents them.
 - [ ] **Reusable component spec library — extended patterns.** Buttons, dialogs, toasts, inputs, tabs, section banners, progress indicators, week stripe, and the wizard guide hand are specced. The `Open patterns to spec later` list (tooltip, empty state, loading/skeleton, modal-beyond-confirmation, week-stripe window-state) is deferred to post-1.0 unless one of these gets hit in real use — none is blocking a first release.
 
-## Final Documentation Pass (planned, before 1.0)
+## Final Documentation Pass ✅ (shipped 2026-07-20)
 
-Once feature work + polish sweep + style finalization are done, one comprehensive documentation refresh:
+Comprehensive documentation refresh across every user-facing surface:
 
-- [ ] **Project docs** — README, ARCHITECTURE, DESIGN, ROADMAP, STYLE-GUIDE, `docs/*.md`. End-to-end audit for stale references, missing coverage, and shipped features that never made it in.
-- [ ] **In-app Help** — content refresh for accuracy + coverage of everything shipped since it was last written.
-- [ ] **In-app Nerds Only** — same. May get folded into the MkDocs static site if that path lands.
-- [ ] **Consolidate the [Known Limitations](#known-limitations) list into user-facing docs** where appropriate.
+- [x] **Project docs** — README, ARCHITECTURE, DESIGN, `docs/*.md`. End-to-end audit + fixes ran through a 10-doc parallel-audit workflow (49 individual edits landed). Highlights: README status flipped to "Phases 1–5 shipped"; ARCHITECTURE gained the Tasks section + link-chip + sidecar coverage; DESIGN retired the Google Drive / Phase 6 references (dropped 2026-07-16); components.md picked up TextAreaField + PrepSelfReviewWizard; ux-flows.md marked Flow 8 (Search) shipped; label-system.md marked the Library viewer shipped.
+- [x] **In-app Help** — refreshed for link chips, task due dates + reminders, focus restoration, URL paste-upgrade, Prep Self Review, Cmd+K search, custom themes, and the Send-to-manager Mail-tab pipeline.
+- [x] **In-app Nerds Only** — refreshed for the current backend module layout (tasks.rs, review_prep.rs, link_enrich.rs), Fontsource-hosted typography, and the OKLCH walker. Also carries a new **Rough edges** section (below).
+- [x] **Consolidate the [Known Limitations](#known-limitations) list into user-facing docs.** Landed as a "Rough edges" subsection at the bottom of Nerds Only — 8 plain-English quirks with recovery instructions where relevant. ROADMAP.md keeps the engineering-facing version for future revisits.
 
 DEVELOPMENT-JOURNAL.md is preserved as-is — it's an append-only historical record.
 

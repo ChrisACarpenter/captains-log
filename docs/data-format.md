@@ -302,6 +302,27 @@ Rust type is `CaptureDraft` in `notes.rs`; the read/write/delete commands (`load
 
 Lifecycle: created on first debounced save while the popup is open. `save_capture_draft` deletes the file (rather than writing empty bytes) when the draft normalizes to empty, so `.metadata/` stays clean in the no-draft case. Cleared on Submit via `clear_capture_draft` (idempotent — a missing file is fine). No `version` field: the shape is small enough that additive changes ride on `#[serde(default)]` and there's nothing to migrate on read.
 
+### `sent-log.json`
+
+Per-week Send-to-manager send record (Phase 2.6). Keyed by ISO year-week string (e.g. `2026-W25`); one entry per week, overwritten on every resend. Consumed by the Send button gating on `/summary` and `/journal` — the frontend compares the current week's summary contentHash against `sentLog[currentWeek].contentHash` to decide whether to show "Send" or "Resend (content changed)".
+
+Rust types live in `sent_log.rs` as `SentLog` (top-level map wrapper) and `SentLogEntry` (one week's record). Filename constant is `SENT_LOG_FILENAME`.
+
+```json
+{
+  "version": 1,
+  "entries": {
+    "2026-W25": {
+      "sentAt": "2026-06-21T17:04:12-04:00",
+      "contentHash": "a4f2…",
+      "sentTo": "alex@prodigygame.com"
+    }
+  }
+}
+```
+
+Lifecycle: created lazily on the first successful Send. Missing/corrupt file → empty map + stderr warning (same posture as the other sidecars), which surfaces as an unsent state for every week. Overwrite-on-resend means only the most recent send-per-week is retained; there is no history array.
+
 ## Journal-level settings
 
 `<root>/.metadata/settings.json` — per-journal state. Schema evolves; every field uses `#[serde(default)]` on the Rust side, so older files load cleanly when new fields are added.
@@ -326,7 +347,22 @@ Lifecycle: created on first debounced save while the popup is open. `save_captur
   "mailBodyDelivery": "Prefilled",
   "mailNativeHtml": false,
   "mailOutlookFlavor": "Business",
-  "colorfulLabels": false
+  "colorfulLabels": false,
+  "hideSendToManager": false,
+  "taskList": {
+    "showCompleted": true,
+    "openTasksFirst": true,
+    "showCompletedTimestamp": false,
+    "hideTaskList": false,
+    "autoRolloverEnabled": true,
+    "autoImportCompleted": true
+  },
+  "taskReminder": {
+    "enabled": true,
+    "daysBefore": 0,
+    "hour": 9,
+    "minute": 0
+  }
 }
 ```
 
@@ -339,6 +375,9 @@ Field notes:
 - `mailNativeHtml`: Native Mac Mail only — emits a multipart `.eml` with styled HTML.
 - `mailOutlookFlavor`: `"Business"` (outlook.office.com) | `"Personal"` (outlook.live.com).
 - `colorfulLabels`: Phase 2.8b toggle — when true, chips render with per-label generated/persisted color.
+- `hideSendToManager`: Polish Sweep opt-out. When true, the Send button and the manager-name/manager-email settings fields are hidden from the UI, but the underlying `managerName` / `managerEmail` values are preserved so re-enabling restores them intact.
+- `taskList`: Phase 3c Slice 4/5 + Slice 6c-followup display and automation toggles for the landing-page task list. `showCompleted` reveals the completed bucket; `openTasksFirst` sorts incomplete above completed; `showCompletedTimestamp` renders the completed-at time next to each checked task; `hideTaskList` collapses the whole section on the landing page; `autoRolloverEnabled` gates the Slice 5 rollover trigger; `autoImportCompleted` gates the Slice 6c-followup auto-import of completed tasks into Key accomplishments.
+- `taskReminder`: Phase 3e OS-notification config for tasks with a due date. One global config — no per-task overrides. `daysBefore` fires the reminder N days before the due date (0 = day-of); `hour`/`minute` set the local time-of-day. `enabled` false disables all task reminders regardless of due-date state.
 
 ## App-level settings
 
@@ -349,7 +388,8 @@ Key fields:
 - `theme`: `"Light"` | `"Dark"` | `"Custom"` (default Dark)
 - `customTheme`: when `theme` is Custom, the 12 user-edited primaries that derive the full token set (see Phase 2.8 in ROADMAP.md). Survives a Dark/Light flip so the user can come back to Custom from the tray-menu escape hatch.
 - `journalRoot`: absolute path to the active journal directory.
-- `firstRunComplete`: bool — gates the onboarding wizard.
+
+There is no persisted `firstRunComplete` flag. The presence of `app-settings.json` on disk IS the first-run signal: `AppSettings::load()` returns `Ok(None)` when the file is missing, and the onboarding wizard runs on `None`. Once the wizard writes any settings, the file exists and subsequent launches skip it.
 
 ## Markdown flavor
 
