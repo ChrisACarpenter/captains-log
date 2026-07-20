@@ -166,11 +166,18 @@ Slightly tighter than the original RPG spec (which targets 1280×720 game canvas
 
 ### Loading the fonts
 
-Self-hosted directly out of `app/static/fonts/` with plain `@font-face` rules in `app.css`. WOFF2 files were copied from the [Fontsource](https://fontsource.org/) `@fontsource/paytone-one` and `@fontsource/abeezee` npm packages (latin-ext subset — English + European diacritics), then the packages were uninstalled once the assets landed. Licenses ship next to the files (`LICENSE-paytone-one.txt`, `LICENSE-abeezee.txt`) — both fonts are OFL.
+Self-hosted directly out of `app/static/fonts/` with plain `@font-face` rules in `app.css`. WOFF2 files were copied from the [Fontsource](https://fontsource.org/) `@fontsource/paytone-one` and `@fontsource/abeezee` npm packages, then the packages were uninstalled once the assets landed. Licenses ship next to the files (`LICENSE-paytone-one.txt`, `LICENSE-abeezee.txt`) — both fonts are OFL.
 
-The static-folder route is served verbatim by SvelteKit's adapter-static, so at runtime the browser fetches `tauri://localhost/fonts/paytone-one-latin-ext-400-normal.woff2` and equivalents. No code-split chunk, no async CSS registration — the `@font-face` rules resolve on the same synchronous CSS load as the rest of the design tokens.
+**Both Latin subsets, per face.** Two `@font-face` blocks per family:
 
-Why not `@fontsource/*` imports directly? Vite + adapter-static + Tauri put the resulting `@font-face` block into an async CSS chunk. The stylesheet applied its color and layout rules, but the WOFF2 URLs never resolved at the runtime asset layer — display type fell back to `system-ui` on the built .app. The static-folder approach dodges every step of that chain.
+- The **`latin`** subset carries A–Z, a–z, 0–9, common punctuation, and the Latin-1 Supplement block (most Western European accented characters). WOFF2s: `paytone-one-latin-400-normal.woff2`, `abeezee-latin-400-{normal,italic}.woff2`.
+- The **`latin-ext`** subset carries harder-to-reach diacritics (Ā, ē, ġ, etc.) and a few extra typographic marks. WOFF2s: `paytone-one-latin-ext-400-normal.woff2`, `abeezee-latin-ext-400-{normal,italic}.woff2`.
+
+Each `@font-face` block declares an explicit `unicode-range` so the browser knows which file supplies which glyph — the values match Google Fonts' canonical subset definitions. **Load-bearing:** an earlier iteration used the `latin-ext` subset alone; every basic-Latin character fell back to `system-ui` because the WOFF2 didn't contain those glyphs.
+
+The static-folder route is served verbatim by SvelteKit's adapter-static, so at runtime the browser fetches `tauri://localhost/fonts/*.woff2`. No code-split chunk, no async CSS registration — the `@font-face` rules resolve on the same synchronous CSS load as the rest of the design tokens.
+
+Why not `@fontsource/*` imports directly? Vite + adapter-static + Tauri put the resulting `@font-face` block into an async CSS chunk, and the WOFF2 URLs didn't resolve at the runtime asset layer inside Tauri's built .app — display type fell back to `system-ui`. The static-folder approach dodges every step of that chain.
 
 ## Iconography
 

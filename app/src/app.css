@@ -22,13 +22,45 @@
  * the SvelteKit static folder so the adapter-static build serves
  * them from a stable, absolute /fonts/ URL that doesn't participate
  * in code-splitting. No network fetch on first launch.
+ *
+ * IMPORTANT — both subsets. The `latin` subset covers A–Z, a–z,
+ * 0–9, common punctuation, and the Latin-1 Supplement block that
+ * carries most Western European accented characters. The `latin-ext`
+ * subset carries the harder-to-reach diacritics (Ā, ē, ġ, etc.) and
+ * a few extra typographic marks. Loading only `latin-ext` produces
+ * a font with basic Latin glyphs missing — the browser silently
+ * falls back to `system-ui` for A–Z. Every face below needs both
+ * subsets with unicode-range hints so the browser picks the right
+ * file per glyph. The unicode-range values match Google Fonts'
+ * canonical subset definitions.
  * See STYLE-GUIDE.md Typography → "Loading the fonts". */
+
+/* Paytone One 400 — display */
+@font-face {
+  font-family: 'Paytone One';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/paytone-one-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 @font-face {
   font-family: 'Paytone One';
   font-style: normal;
   font-weight: 400;
   font-display: swap;
   src: url('/fonts/paytone-one-latin-ext-400-normal.woff2') format('woff2');
+  unicode-range: U+0100-024F, U+0259, U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20CF, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ABeeZee 400 upright — body */
+@font-face {
+  font-family: 'ABeeZee';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/abeezee-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
   font-family: 'ABeeZee';
@@ -36,6 +68,17 @@
   font-weight: 400;
   font-display: swap;
   src: url('/fonts/abeezee-latin-ext-400-normal.woff2') format('woff2');
+  unicode-range: U+0100-024F, U+0259, U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20CF, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ABeeZee 400 italic — body emphasis */
+@font-face {
+  font-family: 'ABeeZee';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/abeezee-latin-400-italic.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 @font-face {
   font-family: 'ABeeZee';
@@ -43,6 +86,7 @@
   font-weight: 400;
   font-display: swap;
   src: url('/fonts/abeezee-latin-ext-400-italic.woff2') format('woff2');
+  unicode-range: U+0100-024F, U+0259, U+1E00-1EFF, U+2020, U+20A0-20AB, U+20AD-20CF, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 /* ---------- Dark theme (default) ---------- */
