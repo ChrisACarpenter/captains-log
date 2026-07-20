@@ -1532,7 +1532,7 @@
   .main-actions {
     margin-top: var(--space-6);
     display: flex;
-    justify-content: flex-end;
+    justify-content: center;
     gap: var(--space-3);
   }
 
