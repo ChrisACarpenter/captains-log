@@ -166,16 +166,11 @@ Slightly tighter than the original RPG spec (which targets 1280×720 game canvas
 
 ### Loading the fonts
 
-Self-hosted via [Fontsource](https://fontsource.org/) npm packages. Bundled at build time so a first launch without network still renders display type correctly — a requirement for a local-first Tauri app.
+Self-hosted directly out of `app/static/fonts/` with plain `@font-face` rules in `app.css`. WOFF2 files were copied from the [Fontsource](https://fontsource.org/) `@fontsource/paytone-one` and `@fontsource/abeezee` npm packages (latin-ext subset — English + European diacritics), then the packages were uninstalled once the assets landed. Licenses ship next to the files (`LICENSE-paytone-one.txt`, `LICENSE-abeezee.txt`) — both fonts are OFL.
 
-```ts
-// app/src/routes/+layout.svelte
-import '@fontsource/paytone-one/latin-ext-400.css';
-import '@fontsource/abeezee/latin-ext-400.css';
-import '@fontsource/abeezee/latin-ext-400-italic.css';
-```
+The static-folder route is served verbatim by SvelteKit's adapter-static, so at runtime the browser fetches `tauri://localhost/fonts/paytone-one-latin-ext-400-normal.woff2` and equivalents. No code-split chunk, no async CSS registration — the `@font-face` rules resolve on the same synchronous CSS load as the rest of the design tokens.
 
-Latin-ext subset (Vietnamese excluded) covers English, Portuguese, French, Spanish, German, and other European diacritics that show up in user prose. Both fonts are OFL — redistribution is fine, and Fontsource pins compatible versions of the upstream Google Font sources.
+Why not `@fontsource/*` imports directly? Vite + adapter-static + Tauri put the resulting `@font-face` block into an async CSS chunk. The stylesheet applied its color and layout rules, but the WOFF2 URLs never resolved at the runtime asset layer — display type fell back to `system-ui` on the built .app. The static-folder approach dodges every step of that chain.
 
 ## Iconography
 
