@@ -16,7 +16,7 @@ Captain's Log fixes this by capturing work as it happens, organized weekly, in a
 
 ## 🚀 Quick Start
 
-1. Grab the latest `.dmg` from [Releases](https://github.com/ChrisACarpenter/captains-log/releases) and drop **Captain's Log** into `/Applications`.
+1. Grab the latest `.dmg` from [Releases](https://github.com/SMARTeacher/captains-log/releases) and drop **Captain's Log** into `/Applications`.
 2. Launch it — the first-run wizard picks your journal folder and reminder preferences.
 3. Click the book icon in your menu bar (or open the main window) to capture your first Note.
 4. On Friday, hit **Write Weekly Summary**. On review day, hit **Prep Self Review**.

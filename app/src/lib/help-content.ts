@@ -190,4 +190,4 @@ export const NERDS_HTML = `<p>Captain's Log is a homebrew, single-developer proj
 </ul>
 
 <h3>Source</h3>
-<p>Repo at <a href="https://github.com/ChrisACarpenter/captains-log" target="_blank" rel="noopener">github.com/ChrisACarpenter/captains-log</a>. Bug reports welcome; PRs accepted from anyone who wants to contribute.</p>`;
+<p>Repo at <a href="https://github.com/SMARTeacher/captains-log" target="_blank" rel="noopener">github.com/SMARTeacher/captains-log</a>. Bug reports welcome; PRs accepted from anyone who wants to contribute.</p>`;

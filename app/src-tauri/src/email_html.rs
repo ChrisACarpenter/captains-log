@@ -541,7 +541,7 @@ mod tests {
                             | Bugs filed | 6 | 3 |\n\
                             | PRs reviewed | 4 | 2 |\n\
                             \n\
-                            See the [Captain's Log repo](https://github.com/ChrisACarpenter/captains-log) for the running log."
+                            See the [Captain's Log repo](https://github.com/SMARTeacher/captains-log) for the running log."
                 .to_string(),
             labels: vec!["mage".into(), "qa".into(), "localization".into()],
             last_updated: None,

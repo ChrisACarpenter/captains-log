@@ -50,7 +50,7 @@ pub const EML_TEMP_SUBDIR: &str = "captainslog";
 /// implicitly attributes the cadence to a real tool, not a one-off email).
 /// Kept as a constant so a future fork / rename is one edit.
 pub(crate) const CAPTAINS_LOG_REPO_URL: &str =
-    "https://github.com/ChrisACarpenter/captains-log";
+    "https://github.com/SMARTeacher/captains-log";
 
 #[derive(Debug, Error)]
 pub enum EmailError {
@@ -1181,7 +1181,7 @@ mod tests {
         assert!(url.contains("sent%20through%20Captain%27s%20Log"));
         // Repo URL — ':' is %3A, '/' is %2F.
         assert!(
-            url.contains("https%3A%2F%2Fgithub.com%2FChrisACarpenter%2Fcaptains-log"),
+            url.contains("https%3A%2F%2Fgithub.com%2FSMARTeacher%2Fcaptains-log"),
             "expected encoded repo URL in body, url={url}"
         );
     }
@@ -1370,7 +1370,7 @@ mod tests {
     #[test]
     fn quoted_printable_lines_under_76_chars() {
         // Long URL + long prose forces QP to insert soft line breaks.
-        let long = "https://github.com/ChrisACarpenter/captains-log/blob/main/whatever-this-is-a-very-long-pathname-to-force-qp-wrapping.md ".repeat(5);
+        let long = "https://github.com/SMARTeacher/captains-log/blob/main/whatever-this-is-a-very-long-pathname-to-force-qp-wrapping.md ".repeat(5);
         let s = summary(&long, "more very long content ".repeat(20).as_str(), "", "", &[]);
         let mut p = params(&s, "Week of X", "boss@example.com");
         p.format = BodyFormat::Html;

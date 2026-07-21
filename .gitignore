@@ -27,3 +27,10 @@ Cargo.lock.user
 # Local journal data, in case the user ever points the journal root inside the repo for testing
 test-journals/
 .test-data/
+
+# Local-only working docs. ROADMAP.md is Chris's phase-by-phase working
+# record (a lot of it reads as personal notes-to-self); DEVELOPMENT-JOURNAL.md
+# is the raw session-by-session log. Both live on disk for the author's
+# own reference but aren't meant to travel with the public repo.
+/ROADMAP.md
+/DEVELOPMENT-JOURNAL.md
