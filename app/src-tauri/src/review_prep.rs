@@ -242,14 +242,21 @@ well-organized starting point so I can write the review myself.\n\n",
         "{step}. **Fetch any linked documents.** Some sections below reference external URLs \
 (Google Docs, Confluence pages, Jira tickets, spreadsheets, etc.). If you have connectors that \
 can access them, please read those materials. If you don't have access, ask me to enable the \
-appropriate connector — or I can paste the content directly into our conversation.\n\n",
+appropriate connector — or I can paste the content directly into our conversation. Some sources \
+may be large — a multi-tab OKR sheet, a Jira board, a long Confluence page. Don't ingest a whole \
+source; pull only what's relevant: the objectives for my team and period, tickets tied to my \
+work within {}–{}, and passages that map to my review questions. If a single fetch is still too \
+large, retrieve it in narrower slices.\n\n",
+        input.start_date, input.end_date,
     ));
     step += 1;
 
     if trimmed(&input.review_questions).is_some() {
         out.push_str(&format!(
             "{step}. **Understand the review questions.** Read the *Performance review questions* \
-section carefully. These are the questions I need to answer.\n\n",
+section carefully. These are the questions I need to answer. If any question refers to a \
+document not included here — a development plan, competency framework, prior goals, or feedback \
+notes — flag it NOW; don't wait until after you've drafted.\n\n",
         ));
         step += 1;
     }
@@ -293,32 +300,80 @@ surface, include the ticket key + link in the bullet.\n\n",
     }
 
     out.push_str(&format!(
-        "{step}. **Read through my journal entries.** They cover the review period. Weekly \
+        "{step}. **Read through my journal entries.** They cover the weeks I journaled within \
+the review period — see the Coverage line at the top of the Journal entries section. Weekly \
 Summaries are the curated version of each week; if Notes are included, they're the raw \
 material behind the summaries.\n\n",
     ));
     step += 1;
 
     out.push_str(&format!(
-        "{step}. **For each review question, produce point-form suggestions.** For every question:\n\
-   - List 3–8 concrete accomplishments, projects, or moments from the review period that \
-could be used to answer it.\n\
+        "{step}. **Confirm you can calibrate before you generate.** Take stock of the review \
+questions, OKRs, and any artifact the questions lean on — a development/growth plan, competency \
+framework, prior-cycle goals, or recorded manager feedback. If a question depends on material \
+not present in this document, STOP and ask me to paste or link it before generating bullets \
+for it.\n\n",
+    ));
+    step += 1;
+
+    out.push_str(&format!(
+        "{step}. **For each review question, produce point-form suggestions.** First, scan every \
+question against my journal and call out (a) any question the entries support only thinly and \
+(b) any that reference material not in this document — for each, tell me what to paste or link. \
+Then, for EVERY question — including thinly-supported ones, using whatever partial evidence \
+exists rather than skipping them — do the following:\n\
+   - Lead each bullet with impact, not activity: state the outcome or change the work produced \
+— who/what it affected, and any metric recorded in the journal — not just the task. Let impact \
+also drive the ranking below.\n\
+   - Up to 3–8 bullets per question is a ceiling for well-supported questions, not a quota. \
+For thinly-supported questions, list what evidence you actually have — one honest bullet beats \
+five speculative ones.\n\
    - Each bullet should include:\n\
-     - A brief description of the work (1–2 sentences).\n\
+     - A brief description of the work (1–2 sentences), framed around impact/outcome; if my \
+journal doesn't record a result or metric, note that so I can fill it in.\n\
      - The week number(s) where the work is documented (e.g. \"See 2026-W12\").\n\
-     - A Jira ticket link where you can identify one from context.\n\
-   - Rank the bullets from most-compelling to least-compelling for that specific question.\n\n",
+     - A Jira ticket link ONLY when the key appears verbatim in my journal or a connector \
+actually returned that ticket. Never construct a key from the project prefix (e.g. don't guess \
+\"MAGE-1234\") — omit the link instead.\n\
+   - Rank the bullets from most-compelling to least-compelling for that specific question, \
+using impact as the primary ranking signal.\n\
+   - Distinguish plans from delivered work: \"Plans and priorities for next week\" subsections \
+are intentions recorded before the work happened. Don't present a stated plan as completed \
+unless corroborated elsewhere (a later week's Key accomplishments, a Jira ticket, or an OKR); \
+otherwise label it planned/in-flight and cite the week stated.\n\
+   - If my journal gives conflicting or evolving accounts of the same work — a win later \
+reversed, a metric that moves — surface the discrepancy and cite every relevant week, not just \
+the most flattering. Don't decide which version is \"real\"; an earlier ship and a later \
+regression are usually both true.\n\
+   - If one accomplishment answers more than one question, surface it under each — but on \
+repeats, compress to one line, add a cross-reference, and state the different angle rather \
+than repeating the earlier text.\n\n",
     ));
     step += 1;
 
     out.push_str("**Do not write draft answers.** I want a scaffold, not a script. The value \
 is in the point-form suggestions I can turn into my own words.\n\n");
 
+    out.push_str(
+        "**Cite only what is in the material I gave you.** Every bullet must trace to a journal \
+week or to a document/ticket you actually read. Do not invent or estimate ticket keys, metrics, \
+percentages, figures, dates, or outcomes to make a bullet more compelling. If a number isn't \
+recorded, write \"(no metric recorded)\" — a truthful vague bullet beats a fabricated precise \
+one.\n\n",
+    );
+
     out.push_str(&format!(
-        "{step}. **Offer to proofread when I'm ready.** Once I've written my drafts, offer to \
-review them. Ground your feedback in the *Best-practice references* section below — clarity, \
-evidence, ownership language, calibration to the question, avoiding common self-review \
-pitfalls. Line-level rewrites are welcome, but keep the final wording mine.\n\n",
+        "{step}. **Offer to proofread when I'm ready.** Once I've written my drafts, work \
+through them one answer at a time:\n\
+   - Confirm each answer addresses the specific question it's under — flag verbatim reuse from \
+another answer that would read as filler.\n\
+   - **Verify each claim against the journal above.** Flag anything unsupported or overstated, \
+including claims of continuous coverage the entries don't back.\n\
+   - Push for concrete evidence and first-person ownership language over passive or hedged \
+phrasing.\n\
+   - Tighten clarity where the draft gets tangled.\n\
+   Line-level rewrites are welcome, but keep the final wording mine — and never introduce an \
+accomplishment or claim I didn't already write.\n\n",
     ));
 }
 
@@ -423,8 +478,17 @@ Otherwise proceed without it.\n\n",
 fn write_best_practice_references(out: &mut String) {
     out.push_str("## Best-practice references for proofreading\n\n");
     out.push_str(
-        "When you move from the surfacing pass into the proofreading pass, ground your \
-feedback in these sources:\n\n",
+        "When you move from the surfacing pass into the proofreading pass, watch for these \
+recurring self-review pitfalls:\n\n\
+- **Activities-not-impact** — a bullet that describes what was done but not what changed.\n\
+- **Vague or unquantified claims** — \"improved reliability\" with no number, no scope, no \
+comparison point.\n\
+- **Passive or hedged ownership** — \"was involved in,\" \"helped with,\" \"contributed to\" \
+where the journal shows real ownership.\n\
+- **False modesty** — a real win understated so much the reviewer can't tell it happened.\n\
+- **Recency bias** — the last month over-represented because it's freshest in memory, older \
+work under-cited.\n\n\
+The links below expand on these:\n\n",
     );
     for (url, title) in BEST_PRACTICE_URLS {
         out.push_str(&format!("- [{}]({})\n", title, url));
@@ -441,6 +505,25 @@ date range covers weeks they actually journaled.\n\n",
         );
         return;
     }
+
+    // Coverage line — deterministic gap-truth up front so the LLM
+    // can't mistake elided empty weeks (see the `else { continue }`
+    // below) for continuous coverage. Journaled weeks are listed
+    // explicitly; blank weeks are counted rather than enumerated so
+    // long sparse ranges don't produce a wall of week labels.
+    let total = weeks.len();
+    let journaled_labels: Vec<String> = weeks
+        .iter()
+        .filter(|w| w.content.is_some())
+        .map(|w| format!("{:04}-W{:02}", w.year, w.week))
+        .collect();
+    let blank_count = total - journaled_labels.len();
+    out.push_str(&format!(
+        "**Coverage:** {total} weeks in the review period. Journaled: {}. No entry on disk: \
+{blank_count}. A missing week means nothing was journaled that week — not necessarily that no \
+work happened; ask me if a gap matters.\n\n",
+        journaled_labels.join(", "),
+    ));
 
     for week in weeks {
         let Some(content) = &week.content else { continue };
@@ -963,5 +1046,200 @@ Also fixed a WebKit rendering bug.
         let doc = assemble_review_prep_doc(&input, &[]);
         assert!(!doc.contains("Prepared for"));
         assert!(!doc.contains("makes for a good"));
+    }
+
+    // ---------------------------------------------------------------
+    // Prompt-sharpening pass (2026-07-21) — every load-bearing edit
+    // in the LLM instructions has a test so a future refactor can't
+    // silently drop the guardrail.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn pre_generation_checkpoint_always_present() {
+        // Even with every optional field empty, the calibration STOP-
+        // and-ask step must still render. It's the load-bearing gate
+        // that catches "question refers to a doc we didn't include".
+        let input = ReviewPrepInput {
+            user_name: None,
+            user_email: None,
+            job_title: None,
+            manager_name: None,
+            manager_email: None,
+            jira_project_keys: vec![],
+            start_date: "2026-01-06".into(),
+            end_date: "2026-07-05".into(),
+            review_questions: None,
+            okrs: None,
+            career_dev_plan: None,
+            include_notes: false,
+            today_iso: None,
+        };
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Confirm you can calibrate before you generate"));
+        assert!(doc.contains("STOP and ask me to paste or link it"));
+    }
+
+    #[test]
+    fn step_2_flags_referenced_but_absent_material() {
+        // When review questions are provided, the step-2 instruction
+        // must include the "flag it NOW" appendix pushing the LLM to
+        // surface missing-artifact dependencies up front.
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("flag it NOW"));
+        assert!(doc.contains("don't wait until after you've drafted"));
+    }
+
+    #[test]
+    fn selective_extraction_hint_present_and_interpolates_date_range() {
+        // Step 1 must advise pulling only relevant slices from large
+        // sources, and must interpolate the actual review-period
+        // range so the LLM has a concrete filter.
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Don't ingest a whole source"));
+        assert!(doc.contains("2026-01-06"));
+        assert!(doc.contains("2026-07-05"));
+        assert!(doc.contains("narrower slices"));
+    }
+
+    #[test]
+    fn anti_fabrication_clause_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Cite only what is in the material I gave you"));
+        assert!(doc.contains("Do not invent or estimate"));
+        assert!(doc.contains("(no metric recorded)"));
+    }
+
+    #[test]
+    fn answerability_guard_and_ceiling_not_quota_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("scan every question against my journal"));
+        assert!(doc.contains("thinly-supported"));
+        assert!(doc.contains("ceiling for well-supported questions, not a quota"));
+    }
+
+    #[test]
+    fn impact_lead_directive_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Lead each bullet with impact, not activity"));
+        assert!(doc.contains("framed around impact/outcome"));
+        assert!(doc.contains("using impact as the primary ranking signal"));
+    }
+
+    #[test]
+    fn plans_vs_delivered_and_contradictions_rules_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Distinguish plans from delivered work"));
+        assert!(doc.contains("Plans and priorities"));
+        assert!(doc.contains("conflicting or evolving accounts"));
+        assert!(doc.contains("surface the discrepancy"));
+    }
+
+    #[test]
+    fn cross_question_dedupe_rule_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("If one accomplishment answers more than one question"));
+        assert!(doc.contains("compress to one line"));
+        assert!(doc.contains("cross-reference"));
+    }
+
+    #[test]
+    fn jira_key_verbatim_rule_replaces_context_guessing() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("A Jira ticket link ONLY when the key appears verbatim"));
+        assert!(doc.contains("don't guess"));
+        assert!(doc.contains("omit the link instead"));
+        // The pre-critique phrasing licensed guessing from context —
+        // make sure it's gone from the bullet spec.
+        assert!(
+            !doc.contains("A Jira ticket link where you can identify one from context"),
+            "old context-guessing phrasing must be removed"
+        );
+    }
+
+    #[test]
+    fn proofread_step_verifies_claims_against_journal() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("Verify each claim against the journal above"));
+        assert!(doc.contains("first-person ownership"));
+    }
+
+    #[test]
+    fn proofread_step_bounds_line_level_rewrites() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains(
+            "never introduce an accomplishment or claim I didn't already write"
+        ));
+    }
+
+    #[test]
+    fn pitfalls_list_precedes_reference_urls() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        // All five named pitfalls must render.
+        assert!(doc.contains("Activities-not-impact"));
+        assert!(doc.contains("Vague or unquantified claims"));
+        assert!(doc.contains("Passive or hedged ownership"));
+        assert!(doc.contains("False modesty"));
+        assert!(doc.contains("Recency bias"));
+        // The pitfalls block must sit above the reference URLs; find
+        // the first pitfall and the first reference URL and compare
+        // positions.
+        let pitfall_ix = doc.find("Activities-not-impact").unwrap();
+        let first_ref_ix = doc.find("The links below expand on these").unwrap();
+        assert!(pitfall_ix < first_ref_ix);
+    }
+
+    #[test]
+    fn coverage_line_lists_journaled_weeks_and_counts_blanks() {
+        // Mixed range: 2 journaled weeks, 1 blank in between.
+        let weeks = vec![
+            WeekContent {
+                year: 2026,
+                week: 10,
+                content: Some(
+                    "## Weekly Summary\n### Key accomplishments\nAlpha work.\n".into(),
+                ),
+            },
+            WeekContent {
+                year: 2026,
+                week: 11,
+                content: None,
+            },
+            WeekContent {
+                year: 2026,
+                week: 12,
+                content: Some(
+                    "## Weekly Summary\n### Key accomplishments\nBeta work.\n".into(),
+                ),
+            },
+        ];
+        let input = mk_input("2026-03-02", "2026-03-22");
+        let doc = assemble_review_prep_doc(&input, &weeks);
+        assert!(doc.contains("**Coverage:** 3 weeks in the review period"));
+        assert!(doc.contains("Journaled: 2026-W10, 2026-W12"));
+        assert!(doc.contains("No entry on disk: 1"));
+        assert!(doc.contains("ask me if a gap matters"));
+    }
+
+    #[test]
+    fn read_journal_step_no_longer_overclaims_continuous_coverage() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        // The old verbatim phrasing that misled the LLM must be gone.
+        assert!(
+            !doc.contains("They cover the review period. Weekly"),
+            "old overclaim wording must not remain in the read-journal step"
+        );
+        assert!(doc.contains("They cover the weeks I journaled within the review period"));
     }
 }
