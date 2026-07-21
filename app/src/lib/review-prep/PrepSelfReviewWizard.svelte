@@ -2,7 +2,7 @@
   Phase 5 — Prep Self Review wizard.
   =====================================================================
 
-  A Modal-hosted, five-step wizard that assembles a comprehensive
+  A Modal-hosted, six-step wizard that assembles a comprehensive
   markdown "review preparation" doc from the user's journal + a small
   amount of collected context (review period, questions, OKRs). The
   doc is intended to be handed off to an LLM (Claude or otherwise)
@@ -77,6 +77,7 @@
     endDate: string;
     reviewQuestions: string | null;
     okrs: string | null;
+    careerDevPlan: string | null;
     includeNotes: boolean;
     todayIso: string;
   };
@@ -118,7 +119,7 @@
     onSettingsChanged?: () => void;
   } = $props();
 
-  const TOTAL_STEPS = 5;
+  const TOTAL_STEPS = 6;
   let step = $state(1);
 
   // Wizard state. Flat $state fields (onboarding pattern) so each
@@ -134,6 +135,7 @@
   let endDate = $state('');
   let reviewQuestions = $state('');
   let okrs = $state('');
+  let careerDevPlan = $state('');
   let includeNotes = $state(false);
 
   // DatePickerPopover state (step 2). Two independent anchors — one
@@ -181,6 +183,7 @@
       || endDate !== ''
       || reviewQuestions !== ''
       || okrs !== ''
+      || careerDevPlan !== ''
       || includeNotes !== false
     );
   });
@@ -232,6 +235,7 @@
       endDate = '';
       reviewQuestions = '';
       okrs = '';
+      careerDevPlan = '';
       includeNotes = false;
     } catch (e) {
       loadError = `Couldn't load your settings: ${String(e)}. You can still fill out the form manually.`;
@@ -354,6 +358,7 @@
         endDate,
         reviewQuestions: reviewQuestions.trim() || null,
         okrs: okrs.trim() || null,
+        careerDevPlan: careerDevPlan.trim() || null,
         includeNotes,
         todayIso,
       };
@@ -419,6 +424,7 @@
     if (parseJiraKeys(jiraKeys).length === 0) items.push('your Jira project keys');
     if (!reviewQuestions.trim()) items.push('the review questions');
     if (!okrs.trim()) items.push('the OKRs');
+    if (!careerDevPlan.trim()) items.push('your career development plan');
     return items;
   });
 
@@ -566,7 +572,6 @@
           placeholder={'Paste the questions here, or a link like:\nhttps://docs.google.com/document/d/...'}
           bind:value={reviewQuestions}
           rows={8}
-          urlPaste
         />
         <TipBubble heading="Tip">
           Optional — but the LLM's output is only as focused as
@@ -586,7 +591,6 @@
           placeholder={'Paste the OKRs here, or a link like:\nhttps://prodigygame.atlassian.net/wiki/spaces/...'}
           bind:value={okrs}
           rows={8}
-          urlPaste
         />
         <TipBubble heading="Tip">
           Optional — skip this if you don't have team OKRs to point at.
@@ -596,6 +600,26 @@
       {/if}
 
       {#if step === 5}
+        <StepHeader
+          title="Career Development Plan"
+          level="h2"
+          lead="Growth goals, stretch skills, personal milestones — anything you're actively working toward. Paste text or drop in a link (BambooHR growth doc, a 1:1 tracker, a personal dev plan). Progress against these is often the most useful thread in a self-review."
+        />
+        <TextAreaField
+          id="prep-career-dev-plan"
+          label="Career development plan"
+          placeholder={'Paste your plan here, or a link like:\nhttps://prodigygame.bamboohr.com/... '}
+          bind:value={careerDevPlan}
+          rows={8}
+        />
+        <TipBubble heading="Tip">
+          Optional — but this is where a self-review usually earns its
+          keep. The LLM will cross-reference your journal against these
+          goals and surface evidence of progress (or gaps worth naming).
+        </TipBubble>
+      {/if}
+
+      {#if step === 6}
         <StepHeader
           title="Generate Your Review Prep"
           level="h2"

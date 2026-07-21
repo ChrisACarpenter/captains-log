@@ -51,6 +51,11 @@ pub struct ReviewPrepInput {
     /// user didn't provide review questions.
     pub review_questions: Option<String>,
     pub okrs: Option<String>,
+    /// Freeform: the user's career development plan — growth goals,
+    /// stretch skills, personal milestones. Same shape as `okrs` /
+    /// `review_questions` — prose, a URL, or both mixed. Feeds the
+    /// LLM's "progress toward development goals" cross-reference.
+    pub career_dev_plan: Option<String>,
     /// When true, the assembled doc includes the raw Weekly Notes
     /// section of each week (potentially a lot of text). When false,
     /// only the curated Weekly Summary subsections appear.
@@ -205,6 +210,9 @@ pub fn assemble_review_prep_doc(
     // ---- OKRs ----
     write_okrs(&mut out, input);
 
+    // ---- Career development plan ----
+    write_career_dev_plan(&mut out, input);
+
     // ---- Best-practice references ----
     write_best_practice_references(&mut out);
 
@@ -250,6 +258,16 @@ section carefully. These are the questions I need to answer.\n\n",
         out.push_str(&format!(
             "{step}. **Understand the OKRs.** Read the *Company or team OKRs* section — these \
 are the objectives my work is being evaluated against.\n\n",
+        ));
+        step += 1;
+    }
+
+    if trimmed(&input.career_dev_plan).is_some() {
+        out.push_str(&format!(
+            "{step}. **Understand my career development plan.** Read the *Career development plan* \
+section — these are the growth goals and stretch skills I've set for myself. When surfacing \
+material from my journal, flag entries that show progress (or a lack of it) against these \
+development goals — that thread is often the most useful part of a self-review.\n\n",
         ));
         step += 1;
     }
@@ -379,6 +397,24 @@ fn write_okrs(out: &mut String, input: &ReviewPrepInput) {
                 "> The user did not provide OKR context. If OKRs are important calibration for \
 this review, ask them to share the OKR document (paste it, or link a doc you can access via a \
 connector).\n\n",
+            );
+        }
+    }
+}
+
+fn write_career_dev_plan(out: &mut String, input: &ReviewPrepInput) {
+    out.push_str("## Career development plan\n\n");
+    match trimmed(&input.career_dev_plan) {
+        Some(v) => {
+            out.push_str(v);
+            out.push_str("\n\n");
+        }
+        None => {
+            out.push_str(
+                "> The user did not provide a career development plan. If they have one on file \
+(a BambooHR growth doc, a personal dev plan, a manager 1:1 tracker), ask them to share it or link \
+it — progress against development goals is often the most useful evidence in a self-review. \
+Otherwise proceed without it.\n\n",
             );
         }
     }
@@ -532,6 +568,9 @@ mod tests {
             end_date: end.into(),
             review_questions: Some("What did you ship this year?".into()),
             okrs: Some("Deliver Q3 initiatives on time.".into()),
+            career_dev_plan: Some(
+                "Grow into a senior QA role over the next 12 months.".into(),
+            ),
             include_notes: false,
             today_iso: Some("2026-07-16".into()),
         }
@@ -702,6 +741,31 @@ mod tests {
     }
 
     #[test]
+    fn assemble_instructions_omit_career_dev_step_when_missing() {
+        let mut input = mk_input("2026-01-06", "2026-07-05");
+        input.career_dev_plan = None;
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(!doc.contains("Understand my career development plan"));
+    }
+
+    #[test]
+    fn assemble_surfaces_missing_career_dev_plan_as_prompt_to_llm() {
+        let mut input = mk_input("2026-01-06", "2026-07-05");
+        input.career_dev_plan = None;
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("## Career development plan"));
+        assert!(doc.contains("The user did not provide a career development plan"));
+    }
+
+    #[test]
+    fn assemble_includes_career_dev_plan_when_present() {
+        let input = mk_input("2026-01-06", "2026-07-05");
+        let doc = assemble_review_prep_doc(&input, &[]);
+        assert!(doc.contains("## Career development plan"));
+        assert!(doc.contains("Grow into a senior QA role"));
+    }
+
+    #[test]
     fn assemble_includes_reviewer_profile_with_manager() {
         let input = mk_input("2026-01-06", "2026-07-05");
         let doc = assemble_review_prep_doc(&input, &[]);
@@ -723,6 +787,7 @@ mod tests {
             end_date: "2026-07-05".into(),
             review_questions: None,
             okrs: None,
+            career_dev_plan: None,
             include_notes: false,
             today_iso: None,
         };

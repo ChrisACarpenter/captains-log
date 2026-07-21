@@ -33,7 +33,7 @@ When the index and the in-file header disagree, **trust the header**. Open an is
 | [SendToManagerButton](#sendtomanagerbutton) | Feature | Send-to-Manager button + confirmation modal + sent-status display for sharing weekly summaries to the default mail client |
 | [TaskMetaChip](#taskmetachip) | Feature | Pill chip for task-row metadata — provenance (origin), completed-at time (time), due date (due), or maroon overdue-due variant |
 | [TaskRowActionButton](#taskrowactionbutton) | Feature | Inline pencil/trash/calendar action button on task rows, with variant-driven hover tint and bindable button element for popover anchoring |
-| [PrepSelfReviewWizard](#prepselfreviewwizard) | Feature | Modal-hosted five-step wizard that assembles a review-prep markdown doc from journal notes plus per-run context (period, questions, OKRs) |
+| [PrepSelfReviewWizard](#prepselfreviewwizard) | Feature | Modal-hosted six-step wizard that assembles a review-prep markdown doc from journal notes plus per-run context (period, questions, OKRs, career development plan) |
 | [StepHeader](#stepheader) | Onboarding | Renders a shared header block (with heading and optional lead text) for onboarding step pages |
 | [Wizard](#wizard) | Onboarding | First-run onboarding wizard with five-step flow for capturing user info, manager details, and journal settings |
 | [WizardFrame](#wizardframe) | Onboarding | Renders the visual chrome (card frame, Ed character, progress dots) shared across every onboarding wizard step |
@@ -958,7 +958,7 @@ Rest state is muted (opacity 0.55, no border) so a row full of chrome doesn't do
 
 **Source:** [`PrepSelfReviewWizard.svelte`](app/src/lib/review-prep/PrepSelfReviewWizard.svelte)
 
-Modal-hosted five-step wizard that assembles a review-prep markdown doc from the user's journal plus a small amount of collected context (review period, questions, OKRs). The generated doc is intended to be handed off to an LLM with a "look at this and do what it says" prompt.
+Modal-hosted six-step wizard that assembles a review-prep markdown doc from the user's journal plus a small amount of collected context (review period, questions, OKRs, career development plan). The generated doc is intended to be handed off to an LLM with a "look at this and do what it says" prompt.
 
 **When to use.** Use this for Phase 5's self-review prep flow — the wizard opens from the landing page (and can be triggered from other routes) whenever the user wants to bundle up their journal notes and per-run context into a shareable markdown brief. Landing owns visibility via the `open` prop; on close the wizard drops its state entirely.
 
